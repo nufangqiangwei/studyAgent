@@ -58,11 +58,102 @@ type Env struct {
 
 type envContextKey struct{}
 
+// Clone returns a shallow copy of the environment.
+func (e Env) Clone() Env {
+	return e
+}
+
+// WithIO returns an environment copy with IO replaced.
+func (e Env) WithIO(io IO) Env {
+	e.IO = io
+	return e
+}
+
+// WithAgent returns an environment copy with Agent replaced.
+func (e Env) WithAgent(agent AgentRunner) Env {
+	e.Agent = agent
+	return e
+}
+
+// WithRegistry returns an environment copy with Registry replaced.
+func (e Env) WithRegistry(registry CommandRegistry) Env {
+	e.Registry = registry
+	return e
+}
+
+// WithLogger returns an environment copy with Logger replaced.
+func (e Env) WithLogger(logger Logger) Env {
+	e.Logger = logger
+	return e
+}
+
+// WithConfig returns an environment copy with Config replaced.
+func (e Env) WithConfig(config Config) Env {
+	e.Config = config
+	return e
+}
+
+// WithConfigUpdate returns an environment copy with a partial Config update.
+func (e Env) WithConfigUpdate(update func(*Config)) Env {
+	if update != nil {
+		update(&e.Config)
+	}
+	return e
+}
+
+// WithRunModel returns an environment copy with RunModel replaced.
+func (e Env) WithRunModel(runModel string) Env {
+	e.RunModel = runModel
+	return e
+}
+
+// WithUpdate returns an environment copy with a partial Env update.
+func (e Env) WithUpdate(update func(*Env)) Env {
+	if update != nil {
+		update(&e)
+	}
+	return e
+}
+
+// Update applies a partial update to the existing environment.
+func (e *Env) Update(update func(*Env)) {
+	if e == nil || update == nil {
+		return
+	}
+	update(e)
+}
+
+// UpdateConfig applies a partial Config update to the existing environment.
+func (e *Env) UpdateConfig(update func(*Config)) {
+	if e == nil || update == nil {
+		return
+	}
+	update(&e.Config)
+}
+
 func WithEnv(ctx context.Context, env *Env) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	return context.WithValue(ctx, envContextKey{}, env)
+}
+
+// WithUpdatedEnv copies the current context Env, applies a local update, and
+// returns a child context bound to that copy.
+func WithUpdatedEnv(ctx context.Context, update func(*Env)) (context.Context, *Env) {
+	var next Env
+	if env, ok := EnvFromContext(ctx); ok {
+		next = env.Clone()
+	}
+	next.Update(update)
+	return WithEnv(ctx, &next), &next
+}
+
+// WithUpdatedConfig copies the current context Env and applies a local Config update.
+func WithUpdatedConfig(ctx context.Context, update func(*Config)) (context.Context, *Env) {
+	return WithUpdatedEnv(ctx, func(env *Env) {
+		env.UpdateConfig(update)
+	})
 }
 
 func EnvFromContext(ctx context.Context) (*Env, bool) {

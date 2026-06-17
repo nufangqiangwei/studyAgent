@@ -43,7 +43,7 @@ func (r *Registry) Execute(ctx context.Context, name string, env content.Env, ar
 	if !ok {
 		return fmt.Errorf("unknown command %q", name)
 	}
-	env.Registry = r
+	env = env.WithRegistry(r)
 	ctx = content.WithEnv(ctx, &env)
 	return cmd.Execute(ctx, env, args)
 }
