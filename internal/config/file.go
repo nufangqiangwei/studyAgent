@@ -10,9 +10,10 @@ import (
 )
 
 type File struct {
-	ModelURL  string `json:"model_url"`
-	ModelName string `json:"model_name"`
-	APIKey    string `json:"api_key"`
+	ModelURL   string `json:"model_url"`
+	ModelName  string `json:"model_name"`
+	APIKey     string `json:"api_key"`
+	PolicyMode string `json:"policy_mode"`
 }
 
 func LoadOptional(path string) (File, bool, error) {
@@ -43,6 +44,7 @@ func Load(path string) (File, error) {
 	cfg.ModelURL = strings.TrimSpace(cfg.ModelURL)
 	cfg.ModelName = strings.TrimSpace(cfg.ModelName)
 	cfg.APIKey = strings.TrimSpace(cfg.APIKey)
+	cfg.PolicyMode = strings.TrimSpace(cfg.PolicyMode)
 
 	return cfg, nil
 }

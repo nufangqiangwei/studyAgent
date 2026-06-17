@@ -17,7 +17,7 @@ type ToolsTesterAgent struct {
 }
 
 func NewToolsTesterAgent(ctx context.Context, opts CreatAgentOptions) (Agent, error) {
-	toolRegistry, err := tools.NewDefaultRegistry()
+	toolRegistry, err := tools.NewDefaultRegistry(tools.WithPolicy(opts.Policy))
 	if err != nil {
 		return nil, fmt.Errorf("tools tester agent: register default tools: %w", err)
 	}

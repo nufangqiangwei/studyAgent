@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"agent/internal/policy"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -22,7 +23,8 @@ type Result struct {
 }
 
 type Registry struct {
-	tools map[string]Tool
+	tools  map[string]Tool
+	policy policy.Checker
 }
 
 var (
@@ -30,12 +32,31 @@ var (
 	currentRegistry   = mustNewDefaultRegistry()
 )
 
-func NewRegistry() *Registry {
-	return &Registry{tools: make(map[string]Tool)}
+type RegistryOption func(*Registry)
+
+func WithPolicy(checker policy.Checker) RegistryOption {
+	return func(registry *Registry) {
+		if checker != nil {
+			registry.policy = checker
+		}
+	}
 }
 
-func NewDefaultRegistry() (*Registry, error) {
-	registry := NewRegistry()
+func NewRegistry(options ...RegistryOption) *Registry {
+	registry := &Registry{
+		tools:  make(map[string]Tool),
+		policy: policy.Default(),
+	}
+	for _, option := range options {
+		if option != nil {
+			option(registry)
+		}
+	}
+	return registry
+}
+
+func NewDefaultRegistry(options ...RegistryOption) (*Registry, error) {
+	registry := NewRegistry(options...)
 	if err := RegisterDefaults(registry); err != nil {
 		return nil, err
 	}
@@ -111,6 +132,27 @@ func (r *Registry) Execute(ctx context.Context, name string, input json.RawMessa
 	tool, ok := r.tools[name]
 	if !ok {
 		return Result{}, fmt.Errorf("unknown tool %q", name)
+	}
+	request := policyRequestForToolCall(name, input)
+	checker := r.policy
+	if checker == nil {
+		checker = policy.Default()
+	}
+	decision := checker.Check(request)
+	switch decision.Decision {
+	case policy.Allow:
+	case policy.Ask:
+		confirmed, err := confirmPolicyDecision(ctx, request, decision)
+		if err != nil {
+			return Result{}, fmt.Errorf("policy confirmation for tool %q: %w", name, err)
+		}
+		if !confirmed {
+			return Result{}, fmt.Errorf("policy denied tool %q: user declined confirmation: %s", name, decision.Reason)
+		}
+	case policy.Deny:
+		return Result{}, fmt.Errorf("policy denied tool %q: %s", name, decision.Reason)
+	default:
+		return Result{}, fmt.Errorf("policy returned unknown decision %q for tool %q", decision.Decision, name)
 	}
 	return tool.Execute(ctx, input)
 }

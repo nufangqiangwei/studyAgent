@@ -55,6 +55,7 @@ func TestStatusCommandPrintsConfig(t *testing.T) {
 			ModelURL:         "https://example.test/v1",
 			APIKeyConfigured: true,
 			WorkDir:          "C:\\Code\\GO\\agent",
+			PolicyMode:       "validate",
 		},
 	}
 
@@ -70,6 +71,7 @@ func TestStatusCommandPrintsConfig(t *testing.T) {
 		"Model: gpt-test",
 		"Model URL: https://example.test/v1",
 		"API key configured: true",
+		"Policy mode: validate",
 		"Workspace: C:\\Code\\GO\\agent",
 	} {
 		if !strings.Contains(got, want) {

@@ -19,6 +19,7 @@ type Config struct {
 	AgentName        string
 	WorkDir          string
 	Debug            bool
+	PolicyMode       string
 }
 
 type AgentRunner interface {

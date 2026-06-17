@@ -11,7 +11,8 @@ func TestLoadConfigFile(t *testing.T) {
 	err := os.WriteFile(path, []byte(`{
   "model_url": " https://example.test/v1/chat/completions ",
   "model_name": " test-model ",
-  "api_key": " secret "
+  "api_key": " secret ",
+  "policy_mode": " validate "
 }`), 0600)
 	if err != nil {
 		t.Fatalf("write config: %v", err)
@@ -29,6 +30,9 @@ func TestLoadConfigFile(t *testing.T) {
 	}
 	if cfg.APIKey != "secret" {
 		t.Fatalf("APIKey = %q", cfg.APIKey)
+	}
+	if cfg.PolicyMode != "validate" {
+		t.Fatalf("PolicyMode = %q", cfg.PolicyMode)
 	}
 }
 

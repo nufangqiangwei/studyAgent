@@ -80,6 +80,7 @@ func (helpCommand) Execute(_ context.Context, env content.Env, _ []string) error
 	fmt.Fprintln(env.IO.Out, "  --model string      llm model name, default: mock-native")
 	fmt.Fprintln(env.IO.Out, "  --workdir string    workspace directory, default: current directory")
 	fmt.Fprintln(env.IO.Out, "  --log-level string  debug, info, warn, error, silent")
+	fmt.Fprintln(env.IO.Out, "  --policy-mode string tool permission mode: read, validate, modify; default: read")
 	fmt.Fprintln(env.IO.Out, "  --debug             write llm request and response bodies to session llm.jsonl")
 	fmt.Fprintln(env.IO.Out, "  --help, -h          show help")
 	fmt.Fprintln(env.IO.Out, "  --version, -v       show version")
@@ -131,6 +132,9 @@ func (statusCommand) Execute(_ context.Context, env content.Env, _ []string) err
 		return err
 	}
 	if _, err := fmt.Fprintf(env.IO.Out, "Debug: %t\n", env.Config.Debug); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(env.IO.Out, "Policy mode: %s\n", env.Config.PolicyMode); err != nil {
 		return err
 	}
 	_, err := fmt.Fprintf(env.IO.Out, "Workspace: %s\n", env.Config.WorkDir)

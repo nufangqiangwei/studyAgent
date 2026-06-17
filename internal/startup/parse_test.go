@@ -13,10 +13,13 @@ func TestParseDefaultsToCLI(t *testing.T) {
 	if cfg.Provider != "mock" {
 		t.Fatalf("Provider = %q, want mock", cfg.Provider)
 	}
+	if cfg.PolicyMode != "read" {
+		t.Fatalf("PolicyMode = %q, want read", cfg.PolicyMode)
+	}
 }
 
 func TestParseRunCommand(t *testing.T) {
-	cfg, err := Parse([]string{"--config=custom.json", "--provider=openai", "--model=gpt-test", "--debug", "run", "hello"})
+	cfg, err := Parse([]string{"--config=custom.json", "--provider=openai", "--model=gpt-test", "--policy-mode=modify", "--debug", "run", "hello"})
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
@@ -34,6 +37,12 @@ func TestParseRunCommand(t *testing.T) {
 	}
 	if cfg.Model != "gpt-test" {
 		t.Fatalf("Model = %q, want gpt-test", cfg.Model)
+	}
+	if cfg.PolicyMode != "modify" {
+		t.Fatalf("PolicyMode = %q, want modify", cfg.PolicyMode)
+	}
+	if !cfg.IsFlagSet("policy-mode") {
+		t.Fatal("policy-mode flag should be marked as set")
 	}
 	if !cfg.Debug {
 		t.Fatal("Debug = false, want true")

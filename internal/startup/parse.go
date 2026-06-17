@@ -17,6 +17,7 @@ type Config struct {
 	LogLevel    string
 	WorkDir     string
 	Debug       bool
+	PolicyMode  string
 
 	setFlags map[string]bool
 }
@@ -35,6 +36,7 @@ func Parse(args []string) (Config, error) {
 	logLevel := fs.String("log-level", "info", "log level: debug, info, warn, error, silent")
 	workDir := fs.String("workdir", "", "workspace directory")
 	debug := fs.Bool("debug", false, "write llm request and response bodies to session debug jsonl")
+	policyMode := fs.String("policy-mode", "read", "tool permission policy mode: read, validate, or modify")
 	help := fs.Bool("help", false, "show help")
 	version := fs.Bool("version", false, "show version")
 	fs.BoolVar(help, "h", false, "show help")
@@ -56,6 +58,7 @@ func Parse(args []string) (Config, error) {
 		LogLevel:   *logLevel,
 		WorkDir:    *workDir,
 		Debug:      *debug,
+		PolicyMode: *policyMode,
 		setFlags:   setFlags,
 	}
 

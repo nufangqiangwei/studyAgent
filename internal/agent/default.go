@@ -17,7 +17,7 @@ type DefaultAgent struct {
 }
 
 func NewDefaultAgent(ctx context.Context, opts CreatAgentOptions) (Agent, error) {
-	toolRegistry, err := tools.NewDefaultRegistry()
+	toolRegistry, err := tools.NewDefaultRegistry(tools.WithPolicy(opts.Policy))
 	if err != nil {
 		return nil, fmt.Errorf("default agent: register default tools: %w", err)
 	}

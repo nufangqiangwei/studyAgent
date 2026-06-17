@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"agent/internal/policy"
 	"agent/internal/session"
 	"agent/internal/tools"
 	"context"
@@ -18,6 +19,7 @@ type CreatAgentOptions struct {
 	In       systemIO.Reader
 	Out      systemIO.Writer
 	Session  session.Recorder
+	Policy   policy.Checker
 }
 
 type Agent interface {

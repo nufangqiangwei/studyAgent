@@ -14,6 +14,7 @@ import (
 	appconfig "agent/internal/config"
 	"agent/internal/llm/provider"
 	"agent/internal/logging"
+	"agent/internal/policy"
 	"agent/internal/session"
 	"agent/internal/startup"
 	"agent/internal/startupcmd"
@@ -44,6 +45,11 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer, errOut
 	if err != nil {
 		return err
 	}
+	policyMode, err := policy.ParseMode(cfg.PolicyMode)
+	if err != nil {
+		return err
+	}
+	cfg.PolicyMode = string(policyMode)
 
 	sessionDir, err := session.DefaultDir()
 	if err != nil {
@@ -86,6 +92,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer, errOut
 		In:       in,
 		Out:      out,
 		Session:  sessionStore,
+		Policy:   policy.New(policyMode),
 	})
 	if err != nil {
 		return err
@@ -114,6 +121,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer, errOut
 			AgentName:        agentSelector.ActiveAgentName(),
 			WorkDir:          workDir,
 			Debug:            cfg.Debug,
+			PolicyMode:       cfg.PolicyMode,
 		},
 		RunModel: runModel,
 	}
@@ -158,6 +166,9 @@ func applyFileConfig(cfg startup.Config) (startup.Config, error) {
 	cfg.APIKey = fileConfig.APIKey
 	if fileConfig.ModelName != "" && !cfg.IsFlagSet("model") {
 		cfg.Model = fileConfig.ModelName
+	}
+	if fileConfig.PolicyMode != "" && !cfg.IsFlagSet("policy-mode") {
+		cfg.PolicyMode = fileConfig.PolicyMode
 	}
 
 	return cfg, nil
