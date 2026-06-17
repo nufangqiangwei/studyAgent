@@ -35,6 +35,10 @@ func policyRequestForToolCall(name string, input json.RawMessage) policy.Request
 	case WriteFileToolName:
 		request.Risk = policy.RiskWrite
 		request.Path = inputStringField(input, "path")
+		request.DryRun = inputBoolField(input, "dry_run", true)
+		if request.DryRun {
+			request.Operation = "dry-run write"
+		}
 	case ApplyPatchToolName:
 		request = applyPatchPolicyRequest(input)
 	default:
@@ -51,6 +55,10 @@ func applyPatchPolicyRequest(input json.RawMessage) policy.Request {
 		ToolName:  ApplyPatchToolName,
 		Risk:      policy.RiskWrite,
 		Operation: ApplyPatchToolName,
+		DryRun:    inputBoolField(input, "dry_run", true),
+	}
+	if request.DryRun {
+		request.Operation = "dry-run patch"
 	}
 	var req applyPatchInput
 	if err := decodeWorkspaceToolInput(ApplyPatchToolName, input, &req); err != nil {
@@ -81,6 +89,22 @@ func applyPatchPolicyRequest(input json.RawMessage) policy.Request {
 		request.Operation = "high-risk write"
 	}
 	return request
+}
+
+func inputBoolField(input json.RawMessage, field string, fallback bool) bool {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(input, &raw); err != nil {
+		return fallback
+	}
+	value, ok := raw[field]
+	if !ok {
+		return fallback
+	}
+	var parsed bool
+	if err := json.Unmarshal(value, &parsed); err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 func inputStringField(input json.RawMessage, field string) string {

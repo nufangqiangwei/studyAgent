@@ -10,6 +10,11 @@ func TestReadOnlyModeAllowsOnlyReadTools(t *testing.T) {
 		t.Fatalf("read_file decision = %q, want allow: %s", allowed.Decision, allowed.Reason)
 	}
 
+	dryRunWrite := checker.Check(Request{ToolName: "write_file", Risk: RiskWrite, Path: "main.go", DryRun: true})
+	if dryRunWrite.Decision != Allow {
+		t.Fatalf("write_file dry-run decision = %q, want allow: %s", dryRunWrite.Decision, dryRunWrite.Reason)
+	}
+
 	for _, req := range []Request{
 		{ToolName: "write_file", Risk: RiskWrite, Path: "main.go"},
 		{ToolName: "apply_patch", Risk: RiskWrite, Path: "main.go"},
@@ -26,6 +31,11 @@ func TestReadOnlyModeAllowsOnlyReadTools(t *testing.T) {
 
 func TestValidateModeAllowsLimitedVerificationCommands(t *testing.T) {
 	checker := New(ModeValidate)
+
+	dryRunPatch := checker.Check(Request{ToolName: "apply_patch", Risk: RiskWrite, Path: "main.go", DryRun: true})
+	if dryRunPatch.Decision != Allow {
+		t.Fatalf("apply_patch dry-run decision = %q, want allow: %s", dryRunPatch.Decision, dryRunPatch.Reason)
+	}
 
 	for _, command := range [][]string{
 		{"go", "test", "./..."},
@@ -57,6 +67,7 @@ func TestModifyModeAllowsPatchesAndAsksForHighRisk(t *testing.T) {
 
 	for _, req := range []Request{
 		{ToolName: "apply_patch", Risk: RiskWrite, Path: "internal/app/app.go"},
+		{ToolName: "write_file", Risk: RiskWrite, Path: "docs/report.md"},
 		{ToolName: "run_tests", Risk: RiskExec, Command: []string{"go", "test", "./..."}},
 		{ToolName: "git_diff", Risk: RiskRead},
 	} {
@@ -78,9 +89,9 @@ func TestModifyModeAllowsPatchesAndAsksForHighRisk(t *testing.T) {
 		}
 	}
 
-	result := checker.Check(Request{ToolName: "write_file", Risk: RiskWrite, Path: "main.go"})
-	if result.Decision != Deny {
-		t.Fatalf("write_file decision = %q, want deny: %s", result.Decision, result.Reason)
+	result := checker.Check(Request{ToolName: "write_file", Risk: RiskWrite, Path: "go.mod"})
+	if result.Decision != Ask {
+		t.Fatalf("write_file high-risk decision = %q, want ask: %s", result.Decision, result.Reason)
 	}
 }
 

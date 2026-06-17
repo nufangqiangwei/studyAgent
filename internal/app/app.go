@@ -110,8 +110,9 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer, errOut
 			Out: out,
 			Err: errOut,
 		},
-		Agent:  agentSelector,
-		Logger: logger,
+		Agent:   agentSelector,
+		Logger:  logger,
+		Session: sessionStore,
 		Config: content.Config{
 			ConfigPath:       cfg.ConfigPath,
 			Provider:         cfg.Provider,

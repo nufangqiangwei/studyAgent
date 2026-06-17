@@ -33,16 +33,17 @@ const (
 )
 
 type Request struct {
-	ToolName  string
-	Risk      RiskLevel
-	Operation string
-	Path      string
-	Command   []string
+	ToolName  string    `json:"tool_name"`
+	Risk      RiskLevel `json:"risk,omitempty"`
+	Operation string    `json:"operation,omitempty"`
+	Path      string    `json:"path,omitempty"`
+	Command   []string  `json:"command,omitempty"`
+	DryRun    bool      `json:"dry_run,omitempty"`
 }
 
 type Result struct {
-	Decision Decision
-	Reason   string
+	Decision Decision `json:"decision"`
+	Reason   string   `json:"reason"`
 }
 
 type Checker interface {
@@ -116,12 +117,18 @@ func checkReadOnly(req Request) Result {
 	if isReadAllowed(req) {
 		return allow(req, "read-only mode allows read-only tools")
 	}
+	if isDryRunWriteAllowed(req) {
+		return allow(req, "read-only mode allows dry-run write validation")
+	}
 	return deny(req, "read-only mode blocks writes, command execution, network, and delete operations")
 }
 
 func checkValidate(req Request) Result {
 	if isReadAllowed(req) {
 		return allow(req, "validation mode allows read-only tools")
+	}
+	if isDryRunWriteAllowed(req) {
+		return allow(req, "validation mode allows dry-run write validation")
 	}
 	if req.Risk == RiskExec && isValidationCommand(req.Command) {
 		return allow(req, "validation mode allows limited verification commands")
@@ -133,17 +140,20 @@ func checkModify(req Request) Result {
 	if isReadAllowed(req) {
 		return allow(req, "modify mode allows read-only tools")
 	}
+	if isDryRunWriteAllowed(req) {
+		return allow(req, "modify mode allows dry-run write validation")
+	}
 	if req.Risk == RiskDelete {
 		return ask(req, "modify mode requires user confirmation before delete operations")
 	}
 	if req.Risk == RiskNet {
 		return ask(req, "modify mode requires user confirmation before network operations")
 	}
-	if req.ToolName == "apply_patch" && req.Risk == RiskWrite {
+	if (req.ToolName == "apply_patch" || req.ToolName == "write_file") && req.Risk == RiskWrite {
 		if isHighRiskPath(req.Path) || strings.Contains(strings.ToLower(req.Operation), "high-risk") {
 			return ask(req, "modify mode requires user confirmation for high-risk write paths")
 		}
-		return allow(req, "modify mode allows apply_patch")
+		return allow(req, "modify mode allows workspace writes")
 	}
 	if req.ToolName == "run_tests" {
 		return allow(req, "modify mode allows run_tests")
@@ -154,7 +164,7 @@ func checkModify(req Request) Result {
 		}
 		return ask(req, "modify mode requires user confirmation before arbitrary commands")
 	}
-	return deny(req, "modify mode allows apply_patch, run_tests, git_diff, and read-only tools by default")
+	return deny(req, "modify mode allows apply_patch, write_file, run_tests, git_diff, and read-only tools by default")
 }
 
 func allow(req Request, reason string) Result {
@@ -183,6 +193,9 @@ func reasonFor(req Request, reason string) string {
 	if len(req.Command) > 0 {
 		details = append(details, "command="+strings.Join(req.Command, " "))
 	}
+	if req.DryRun {
+		details = append(details, "dry_run=true")
+	}
 	if len(details) == 0 {
 		return reason
 	}
@@ -195,6 +208,18 @@ func isReadAllowed(req Request) bool {
 	}
 	switch req.ToolName {
 	case "ask_user", "list_files", "read_file", "search_text", "get_workspace_summary", "git_status", "git_diff":
+		return true
+	default:
+		return false
+	}
+}
+
+func isDryRunWriteAllowed(req Request) bool {
+	if !req.DryRun {
+		return false
+	}
+	switch req.ToolName {
+	case "write_file", "apply_patch":
 		return true
 	default:
 		return false

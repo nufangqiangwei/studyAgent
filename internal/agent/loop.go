@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"agent/internal/content"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -36,26 +37,28 @@ type Logger interface {
 }
 
 type Options struct {
-	LLM           LLMClient
-	PromptBuilder PromptBuilder
-	Tools         ToolRegistry
-	Logger        Logger
-	MaxSteps      int
-	Out           systemIO.Writer
-	Session       session.Recorder
+	LLM            LLMClient
+	PromptBuilder  PromptBuilder
+	ContextBuilder ContextBuilder
+	Tools          ToolRegistry
+	Logger         Logger
+	MaxSteps       int
+	Out            systemIO.Writer
+	Session        session.Recorder
 }
 
 type NativeLoop struct {
-	mu            sync.Mutex
-	llm           LLMClient
-	promptBuilder PromptBuilder
-	tools         ToolRegistry
-	toolDefs      []llm.ToolDefinition
-	logger        Logger
-	maxSteps      int
-	out           systemIO.Writer
-	session       session.Recorder
-	history       []llm.Message
+	mu             sync.Mutex
+	llm            LLMClient
+	promptBuilder  PromptBuilder
+	contextBuilder ContextBuilder
+	tools          ToolRegistry
+	toolDefs       []llm.ToolDefinition
+	logger         Logger
+	maxSteps       int
+	out            systemIO.Writer
+	session        session.Recorder
+	history        []llm.Message
 }
 
 type Task struct {
@@ -94,6 +97,37 @@ type ToolResult struct {
 	Error       string
 }
 
+type llmRequestEventPayload struct {
+	Request llm.Request `json:"request"`
+}
+
+type llmResponseEventPayload struct {
+	Response    llm.Response `json:"response"`
+	StartedAt   time.Time    `json:"started_at"`
+	CompletedAt time.Time    `json:"completed_at"`
+}
+
+type toolCallEventPayload struct {
+	ID    string          `json:"id"`
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input"`
+}
+
+type toolResultEventPayload struct {
+	ID          string         `json:"id"`
+	Name        string         `json:"name"`
+	StartedAt   time.Time      `json:"started_at"`
+	CompletedAt time.Time      `json:"completed_at"`
+	Content     string         `json:"content,omitempty"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
+	Error       string         `json:"error,omitempty"`
+}
+
+type summaryEventPayload struct {
+	Usage    llm.Usage `json:"usage"`
+	LLMCalls int       `json:"llm_calls"`
+}
+
 func NewNativeLoop(opts Options) (*NativeLoop, error) {
 	if opts.LLM == nil {
 		return nil, fmt.Errorf("native loop: llm client is required")
@@ -105,16 +139,21 @@ func NewNativeLoop(opts Options) (*NativeLoop, error) {
 	if maxSteps <= 0 {
 		maxSteps = 1
 	}
+	contextBuilder := opts.ContextBuilder
+	if contextBuilder == nil {
+		contextBuilder = NewNativeContextBuilder()
+	}
 	toolDefs := toolDefinitions(opts.Tools)
 	return &NativeLoop{
-		llm:           opts.LLM,
-		promptBuilder: opts.PromptBuilder,
-		tools:         opts.Tools,
-		toolDefs:      toolDefs,
-		logger:        opts.Logger,
-		maxSteps:      maxSteps,
-		out:           opts.Out,
-		session:       opts.Session,
+		llm:            opts.LLM,
+		promptBuilder:  opts.PromptBuilder,
+		contextBuilder: contextBuilder,
+		tools:          opts.Tools,
+		toolDefs:       toolDefs,
+		logger:         opts.Logger,
+		maxSteps:       maxSteps,
+		out:            opts.Out,
+		session:        opts.Session,
 	}, nil
 }
 
@@ -138,8 +177,23 @@ func (l *NativeLoop) Run(ctx context.Context, task Task) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	messages, generatedMessages := l.initialMessages(promptOutput.Messages)
-	for _, msg := range generatedMessages {
+	sessionRecords, err := l.loadSessionRecords(ctx)
+	if err != nil {
+		return Result{}, err
+	}
+	llmContext, err := l.contextBuilder.Build(ctx, ContextInput{
+		Prompt:         promptOutput,
+		SessionRecords: sessionRecords,
+		History:        l.history,
+		Tools:          l.toolDefs,
+	})
+	if err != nil {
+		return Result{}, fmt.Errorf("build llm context: %w", err)
+	}
+	if llmContext == nil {
+		return Result{}, fmt.Errorf("build llm context: nil context")
+	}
+	for _, msg := range llmContext.InitialMessages() {
 		if err := l.saveMessage(ctx, task, turnID, 0, msg); err != nil {
 			return Result{}, err
 		}
@@ -154,16 +208,17 @@ func (l *NativeLoop) Run(ctx context.Context, task Task) (Result, error) {
 		}
 
 		stepStartedAt := time.Now().UTC()
-		response, err := l.llm.Complete(ctx, llm.Request{
-			Model:       promptOutput.Model,
-			Messages:    messages,
-			Tools:       l.toolDefs,
-			Temperature: promptOutput.Temperature,
-			Metadata: map[string]string{
-				"loop": "native",
-				"step": fmt.Sprintf("%d", step),
-			},
+		request := llmContext.BuildRequest(RunState{
+			Task:      task,
+			TurnID:    turnID,
+			StepIndex: step,
 		})
+		if err := l.saveEvent(ctx, task, turnID, step, session.EventTypeLLMRequest, llmRequestEventPayload{
+			Request: request,
+		}); err != nil {
+			return Result{}, err
+		}
+		response, err := l.llm.Complete(ctx, request)
 		if err != nil {
 			return Result{}, fmt.Errorf("llm complete: %w", err)
 		}
@@ -171,6 +226,13 @@ func (l *NativeLoop) Run(ctx context.Context, task Task) (Result, error) {
 		llmCalls++
 		if response.Usage != nil {
 			totalUsage = totalUsage.Add(*response.Usage)
+		}
+		if err := l.saveEvent(ctx, task, turnID, step, session.EventTypeLLMResponse, llmResponseEventPayload{
+			Response:    response,
+			StartedAt:   stepStartedAt,
+			CompletedAt: stepCompletedAt,
+		}); err != nil {
+			return Result{}, err
 		}
 
 		currentStep := Step{
@@ -182,8 +244,7 @@ func (l *NativeLoop) Run(ctx context.Context, task Task) (Result, error) {
 		}
 		result.Content = response.Content
 		toolCalls := normalizeToolCalls(response.ToolCalls, step)
-		if msg, ok := assistantMessage(response, toolCalls); ok {
-			messages = append(messages, msg)
+		if msg, ok := llmContext.AddAssistantResponse(response, toolCalls); ok {
 			if err := l.saveMessage(ctx, task, turnID, step, msg); err != nil {
 				return Result{}, err
 			}
@@ -191,7 +252,7 @@ func (l *NativeLoop) Run(ctx context.Context, task Task) (Result, error) {
 
 		if len(toolCalls) == 0 {
 			result.Steps = append(result.Steps, currentStep)
-			l.history = append([]llm.Message(nil), messages...)
+			l.history = llmContext.History()
 			if err := l.saveUsageSummary(ctx, task, turnID, totalUsage, llmCalls); err != nil {
 				return Result{}, err
 			}
@@ -211,9 +272,17 @@ func (l *NativeLoop) Run(ctx context.Context, task Task) (Result, error) {
 				Name:  call.Name,
 				Input: call.Input,
 			})
+			if err := l.saveEvent(ctx, task, turnID, step, session.EventTypeToolCall, toolCallEventPayload{
+				ID:    call.ID,
+				Name:  call.Name,
+				Input: append(json.RawMessage(nil), call.Input...),
+			}); err != nil {
+				return Result{}, err
+			}
 
 			toolStartedAt := time.Now().UTC()
-			toolResult, err := l.tools.Execute(ctx, call.Name, call.Input)
+			toolCtx := l.toolExecutionContext(ctx, task, turnID, step)
+			toolResult, err := l.tools.Execute(toolCtx, call.Name, call.Input)
 			toolCompletedAt := time.Now().UTC()
 			recorded := ToolResult{
 				Name:        call.Name,
@@ -227,8 +296,18 @@ func (l *NativeLoop) Run(ctx context.Context, task Task) (Result, error) {
 				recorded.Metadata = toolResult.Metadata
 			}
 			currentStep.ToolResults = append(currentStep.ToolResults, recorded)
-			toolMessage := toolResultMessage(call, recorded)
-			messages = append(messages, toolMessage)
+			if err := l.saveEvent(ctx, task, turnID, step, session.EventTypeToolResult, toolResultEventPayload{
+				ID:          call.ID,
+				Name:        call.Name,
+				StartedAt:   toolStartedAt,
+				CompletedAt: toolCompletedAt,
+				Content:     recorded.Content,
+				Metadata:    recorded.Metadata,
+				Error:       recorded.Error,
+			}); err != nil {
+				return Result{}, err
+			}
+			toolMessage := llmContext.AddToolResult(call, recorded)
 			if err := l.saveMessage(ctx, task, turnID, step, toolMessage); err != nil {
 				return Result{}, err
 			}
@@ -236,7 +315,7 @@ func (l *NativeLoop) Run(ctx context.Context, task Task) (Result, error) {
 		result.Steps = append(result.Steps, currentStep)
 
 		if step == l.maxSteps {
-			l.history = append([]llm.Message(nil), messages...)
+			l.history = llmContext.History()
 			if err := l.saveUsageSummary(ctx, task, turnID, totalUsage, llmCalls); err != nil {
 				return Result{}, err
 			}
@@ -245,6 +324,21 @@ func (l *NativeLoop) Run(ctx context.Context, task Task) (Result, error) {
 	}
 
 	return result, nil
+}
+
+func (l *NativeLoop) loadSessionRecords(ctx context.Context) ([]session.Record, error) {
+	if len(l.history) > 0 || l.session == nil {
+		return nil, nil
+	}
+	loader, ok := l.session.(session.Loader)
+	if !ok {
+		return nil, nil
+	}
+	records, err := loader.Load(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load session history: %w", err)
+	}
+	return records, nil
 }
 
 func (l *NativeLoop) saveMessage(ctx context.Context, task Task, turnID string, stepIndex int, message llm.Message) error {
@@ -273,6 +367,12 @@ func (l *NativeLoop) saveUsageSummary(ctx context.Context, task Task, turnID str
 	if l.session == nil {
 		return nil
 	}
+	if err := l.saveEvent(ctx, task, turnID, 0, session.EventTypeSummary, summaryEventPayload{
+		Usage:    usage,
+		LLMCalls: llmCalls,
+	}); err != nil {
+		return err
+	}
 	err := l.session.Save(ctx, session.Record{
 		AgentName:    task.AgentName,
 		Task:         task.Input,
@@ -289,6 +389,43 @@ func (l *NativeLoop) saveUsageSummary(ctx context.Context, task Task, turnID str
 	return nil
 }
 
+func (l *NativeLoop) saveEvent(ctx context.Context, task Task, turnID string, step int, eventType string, payload any) error {
+	if l.session == nil {
+		return nil
+	}
+	err := session.SaveEvent(ctx, l.session, session.EventScope{
+		TurnID:    turnID,
+		Task:      task.Input,
+		WorkDir:   task.WorkDir,
+		AgentName: task.AgentName,
+		Step:      step,
+	}, eventType, payload)
+	if err != nil {
+		return fmt.Errorf("save session event %s: %w", eventType, err)
+	}
+	return nil
+}
+
+func (l *NativeLoop) toolExecutionContext(ctx context.Context, task Task, turnID string, step int) context.Context {
+	scope := session.EventScope{
+		TurnID:    turnID,
+		Task:      task.Input,
+		WorkDir:   task.WorkDir,
+		AgentName: task.AgentName,
+		Step:      step,
+	}
+	nextCtx, env := content.WithUpdatedEnv(ctx, func(env *content.Env) {
+		if env.Session == nil {
+			env.Session = l.session
+		}
+		env.EventScope = scope
+	})
+	if env != nil && env.Config.AgentName == "" {
+		env.Config.AgentName = task.AgentName
+	}
+	return nextCtx
+}
+
 func (l *NativeLoop) writeOutput(content string) error {
 	if l.out == nil || strings.TrimSpace(content) == "" {
 		return nil
@@ -297,39 +434,6 @@ func (l *NativeLoop) writeOutput(content string) error {
 		return fmt.Errorf("write agent output: %w", err)
 	}
 	return nil
-}
-
-func (l *NativeLoop) initialMessages(promptMessages []llm.Message) ([]llm.Message, []llm.Message) {
-	messages := append([]llm.Message(nil), l.history...)
-	generated := []llm.Message{}
-	if len(messages) == 0 {
-		for _, msg := range promptMessages {
-			if msg.Role == llm.RoleSystem {
-				messages = append(messages, msg)
-				generated = append(generated, msg)
-			}
-		}
-	}
-
-	for _, msg := range promptMessages {
-		if msg.Role != llm.RoleSystem {
-			messages = append(messages, msg)
-			generated = append(generated, msg)
-		}
-	}
-	return messages, generated
-}
-
-func assistantMessage(response llm.Response, toolCalls []llm.ToolCall) (llm.Message, bool) {
-	if strings.TrimSpace(response.Content) == "" && len(toolCalls) == 0 {
-		return llm.Message{}, false
-	}
-	return llm.Message{
-		Role:      llm.RoleAssistant,
-		Content:   response.Content,
-		ToolCalls: toolCalls,
-		Usage:     cloneUsage(response.Usage),
-	}, true
 }
 
 func normalizeToolCalls(calls []llm.ToolCall, step int) []llm.ToolCall {
@@ -347,49 +451,6 @@ func normalizeToolCalls(calls []llm.ToolCall, step int) []llm.ToolCall {
 		normalized = append(normalized, call)
 	}
 	return normalized
-}
-
-func toolResultMessage(call llm.ToolCall, result ToolResult) llm.Message {
-	content := result.Content
-	if result.Error != "" {
-		content = "error: " + result.Error
-	}
-	return llm.Message{
-		Role:       llm.RoleTool,
-		Name:       call.Name,
-		Content:    content,
-		ToolCallID: call.ID,
-	}
-}
-
-func cloneMessage(message llm.Message) llm.Message {
-	cloned := message
-	cloned.ToolCalls = cloneLLMToolCalls(message.ToolCalls)
-	cloned.Usage = cloneUsage(message.Usage)
-	return cloned
-}
-
-func cloneLLMToolCalls(calls []llm.ToolCall) []llm.ToolCall {
-	if len(calls) == 0 {
-		return nil
-	}
-	cloned := make([]llm.ToolCall, 0, len(calls))
-	for _, call := range calls {
-		cloned = append(cloned, llm.ToolCall{
-			ID:    call.ID,
-			Name:  call.Name,
-			Input: append(json.RawMessage(nil), call.Input...),
-		})
-	}
-	return cloned
-}
-
-func cloneUsage(usage *llm.Usage) *llm.Usage {
-	if usage == nil {
-		return nil
-	}
-	cloned := *usage
-	return &cloned
 }
 
 func toolDefinitions(registry ToolRegistry) []llm.ToolDefinition {

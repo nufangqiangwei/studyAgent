@@ -5,6 +5,8 @@ import (
 	"agent/internal/policy"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -48,7 +50,7 @@ func TestRegistryChecksPolicyBeforeExecutingTool(t *testing.T) {
 		t.Fatalf("Register returned error: %v", err)
 	}
 
-	_, err := registry.Execute(context.Background(), WriteFileToolName, json.RawMessage(`{"path":"notes.txt","content":"hello"}`))
+	_, err := registry.Execute(context.Background(), WriteFileToolName, json.RawMessage(`{"path":"notes.txt","content":"hello","dry_run":false}`))
 	if err == nil {
 		t.Fatal("Execute returned nil error")
 	}
@@ -57,6 +59,41 @@ func TestRegistryChecksPolicyBeforeExecutingTool(t *testing.T) {
 	}
 	if tool.called {
 		t.Fatal("tool executed even though policy denied it")
+	}
+}
+
+func TestRegistryAllowsDryRunWriteValidationInReadOnlyMode(t *testing.T) {
+	root := t.TempDir()
+	registry := NewRegistry()
+	if err := registry.Register(NewWriteFileTool()); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+
+	result, err := registry.Execute(workspaceToolContext(root), WriteFileToolName, json.RawMessage(`{"path":"notes.txt","content":"hello"}`))
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !strings.Contains(result.Content, "dry-run") {
+		t.Fatalf("content missing dry-run summary:\n%s", result.Content)
+	}
+	if _, err := os.Stat(filepath.Join(root, "notes.txt")); !os.IsNotExist(err) {
+		t.Fatalf("notes.txt stat error = %v, want not exist", err)
+	}
+}
+
+func TestRegistryAllowsWriteFileInModifyMode(t *testing.T) {
+	root := t.TempDir()
+	registry := NewRegistry(WithPolicy(policy.New(policy.ModeModify)))
+	if err := registry.Register(NewWriteFileTool()); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+
+	_, err := registry.Execute(workspaceToolContext(root), WriteFileToolName, json.RawMessage(`{"path":"notes.txt","content":"hello\n","dry_run":false}`))
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if got := readToolTestFile(t, root, "notes.txt"); got != "hello\n" {
+		t.Fatalf("notes.txt content = %q, want hello", got)
 	}
 }
 

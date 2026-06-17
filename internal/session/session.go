@@ -25,11 +25,25 @@ const (
 
 const (
 	RecordKindMessage      = "message"
+	RecordKindEvent        = "event"
 	RecordKindUsageSummary = "usage_summary"
+)
+
+const (
+	EventTypeLLMRequest     = "llm_request"
+	EventTypeLLMResponse    = "llm_response"
+	EventTypeToolCall       = "tool_call"
+	EventTypeToolResult     = "tool_result"
+	EventTypePolicyDecision = "policy_decision"
+	EventTypeSummary        = "summary"
 )
 
 type Recorder interface {
 	Save(ctx context.Context, record Record) error
+}
+
+type Loader interface {
+	Load(ctx context.Context) ([]Record, error)
 }
 
 type Record struct {
@@ -43,9 +57,27 @@ type Record struct {
 	WorkDir      string       `json:"work_dir,omitempty"`
 	StepIndex    int          `json:"step_index,omitempty"`
 	Message      *llm.Message `json:"message,omitempty"`
+	Event        *Event       `json:"event,omitempty"`
 	Usage        *llm.Usage   `json:"usage,omitempty"`
 	UsageSummary *llm.Usage   `json:"usage_summary,omitempty"`
 	LLMCalls     int          `json:"llm_calls,omitempty"`
+}
+
+type Event struct {
+	ID        string          `json:"id"`
+	Time      time.Time       `json:"time"`
+	Type      string          `json:"type"`
+	AgentName string          `json:"agent_name,omitempty"`
+	Step      int             `json:"step,omitempty"`
+	Payload   json.RawMessage `json:"payload,omitempty"`
+}
+
+type EventScope struct {
+	TurnID    string
+	Task      string
+	WorkDir   string
+	AgentName string
+	Step      int
 }
 
 type Manifest struct {
@@ -170,6 +202,48 @@ func NewID() (string, error) {
 	), nil
 }
 
+func SaveEvent(ctx context.Context, recorder Recorder, scope EventScope, eventType string, payload any) error {
+	if recorder == nil {
+		return nil
+	}
+	rawPayload, err := MarshalEventPayload(payload)
+	if err != nil {
+		return fmt.Errorf("marshal session event payload %s: %w", eventType, err)
+	}
+	return recorder.Save(ctx, Record{
+		Kind:      RecordKindEvent,
+		TurnID:    scope.TurnID,
+		Task:      scope.Task,
+		WorkDir:   scope.WorkDir,
+		AgentName: scope.AgentName,
+		StepIndex: scope.Step,
+		Event: &Event{
+			Type:      eventType,
+			AgentName: scope.AgentName,
+			Step:      scope.Step,
+			Payload:   rawPayload,
+		},
+	})
+}
+
+func MarshalEventPayload(payload any) (json.RawMessage, error) {
+	if payload == nil {
+		return nil, nil
+	}
+	switch value := payload.(type) {
+	case json.RawMessage:
+		return append(json.RawMessage(nil), value...), nil
+	case []byte:
+		return append(json.RawMessage(nil), value...), nil
+	default:
+		data, err := json.Marshal(value)
+		if err != nil {
+			return nil, err
+		}
+		return json.RawMessage(data), nil
+	}
+}
+
 func (s *FileStore) ID() string {
 	if s == nil {
 		return ""
@@ -221,7 +295,11 @@ func (s *FileStore) Save(ctx context.Context, record Record) error {
 
 	now := s.now().UTC()
 	if record.Kind == "" {
-		record.Kind = RecordKindMessage
+		if record.Event != nil {
+			record.Kind = RecordKindEvent
+		} else {
+			record.Kind = RecordKindMessage
+		}
 	}
 	if record.Timestamp.IsZero() {
 		record.Timestamp = now
@@ -229,8 +307,27 @@ func (s *FileStore) Save(ctx context.Context, record Record) error {
 	record.SessionID = s.id
 	record.AgentID = s.agentID
 	record.Message = cloneMessagePtr(record.Message)
+	record.Event = cloneEventPtr(record.Event)
 	record.Usage = cloneUsage(record.Usage)
 	record.UsageSummary = cloneUsage(record.UsageSummary)
+	if record.Event != nil {
+		if record.Event.ID == "" {
+			eventID, err := NewID()
+			if err != nil {
+				return err
+			}
+			record.Event.ID = eventID
+		}
+		if record.Event.Time.IsZero() {
+			record.Event.Time = record.Timestamp
+		}
+		if record.Event.AgentName == "" {
+			record.Event.AgentName = record.AgentName
+		}
+		if record.Event.Step == 0 {
+			record.Event.Step = record.StepIndex
+		}
+	}
 
 	if err := s.withPathLock(ctx, s.lockPath, func() error {
 		data, err := json.Marshal(record)
@@ -483,6 +580,15 @@ func cloneMessagePtr(message *llm.Message) *llm.Message {
 	cloned := *message
 	cloned.ToolCalls = cloneLLMToolCalls(message.ToolCalls)
 	cloned.Usage = cloneUsage(message.Usage)
+	return &cloned
+}
+
+func cloneEventPtr(event *Event) *Event {
+	if event == nil {
+		return nil
+	}
+	cloned := *event
+	cloned.Payload = append(json.RawMessage(nil), event.Payload...)
 	return &cloned
 }
 

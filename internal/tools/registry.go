@@ -1,7 +1,9 @@
 package tools
 
 import (
+	"agent/internal/content"
 	"agent/internal/policy"
+	"agent/internal/session"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -20,6 +22,13 @@ type Result struct {
 	Content  string          `json:"content"`
 	Metadata map[string]any  `json:"metadata,omitempty"`
 	Raw      json.RawMessage `json:"raw,omitempty"`
+}
+
+type policyDecisionEventPayload struct {
+	Request           policy.Request `json:"request"`
+	Result            policy.Result  `json:"result"`
+	Confirmed         *bool          `json:"confirmed,omitempty"`
+	ConfirmationError string         `json:"confirmation_error,omitempty"`
 }
 
 type Registry struct {
@@ -141,17 +150,32 @@ func (r *Registry) Execute(ctx context.Context, name string, input json.RawMessa
 	decision := checker.Check(request)
 	switch decision.Decision {
 	case policy.Allow:
+		if err := recordPolicyDecisionEvent(ctx, request, decision, nil, ""); err != nil {
+			return Result{}, err
+		}
 	case policy.Ask:
 		confirmed, err := confirmPolicyDecision(ctx, request, decision)
 		if err != nil {
+			if recordErr := recordPolicyDecisionEvent(ctx, request, decision, nil, err.Error()); recordErr != nil {
+				return Result{}, recordErr
+			}
 			return Result{}, fmt.Errorf("policy confirmation for tool %q: %w", name, err)
+		}
+		if err := recordPolicyDecisionEvent(ctx, request, decision, &confirmed, ""); err != nil {
+			return Result{}, err
 		}
 		if !confirmed {
 			return Result{}, fmt.Errorf("policy denied tool %q: user declined confirmation: %s", name, decision.Reason)
 		}
 	case policy.Deny:
+		if err := recordPolicyDecisionEvent(ctx, request, decision, nil, ""); err != nil {
+			return Result{}, err
+		}
 		return Result{}, fmt.Errorf("policy denied tool %q: %s", name, decision.Reason)
 	default:
+		if err := recordPolicyDecisionEvent(ctx, request, decision, nil, ""); err != nil {
+			return Result{}, err
+		}
 		return Result{}, fmt.Errorf("policy returned unknown decision %q for tool %q", decision.Decision, name)
 	}
 	return tool.Execute(ctx, input)
@@ -172,6 +196,27 @@ func (r *Registry) List() []Tool {
 		result = append(result, r.tools[name])
 	}
 	return result
+}
+
+func recordPolicyDecisionEvent(ctx context.Context, request policy.Request, result policy.Result, confirmed *bool, confirmationError string) error {
+	env, ok := content.EnvFromContext(ctx)
+	if !ok || env.Session == nil {
+		return nil
+	}
+	scope := env.EventScope
+	if scope.AgentName == "" {
+		scope.AgentName = env.Config.AgentName
+	}
+	err := session.SaveEvent(ctx, env.Session, scope, session.EventTypePolicyDecision, policyDecisionEventPayload{
+		Request:           request,
+		Result:            result,
+		Confirmed:         confirmed,
+		ConfirmationError: confirmationError,
+	})
+	if err != nil {
+		return fmt.Errorf("record policy decision event: %w", err)
+	}
+	return nil
 }
 
 func mustNewDefaultRegistry() *Registry {

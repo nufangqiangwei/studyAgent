@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"regexp"
 	"strconv"
 	"sync"
@@ -124,6 +125,54 @@ func TestFileStoreSaveSerializesConcurrentWriters(t *testing.T) {
 	}
 	if len(records) != writers {
 		t.Fatalf("records = %d, want %d", len(records), writers)
+	}
+}
+
+func TestFileStoreSaveEventAppendsStructuredEvent(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFileStore returned error: %v", err)
+	}
+
+	if err := SaveEvent(context.Background(), store, EventScope{
+		TurnID:    "turn-1",
+		Task:      "build",
+		WorkDir:   "C:\\Code\\GO\\agent",
+		AgentName: "default",
+		Step:      2,
+	}, EventTypeToolCall, map[string]any{
+		"id":   "call_1",
+		"name": "read_file",
+	}); err != nil {
+		t.Fatalf("SaveEvent returned error: %v", err)
+	}
+
+	records, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records = %d, want 1: %#v", len(records), records)
+	}
+	record := records[0]
+	if record.Kind != RecordKindEvent || record.Event == nil {
+		t.Fatalf("record = %#v, want event", record)
+	}
+	if record.Event.ID == "" || record.Event.Time.IsZero() {
+		t.Fatalf("event identifiers missing: %#v", record.Event)
+	}
+	if record.Event.Type != EventTypeToolCall || record.Event.AgentName != "default" || record.Event.Step != 2 {
+		t.Fatalf("event metadata = %#v", record.Event)
+	}
+	var payload struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(record.Event.Payload, &payload); err != nil {
+		t.Fatalf("parse event payload: %v", err)
+	}
+	if payload.ID != "call_1" || payload.Name != "read_file" {
+		t.Fatalf("payload = %#v", payload)
 	}
 }
 

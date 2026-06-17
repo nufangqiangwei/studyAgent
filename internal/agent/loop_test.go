@@ -33,6 +33,10 @@ func TestNativeLoopExecutesToolCallAndContinues(t *testing.T) {
 	}
 
 	var promptOut strings.Builder
+	store, err := session.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFileStore returned error: %v", err)
+	}
 	toolRegistry := tools.NewRegistry()
 	if err := toolRegistry.Register(tools.NewAskUserTool()); err != nil {
 		t.Fatalf("register ask_user: %v", err)
@@ -49,6 +53,7 @@ func TestNativeLoopExecutesToolCallAndContinues(t *testing.T) {
 		PromptBuilder: prompt.NewNativeBuilder(prompt.Options{}),
 		Tools:         toolRegistry,
 		MaxSteps:      2,
+		Session:       store,
 	})
 	if err != nil {
 		t.Fatalf("NewNativeLoop returned error: %v", err)
@@ -97,6 +102,43 @@ func TestNativeLoopExecutesToolCallAndContinues(t *testing.T) {
 	}
 	if result.Steps[0].ToolResults[0].StartedAt.IsZero() || result.Steps[0].ToolResults[0].CompletedAt.IsZero() {
 		t.Fatalf("tool result timestamps were not recorded: %#v", result.Steps[0].ToolResults[0])
+	}
+
+	records, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	eventCounts := countEventTypes(records)
+	wantEventCounts := map[string]int{
+		session.EventTypeLLMRequest:     2,
+		session.EventTypeLLMResponse:    2,
+		session.EventTypeToolCall:       1,
+		session.EventTypePolicyDecision: 1,
+		session.EventTypeToolResult:     1,
+		session.EventTypeSummary:        1,
+	}
+	for eventType, want := range wantEventCounts {
+		if got := eventCounts[eventType]; got != want {
+			t.Fatalf("event count %s = %d, want %d: %#v", eventType, got, want, records)
+		}
+	}
+	policyEvent := firstEvent(records, session.EventTypePolicyDecision)
+	if policyEvent == nil {
+		t.Fatalf("missing policy decision event: %#v", records)
+	}
+	var policyPayload struct {
+		Request struct {
+			ToolName string `json:"tool_name"`
+		} `json:"request"`
+		Result struct {
+			Decision string `json:"decision"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(policyEvent.Payload, &policyPayload); err != nil {
+		t.Fatalf("parse policy payload: %v", err)
+	}
+	if policyPayload.Request.ToolName != tools.AskUserToolName || policyPayload.Result.Decision != "allow" {
+		t.Fatalf("policy payload = %#v", policyPayload)
 	}
 }
 
@@ -232,23 +274,33 @@ func TestNativeLoopSavesSessionTurns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
 	}
-	if len(records) != 4 {
-		t.Fatalf("records = %d, want system/user/assistant/usage_summary: %#v", len(records), records)
+	if len(records) < 7 {
+		t.Fatalf("records = %d, want at least message/event/summary records: %#v", len(records), records)
 	}
-	if records[0].Kind != session.RecordKindMessage || records[0].Message == nil || records[0].Message.Role != llm.RoleSystem {
-		t.Fatalf("first record = %#v, want system message", records[0])
+	if eventCounts := countEventTypes(records); eventCounts[session.EventTypeLLMRequest] != 1 ||
+		eventCounts[session.EventTypeLLMResponse] != 1 ||
+		eventCounts[session.EventTypeSummary] != 1 {
+		t.Fatalf("event counts = %#v, want llm request/response/summary events", eventCounts)
 	}
-	if records[1].Kind != session.RecordKindMessage || records[1].Message == nil || records[1].Message.Role != llm.RoleUser {
-		t.Fatalf("second record = %#v, want user message", records[1])
+	messages := messagesFromRecords(records)
+	if len(messages) != 3 {
+		t.Fatalf("messages = %d, want system/user/assistant: %#v", len(messages), messages)
 	}
-	if records[2].Kind != session.RecordKindMessage || records[2].Message == nil || records[2].Message.Role != llm.RoleAssistant || records[2].Message.Content != "saved answer" {
-		t.Fatalf("third record = %#v, want assistant message", records[2])
+	if messages[0].Role != llm.RoleSystem {
+		t.Fatalf("first message = %#v, want system message", messages[0])
 	}
-	if records[2].Message.Usage == nil || records[2].Message.Usage.TotalTokens != 18 {
-		t.Fatalf("assistant usage = %#v, want total tokens", records[2].Message.Usage)
+	if messages[1].Role != llm.RoleUser {
+		t.Fatalf("second message = %#v, want user message", messages[1])
 	}
-	if records[3].Kind != session.RecordKindUsageSummary || records[3].UsageSummary == nil || records[3].UsageSummary.TotalTokens != 18 || records[3].LLMCalls != 1 {
-		t.Fatalf("usage summary record = %#v", records[3])
+	if messages[2].Role != llm.RoleAssistant || messages[2].Content != "saved answer" {
+		t.Fatalf("third message = %#v, want assistant message", messages[2])
+	}
+	if messages[2].Usage == nil || messages[2].Usage.TotalTokens != 18 {
+		t.Fatalf("assistant usage = %#v, want total tokens", messages[2].Usage)
+	}
+	usageSummary := usageSummaryRecord(records)
+	if usageSummary == nil || usageSummary.UsageSummary == nil || usageSummary.UsageSummary.TotalTokens != 18 || usageSummary.LLMCalls != 1 {
+		t.Fatalf("usage summary record = %#v", usageSummary)
 	}
 	for _, record := range records {
 		if record.SessionID != store.ID() || record.AgentID != store.AgentID() || record.TurnID == "" {
@@ -261,6 +313,44 @@ func TestNativeLoopSavesSessionTurns(t *testing.T) {
 			t.Fatalf("record timestamp missing: %#v", record)
 		}
 	}
+}
+
+func countEventTypes(records []session.Record) map[string]int {
+	counts := make(map[string]int)
+	for _, record := range records {
+		if record.Kind == session.RecordKindEvent && record.Event != nil {
+			counts[record.Event.Type]++
+		}
+	}
+	return counts
+}
+
+func firstEvent(records []session.Record, eventType string) *session.Event {
+	for _, record := range records {
+		if record.Kind == session.RecordKindEvent && record.Event != nil && record.Event.Type == eventType {
+			return record.Event
+		}
+	}
+	return nil
+}
+
+func messagesFromRecords(records []session.Record) []llm.Message {
+	messages := make([]llm.Message, 0, len(records))
+	for _, record := range records {
+		if record.Kind == session.RecordKindMessage && record.Message != nil {
+			messages = append(messages, *record.Message)
+		}
+	}
+	return messages
+}
+
+func usageSummaryRecord(records []session.Record) *session.Record {
+	for i := range records {
+		if records[i].Kind == session.RecordKindUsageSummary {
+			return &records[i]
+		}
+	}
+	return nil
 }
 
 type scriptedLLM struct {
