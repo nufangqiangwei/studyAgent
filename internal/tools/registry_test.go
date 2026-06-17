@@ -8,17 +8,26 @@ func TestNewDefaultRegistryRegistersAndPublishesTools(t *testing.T) {
 		t.Fatalf("NewDefaultRegistry returned error: %v", err)
 	}
 
-	assertOnlyAskUserTool(t, registry.List())
-	assertOnlyAskUserTool(t, RegisteredTools())
+	assertDefaultTools(t, registry.List())
+	assertDefaultTools(t, RegisteredTools())
 }
 
-func assertOnlyAskUserTool(t *testing.T, got []Tool) {
+func assertDefaultTools(t *testing.T, got []Tool) {
 	t.Helper()
 
-	if len(got) != 1 {
-		t.Fatalf("tools = %d, want 1: %#v", len(got), got)
+	want := []string{
+		AskUserToolName,
+		GetWorkspaceSummaryToolName,
+		ListFilesToolName,
+		ReadFileToolName,
+		SearchTextToolName,
 	}
-	if got[0].Name() != AskUserToolName {
-		t.Fatalf("tool name = %q, want %q", got[0].Name(), AskUserToolName)
+	if len(got) != len(want) {
+		t.Fatalf("tools = %d, want %d: %#v", len(got), len(want), got)
+	}
+	for i, tool := range got {
+		if tool.Name() != want[i] {
+			t.Fatalf("tool[%d] name = %q, want %q", i, tool.Name(), want[i])
+		}
 	}
 }

@@ -9,7 +9,7 @@ import (
 )
 
 func TestCatalogListsRegisteredAgentFactories(t *testing.T) {
-	want := []string{AnalyzeAgentName, DefaultAgentName}
+	want := []string{AnalyzeAgentName, DefaultAgentName, ToolsTesterAgentName}
 	if got := Catalog.ListAgentNames(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("agent names = %#v, want %#v", got, want)
 	}

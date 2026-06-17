@@ -66,5 +66,6 @@ func init() {
 	}
 	Catalog.createAgent[DefaultAgentName] = NewDefaultAgent
 	Catalog.createAgent[AnalyzeAgentName] = NewAnalyzeAgent
+	Catalog.createAgent[ToolsTesterAgentName] = NewToolsTesterAgent
 
 }

@@ -47,8 +47,17 @@ func RegisterDefaults(registry *Registry) error {
 	if registry == nil {
 		return fmt.Errorf("register default tools: nil registry")
 	}
-	if err := registry.Register(NewAskUserTool()); err != nil {
-		return fmt.Errorf("register default tool %q: %w", AskUserToolName, err)
+	defaults := []Tool{
+		NewAskUserTool(),
+		NewListFilesTool(),
+		NewReadFileTool(),
+		NewSearchTextTool(),
+		NewGetWorkspaceSummaryTool(),
+	}
+	for _, tool := range defaults {
+		if err := registry.Register(tool); err != nil {
+			return fmt.Errorf("register default tool %q: %w", tool.Name(), err)
+		}
 	}
 	return nil
 }

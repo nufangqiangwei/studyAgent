@@ -1,5 +1,7 @@
 package prompt
 
+import _ "embed"
+
 const defaultSystemPrompt = `You are an agent development assistant.
 Core rules:
 - Keep modules decoupled.
@@ -188,3 +190,6 @@ const AnalyzeSystemPrompt = `你是一个“研究需求发掘 Agent”。
 
 不要包含内部推理过程，只保留简短、可审计的 reasoning_basis。
 `
+
+//go:embed tools_tester.md
+var ToolsSystemPrompt string

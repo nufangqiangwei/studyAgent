@@ -198,7 +198,7 @@ func TestRunBindsEnvToToolContext(t *testing.T) {
 	if !seenToolResult {
 		t.Fatal("model did not receive ask_user tool result")
 	}
-	wantAgents := []string{agent.AnalyzeAgentName, agent.DefaultAgentName}
+	wantAgents := []string{agent.AnalyzeAgentName, agent.DefaultAgentName, agent.ToolsTesterAgentName}
 	if got := agent.RegisteredAgentNames(); !reflect.DeepEqual(got, wantAgents) {
 		t.Fatalf("registered agent names = %#v, want %#v", got, wantAgents)
 	}

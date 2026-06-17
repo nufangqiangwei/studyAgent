@@ -84,7 +84,7 @@
 
 - 定义对外 `Agent` 接口和 `NewAgent` 工厂类型。
 - 维护 agent 工厂注册表 `Catalog`。
-- 当前默认注册 `default` 和 `analyze` agent。
+- 当前默认注册 `default`、`analyze` 和 `tools-tester` agent。
 - agent 任务循环。
 - 决定下一步是调用模型、调用工具还是结束。
 - 管理步骤状态。

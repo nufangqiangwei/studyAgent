@@ -99,12 +99,97 @@ func TestRunExecutesSlashStatusThroughCommand(t *testing.T) {
 	}
 }
 
-func TestRunUnknownSlashInputGoesToModel(t *testing.T) {
+func TestRunUnknownSlashInputReportsError(t *testing.T) {
 	var out strings.Builder
+	var errOut strings.Builder
 	runner := &recordingRunner{output: "sent", out: &out}
 	env := content.Env{
 		IO: content.IO{
 			In:  strings.NewReader("/missing\n/exit\n"),
+			Out: &out,
+			Err: &errOut,
+		},
+		Agent: runner,
+	}
+
+	err := Run(context.Background(), env, defaultRegistry())
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if runner.task != "" {
+		t.Fatalf("task = %q, want no agent task", runner.task)
+	}
+	if !strings.Contains(errOut.String(), "unknown command \"/missing\"") {
+		t.Fatalf("stderr missing unknown command error:\n%s", errOut.String())
+	}
+}
+
+func TestRunSuggestsMistypedSlashCommandAndExecutesWhenConfirmed(t *testing.T) {
+	var out strings.Builder
+	env := content.Env{
+		IO: content.IO{
+			In:  strings.NewReader("/statu\ny\n/exit\n"),
+			Out: &out,
+		},
+		Config: content.Config{
+			Provider: "openai",
+			Model:    "gpt-test",
+			WorkDir:  "C:\\Code\\GO\\agent",
+		},
+	}
+
+	err := Run(context.Background(), env, defaultRegistry())
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"Unknown command \"/statu\"",
+		"Did you mean \"/status\"?",
+		"Provider: openai",
+		"Model: gpt-test",
+		"Workspace: C:\\Code\\GO\\agent",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("output missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestRunDoesNotExecuteSuggestedCommandWhenDeclined(t *testing.T) {
+	var out strings.Builder
+	env := content.Env{
+		IO: content.IO{
+			In:  strings.NewReader("/versoin\nn\n/exit\n"),
+			Out: &out,
+		},
+	}
+
+	err := Run(context.Background(), env, defaultRegistry())
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"Unknown command \"/versoin\"",
+		"Did you mean \"/version\"?",
+		"Command not executed.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("output missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "agent dev") {
+		t.Fatalf("declined suggestion executed version command:\n%s", got)
+	}
+}
+
+func TestRunSuggestedRunCommandKeepsArgument(t *testing.T) {
+	var out strings.Builder
+	runner := &recordingRunner{output: "ran", out: &out}
+	env := content.Env{
+		IO: content.IO{
+			In:  strings.NewReader("/rn fix tests\ny\n/exit\n"),
 			Out: &out,
 		},
 		Agent: runner,
@@ -114,11 +199,11 @@ func TestRunUnknownSlashInputGoesToModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
-	if runner.task != "/missing" {
-		t.Fatalf("task = %q, want /missing", runner.task)
+	if runner.task != "fix tests" {
+		t.Fatalf("task = %q, want fix tests", runner.task)
 	}
-	if !strings.Contains(out.String(), "sent") {
-		t.Fatalf("output missing model response:\n%s", out.String())
+	if !strings.Contains(out.String(), "ran") {
+		t.Fatalf("output missing agent response:\n%s", out.String())
 	}
 }
 
@@ -174,13 +259,15 @@ func TestRunSwitchesAgentWithSlashAgentName(t *testing.T) {
 	}
 }
 
-func TestRunSlashOnlyGoesToModel(t *testing.T) {
+func TestRunSlashOnlyReportsError(t *testing.T) {
 	var out strings.Builder
+	var errOut strings.Builder
 	runner := &recordingRunner{output: "sent", out: &out}
 	env := content.Env{
 		IO: content.IO{
 			In:  strings.NewReader("/\n/exit\n"),
 			Out: &out,
+			Err: &errOut,
 		},
 		Agent: runner,
 	}
@@ -189,11 +276,11 @@ func TestRunSlashOnlyGoesToModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
-	if runner.task != "/" {
-		t.Fatalf("task = %q, want /", runner.task)
+	if runner.task != "" {
+		t.Fatalf("task = %q, want no agent task", runner.task)
 	}
-	if !strings.Contains(out.String(), "sent") {
-		t.Fatalf("output missing model response:\n%s", out.String())
+	if !strings.Contains(errOut.String(), "unknown command \"/\"") {
+		t.Fatalf("stderr missing unknown command error:\n%s", errOut.String())
 	}
 }
 

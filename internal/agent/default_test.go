@@ -9,7 +9,7 @@ import (
 	"agent/internal/tools"
 )
 
-func TestDefaultAgentUsesNativePromptAndAskUserTool(t *testing.T) {
+func TestDefaultAgentUsesNativePromptAndDefaultTools(t *testing.T) {
 	model := &scriptedLLM{
 		responses: []llm.Response{
 			{
@@ -34,9 +34,7 @@ func TestDefaultAgentUsesNativePromptAndAskUserTool(t *testing.T) {
 	if defaultAgent.Name() != DefaultAgentName {
 		t.Fatalf("Name = %q, want %q", defaultAgent.Name(), DefaultAgentName)
 	}
-	if got := defaultAgent.Tools(); len(got) != 1 || got[0].Name() != tools.AskUserToolName {
-		t.Fatalf("agent tools = %#v, want only ask_user", got)
-	}
+	assertAgentDefaultTools(t, defaultAgent.Tools())
 
 	if err := defaultAgent.Run(context.Background(), "summarize project"); err != nil {
 		t.Fatalf("Run returned error: %v", err)
@@ -49,10 +47,48 @@ func TestDefaultAgentUsesNativePromptAndAskUserTool(t *testing.T) {
 	}
 
 	req := model.requests[0]
-	if len(req.Tools) != 1 || req.Tools[0].Name != tools.AskUserToolName {
-		t.Fatalf("tools = %#v, want only ask_user", req.Tools)
-	}
+	assertLLMDefaultTools(t, req.Tools)
 	if len(req.Messages) == 0 || !strings.Contains(req.Messages[0].Content, "agent development assistant") {
 		t.Fatalf("system prompt missing native agent instructions: %#v", req.Messages)
+	}
+}
+
+func assertAgentDefaultTools(t *testing.T, got []tools.Tool) {
+	t.Helper()
+
+	want := []string{
+		tools.AskUserToolName,
+		tools.GetWorkspaceSummaryToolName,
+		tools.ListFilesToolName,
+		tools.ReadFileToolName,
+		tools.SearchTextToolName,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("agent tools = %d, want %d: %#v", len(got), len(want), got)
+	}
+	for i, tool := range got {
+		if tool.Name() != want[i] {
+			t.Fatalf("agent tool[%d] = %q, want %q", i, tool.Name(), want[i])
+		}
+	}
+}
+
+func assertLLMDefaultTools(t *testing.T, got []llm.ToolDefinition) {
+	t.Helper()
+
+	want := []string{
+		tools.AskUserToolName,
+		tools.GetWorkspaceSummaryToolName,
+		tools.ListFilesToolName,
+		tools.ReadFileToolName,
+		tools.SearchTextToolName,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("llm tools = %d, want %d: %#v", len(got), len(want), got)
+	}
+	for i, tool := range got {
+		if tool.Name != want[i] {
+			t.Fatalf("llm tool[%d] = %q, want %q", i, tool.Name, want[i])
+		}
 	}
 }
