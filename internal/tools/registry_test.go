@@ -16,11 +16,13 @@ func assertDefaultTools(t *testing.T, got []Tool) {
 	t.Helper()
 
 	want := []string{
+		ApplyPatchToolName,
 		AskUserToolName,
 		GetWorkspaceSummaryToolName,
 		ListFilesToolName,
 		ReadFileToolName,
 		SearchTextToolName,
+		WriteFileToolName,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("tools = %d, want %d: %#v", len(got), len(want), got)

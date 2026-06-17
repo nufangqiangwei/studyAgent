@@ -22,7 +22,9 @@ func NewToolsTesterAgent(ctx context.Context, opts CreatAgentOptions) (Agent, er
 		return nil, fmt.Errorf("tools tester agent: register default tools: %w", err)
 	}
 	registeredTools := toolRegistry.List()
-
+	if opts.MaxSteps < 100 {
+		opts.MaxSteps = 100
+	}
 	loop, err := NewNativeLoop(Options{
 		LLM: opts.LLM,
 		PromptBuilder: prompt.NewNativeBuilder(prompt.Options{

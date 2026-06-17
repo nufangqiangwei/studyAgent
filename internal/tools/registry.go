@@ -48,11 +48,13 @@ func RegisterDefaults(registry *Registry) error {
 		return fmt.Errorf("register default tools: nil registry")
 	}
 	defaults := []Tool{
+		NewApplyPatchTool(),
 		NewAskUserTool(),
 		NewListFilesTool(),
 		NewReadFileTool(),
 		NewSearchTextTool(),
 		NewGetWorkspaceSummaryTool(),
+		NewWriteFileTool(),
 	}
 	for _, tool := range defaults {
 		if err := registry.Register(tool); err != nil {
