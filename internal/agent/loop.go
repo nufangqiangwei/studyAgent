@@ -264,6 +264,7 @@ func (l *NativeLoop) Run(ctx context.Context, task Task) (Result, error) {
 			}
 		}
 
+		// 这个退出逻辑，后续需要确定是否存在。
 		if len(toolCalls) == 0 {
 			result.Steps = append(result.Steps, currentStep)
 			if err := l.finalizeRun(ctx, task, turnID, step, llmContext, response.Usage, totalUsage, llmCalls, response.Content); err != nil {
