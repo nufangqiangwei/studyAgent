@@ -40,6 +40,8 @@ type Options struct {
 	LLM            LLMClient
 	PromptBuilder  PromptBuilder
 	ContextBuilder ContextBuilder
+	Compressor     SessionCompressor
+	TokenCounter   ContextTokenCounter
 	Tools          ToolRegistry
 	Logger         Logger
 	MaxSteps       int
@@ -52,6 +54,8 @@ type NativeLoop struct {
 	llm            LLMClient
 	promptBuilder  PromptBuilder
 	contextBuilder ContextBuilder
+	compressor     SessionCompressor
+	tokenCounter   ContextTokenCounter
 	tools          ToolRegistry
 	toolDefs       []llm.ToolDefinition
 	logger         Logger
@@ -143,11 +147,21 @@ func NewNativeLoop(opts Options) (*NativeLoop, error) {
 	if contextBuilder == nil {
 		contextBuilder = NewNativeContextBuilder()
 	}
+	compressor := opts.Compressor
+	if compressor == nil {
+		compressor = NewLLMSessionCompressor(opts.LLM)
+	}
+	tokenCounter := opts.TokenCounter
+	if tokenCounter == nil {
+		tokenCounter = EstimatedContextTokenCounter{}
+	}
 	toolDefs := toolDefinitions(opts.Tools)
 	return &NativeLoop{
 		llm:            opts.LLM,
 		promptBuilder:  opts.PromptBuilder,
 		contextBuilder: contextBuilder,
+		compressor:     compressor,
+		tokenCounter:   tokenCounter,
 		tools:          opts.Tools,
 		toolDefs:       toolDefs,
 		logger:         opts.Logger,
@@ -250,13 +264,10 @@ func (l *NativeLoop) Run(ctx context.Context, task Task) (Result, error) {
 			}
 		}
 
+		// 这个退出逻辑，后续需要确定是否存在。
 		if len(toolCalls) == 0 {
 			result.Steps = append(result.Steps, currentStep)
-			l.history = llmContext.History()
-			if err := l.saveUsageSummary(ctx, task, turnID, totalUsage, llmCalls); err != nil {
-				return Result{}, err
-			}
-			if err := l.writeOutput(response.Content); err != nil {
+			if err := l.finalizeRun(ctx, task, turnID, step, llmContext, response.Usage, totalUsage, llmCalls, response.Content); err != nil {
 				return Result{}, err
 			}
 			return result, nil
@@ -315,15 +326,127 @@ func (l *NativeLoop) Run(ctx context.Context, task Task) (Result, error) {
 		result.Steps = append(result.Steps, currentStep)
 
 		if step == l.maxSteps {
-			l.history = llmContext.History()
-			if err := l.saveUsageSummary(ctx, task, turnID, totalUsage, llmCalls); err != nil {
+			if err := l.finalizeRun(ctx, task, turnID, step, llmContext, response.Usage, totalUsage, llmCalls, ""); err != nil {
 				return Result{}, err
 			}
 			return Result{}, fmt.Errorf("native loop: reached max steps after tool calls")
 		}
+		totalUsage, llmCalls = l.updateHistoryAndMaybeCompress(ctx, task, turnID, step, llmContext, response.Usage, totalUsage, llmCalls)
 	}
 
 	return result, nil
+}
+
+func (l *NativeLoop) finalizeRun(ctx context.Context, task Task, turnID string, step int, llmContext LLMContext, latestUsage *llm.Usage, totalUsage llm.Usage, llmCalls int, output string) error {
+	totalUsage, llmCalls = l.updateHistoryAndMaybeCompress(ctx, task, turnID, step, llmContext, latestUsage, totalUsage, llmCalls)
+	if err := l.saveUsageSummary(ctx, task, turnID, totalUsage, llmCalls); err != nil {
+		return err
+	}
+	return l.writeOutput(output)
+}
+
+func (l *NativeLoop) updateHistoryAndMaybeCompress(ctx context.Context, task Task, turnID string, step int, llmContext LLMContext, latestUsage *llm.Usage, totalUsage llm.Usage, llmCalls int) (llm.Usage, int) {
+	l.history = llmContext.History()
+	compressionUsage, compressionCalls := l.maybeCompressContext(ctx, task, turnID, step, llmContext, latestUsage)
+	if compressionUsage != nil {
+		totalUsage = totalUsage.Add(*compressionUsage)
+	}
+	llmCalls += compressionCalls
+	l.history = llmContext.History()
+	return totalUsage, llmCalls
+}
+
+func (l *NativeLoop) maybeCompressContext(ctx context.Context, task Task, turnID string, step int, llmContext LLMContext, latestUsage *llm.Usage) (*llm.Usage, int) {
+	if l.compressor == nil || llmContext == nil {
+		return nil, 0
+	}
+	request := llmContext.BuildRequest(RunState{
+		Task:      task,
+		TurnID:    turnID,
+		StepIndex: step,
+	})
+	decision := contextCompressionDecision(request, latestUsage, l.tokenCounter)
+	if !decision.ShouldCompress {
+		return nil, 0
+	}
+
+	originalMessages := llmContext.History()
+	compression, err := l.compressor.Compress(ctx, CompressionInput{
+		Task:                task,
+		TurnID:              turnID,
+		StepIndex:           step,
+		Model:               request.Model,
+		Messages:            originalMessages,
+		TriggerTokens:       decision.TriggerTokens,
+		ContextWindowTokens: decision.ContextWindowTokens,
+	})
+	if err != nil {
+		l.warnCompression("context compression failed at step %d: %v", step, err)
+		l.saveContextCompressionEvent(ctx, task, turnID, step, contextCompressionEventPayload{
+			Status:               "failed",
+			Reason:               "compressor_error",
+			Error:                err.Error(),
+			EstimatedTokens:      decision.EstimatedTokens,
+			UsageInputTokens:     decision.UsageInputTokens,
+			TriggerTokens:        decision.TriggerTokens,
+			ThresholdTokens:      decision.ThresholdTokens,
+			ContextWindowTokens:  decision.ContextWindowTokens,
+			OriginalMessageCount: len(originalMessages),
+		})
+		return nil, 0
+	}
+	if len(compression.Messages) == 0 {
+		err := fmt.Errorf("context compression: empty compressed messages")
+		l.warnCompression("context compression failed at step %d: %v", step, err)
+		l.saveContextCompressionEvent(ctx, task, turnID, step, contextCompressionEventPayload{
+			Status:               "failed",
+			Reason:               "empty_result",
+			Error:                err.Error(),
+			EstimatedTokens:      decision.EstimatedTokens,
+			UsageInputTokens:     decision.UsageInputTokens,
+			TriggerTokens:        decision.TriggerTokens,
+			ThresholdTokens:      decision.ThresholdTokens,
+			ContextWindowTokens:  decision.ContextWindowTokens,
+			OriginalMessageCount: len(originalMessages),
+			Usage:                cloneUsage(compression.Usage),
+		})
+		return compression.Usage, 1
+	}
+
+	llmContext.ReplaceHistory(compression.Messages)
+	if err := l.saveContextSnapshot(ctx, task, turnID, step, compression, decision, len(originalMessages)); err != nil {
+		l.warnCompression("save context compression snapshot failed at step %d: %v", step, err)
+		l.saveContextCompressionEvent(ctx, task, turnID, step, contextCompressionEventPayload{
+			Status:               "snapshot_failed",
+			Reason:               "save_snapshot",
+			Error:                err.Error(),
+			EstimatedTokens:      decision.EstimatedTokens,
+			UsageInputTokens:     decision.UsageInputTokens,
+			TriggerTokens:        decision.TriggerTokens,
+			ThresholdTokens:      decision.ThresholdTokens,
+			ContextWindowTokens:  decision.ContextWindowTokens,
+			OriginalMessageCount: len(originalMessages),
+			CompressedMessages:   len(compression.Messages),
+			Summary:              compression.Summary,
+			Usage:                cloneUsage(compression.Usage),
+		})
+		return compression.Usage, 1
+	}
+
+	l.saveContextCompressionEvent(ctx, task, turnID, step, contextCompressionEventPayload{
+		Status:               "success",
+		Reason:               "threshold_reached",
+		EstimatedTokens:      decision.EstimatedTokens,
+		UsageInputTokens:     decision.UsageInputTokens,
+		TriggerTokens:        decision.TriggerTokens,
+		ThresholdTokens:      decision.ThresholdTokens,
+		ContextWindowTokens:  decision.ContextWindowTokens,
+		OriginalMessageCount: len(originalMessages),
+		CompressedMessages:   len(compression.Messages),
+		Summary:              compression.Summary,
+		Usage:                cloneUsage(compression.Usage),
+	})
+	return compression.Usage, 1
 }
 
 func (l *NativeLoop) loadSessionRecords(ctx context.Context) ([]session.Record, error) {
@@ -389,6 +512,39 @@ func (l *NativeLoop) saveUsageSummary(ctx context.Context, task Task, turnID str
 	return nil
 }
 
+func (l *NativeLoop) saveContextSnapshot(ctx context.Context, task Task, turnID string, step int, result CompressionResult, decision compressionDecision, originalMessageCount int) error {
+	if l.session == nil {
+		return nil
+	}
+	messages := cloneMessages(result.Messages)
+	err := l.session.Save(ctx, session.Record{
+		AgentName: task.AgentName,
+		Task:      task.Input,
+		WorkDir:   task.WorkDir,
+		TurnID:    turnID,
+		StepIndex: step,
+		Kind:      session.RecordKindContextSnapshot,
+		Timestamp: time.Now().UTC(),
+		ContextSnapshot: &session.ContextSnapshot{
+			Messages:             messages,
+			Summary:              result.Summary,
+			TriggerTokens:        decision.TriggerTokens,
+			ContextWindowTokens:  decision.ContextWindowTokens,
+			OriginalMessageCount: originalMessageCount,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("save context snapshot: %w", err)
+	}
+	return nil
+}
+
+func (l *NativeLoop) saveContextCompressionEvent(ctx context.Context, task Task, turnID string, step int, payload contextCompressionEventPayload) {
+	if err := l.saveEvent(ctx, task, turnID, step, session.EventTypeContextCompression, payload); err != nil {
+		l.warnCompression("save context compression event failed at step %d: %v", step, err)
+	}
+}
+
 func (l *NativeLoop) saveEvent(ctx context.Context, task Task, turnID string, step int, eventType string, payload any) error {
 	if l.session == nil {
 		return nil
@@ -424,6 +580,12 @@ func (l *NativeLoop) toolExecutionContext(ctx context.Context, task Task, turnID
 		env.Config.AgentName = task.AgentName
 	}
 	return nextCtx
+}
+
+func (l *NativeLoop) warnCompression(format string, args ...any) {
+	if l.logger != nil {
+		l.logger.Warnf(format, args...)
+	}
 }
 
 func (l *NativeLoop) writeOutput(content string) error {

@@ -34,6 +34,7 @@ type LLMContext interface {
 	AddAssistantResponse(response llm.Response, toolCalls []llm.ToolCall) (llm.Message, bool)
 	AddToolResult(call llm.ToolCall, result ToolResult) llm.Message
 	History() []llm.Message
+	ReplaceHistory(messages []llm.Message)
 }
 
 type NativeContextBuilder struct{}
@@ -100,6 +101,11 @@ func (c *nativeLLMContext) History() []llm.Message {
 	return cloneMessages(c.messages)
 }
 
+func (c *nativeLLMContext) ReplaceHistory(messages []llm.Message) {
+	c.messages = cloneMessages(messages)
+	c.initialMessages = nil
+}
+
 func initialMessages(history []llm.Message, promptMessages []llm.Message) ([]llm.Message, []llm.Message) {
 	messages := cloneMessages(history)
 	generated := []llm.Message{}
@@ -127,8 +133,21 @@ func messagesFromSession(records []session.Record) []llm.Message {
 	if len(records) == 0 {
 		return nil
 	}
-	messages := make([]llm.Message, 0, len(records))
-	for _, record := range records {
+
+	start := 0
+	var messages []llm.Message
+	for i, record := range records {
+		if record.Kind != session.RecordKindContextSnapshot || record.ContextSnapshot == nil {
+			continue
+		}
+		start = i + 1
+		messages = cloneMessages(record.ContextSnapshot.Messages)
+	}
+
+	if messages == nil {
+		messages = make([]llm.Message, 0, len(records))
+	}
+	for _, record := range records[start:] {
 		if record.Kind != "" && record.Kind != session.RecordKindMessage {
 			continue
 		}

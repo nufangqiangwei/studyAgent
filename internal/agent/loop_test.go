@@ -4,6 +4,7 @@ import (
 	"agent/internal/content"
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -315,6 +316,265 @@ func TestNativeLoopSavesSessionTurns(t *testing.T) {
 	}
 }
 
+func TestNativeLoopCompressesContextBetweenToolSteps(t *testing.T) {
+	model := &scriptedLLM{
+		responses: []llm.Response{
+			{
+				Provider: "mock",
+				Model:    "mock-native",
+				Content:  "need target",
+				ToolCalls: []llm.ToolCall{
+					{Name: tools.AskUserToolName, Input: json.RawMessage(`{"question":"Which target?"}`)},
+				},
+				Usage: &llm.Usage{
+					InputTokens:  20_000,
+					OutputTokens: 50,
+					TotalTokens:  20_050,
+				},
+			},
+			{
+				Provider: "mock",
+				Model:    "mock-native",
+				Content:  "compressed handoff",
+				Usage: &llm.Usage{
+					InputTokens:  100,
+					OutputTokens: 10,
+					TotalTokens:  110,
+				},
+			},
+			{
+				Provider: "mock",
+				Model:    "mock-native",
+				Content:  "final answer",
+			},
+		},
+	}
+	store, err := session.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFileStore returned error: %v", err)
+	}
+	toolRegistry := tools.NewRegistry()
+	if err := toolRegistry.Register(tools.NewAskUserTool()); err != nil {
+		t.Fatalf("register ask_user: %v", err)
+	}
+	ctx := content.WithEnv(context.Background(), &content.Env{
+		IO: content.IO{
+			In:  strings.NewReader("web app\n"),
+			Out: &strings.Builder{},
+		},
+	})
+
+	loop, err := NewNativeLoop(Options{
+		LLM:           model,
+		PromptBuilder: prompt.NewNativeBuilder(prompt.Options{}),
+		Tools:         toolRegistry,
+		MaxSteps:      3,
+		Session:       store,
+	})
+	if err != nil {
+		t.Fatalf("NewNativeLoop returned error: %v", err)
+	}
+
+	result, err := loop.Run(ctx, Task{
+		Input:     "build a feature",
+		WorkDir:   "C:\\Code\\GO\\agent",
+		AgentName: DefaultAgentName,
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if result.Content != "final answer" {
+		t.Fatalf("Content = %q, want final answer", result.Content)
+	}
+	if len(model.requests) != 3 {
+		t.Fatalf("requests = %d, want business/compression/business", len(model.requests))
+	}
+	if model.requests[1].Metadata["purpose"] != "context_compression" {
+		t.Fatalf("second request metadata = %#v, want compression request", model.requests[1].Metadata)
+	}
+	secondBusinessMessages := model.requests[2].Messages
+	if len(secondBusinessMessages) != 2 {
+		t.Fatalf("second business messages = %d, want compressed system+summary: %#v", len(secondBusinessMessages), secondBusinessMessages)
+	}
+	if secondBusinessMessages[0].Role != llm.RoleSystem {
+		t.Fatalf("first compressed message = %#v, want system", secondBusinessMessages[0])
+	}
+	if secondBusinessMessages[1].Role != llm.RoleUser || !strings.Contains(secondBusinessMessages[1].Content, "compressed handoff") {
+		t.Fatalf("second compressed message = %#v, want summary user message", secondBusinessMessages[1])
+	}
+	for _, msg := range secondBusinessMessages {
+		if msg.Role == llm.RoleTool || strings.Contains(msg.Content, "Which target?") {
+			t.Fatalf("compressed request leaked raw tool context: %#v", secondBusinessMessages)
+		}
+	}
+
+	records, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	snapshot := firstContextSnapshot(records)
+	if snapshot == nil || snapshot.ContextSnapshot == nil {
+		t.Fatalf("missing context snapshot: %#v", records)
+	}
+	if snapshot.ContextSnapshot.TriggerTokens != 20_000 || snapshot.ContextSnapshot.ContextWindowTokens != defaultContextWindowTokens {
+		t.Fatalf("snapshot token metadata = %#v", snapshot.ContextSnapshot)
+	}
+	if events := countEventTypes(records); events[session.EventTypeContextCompression] != 1 {
+		t.Fatalf("context compression events = %#v, want one", events)
+	}
+	usageSummary := usageSummaryRecord(records)
+	if usageSummary == nil || usageSummary.UsageSummary == nil || usageSummary.UsageSummary.TotalTokens != 20_160 || usageSummary.LLMCalls != 3 {
+		t.Fatalf("usage summary = %#v, want business plus compression usage", usageSummary)
+	}
+}
+
+func TestNativeLoopCompressesAtRunEndAndRestoresSnapshot(t *testing.T) {
+	store, err := session.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFileStore returned error: %v", err)
+	}
+	firstModel := &scriptedLLM{
+		responses: []llm.Response{
+			{
+				Provider: "mock",
+				Model:    "mock-native",
+				Content:  "first final answer",
+				Usage: &llm.Usage{
+					InputTokens:  20_000,
+					OutputTokens: 20,
+					TotalTokens:  20_020,
+				},
+			},
+			{
+				Provider: "mock",
+				Model:    "mock-native",
+				Content:  "final summary",
+				Usage: &llm.Usage{
+					InputTokens:  90,
+					OutputTokens: 10,
+					TotalTokens:  100,
+				},
+			},
+		},
+	}
+	firstLoop, err := NewNativeLoop(Options{
+		LLM:           firstModel,
+		PromptBuilder: prompt.NewNativeBuilder(prompt.Options{}),
+		Session:       store,
+	})
+	if err != nil {
+		t.Fatalf("NewNativeLoop returned error: %v", err)
+	}
+	if _, err := firstLoop.Run(context.Background(), Task{Input: "first task", AgentName: DefaultAgentName}); err != nil {
+		t.Fatalf("first Run returned error: %v", err)
+	}
+
+	records, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if snapshot := firstContextSnapshot(records); snapshot == nil || snapshot.ContextSnapshot == nil {
+		t.Fatalf("missing context snapshot after first run: %#v", records)
+	}
+
+	secondModel := &scriptedLLM{
+		responses: []llm.Response{{Provider: "mock", Model: "mock-native", Content: "second answer"}},
+	}
+	secondLoop, err := NewNativeLoop(Options{
+		LLM:           secondModel,
+		PromptBuilder: prompt.NewNativeBuilder(prompt.Options{}),
+		Session:       store,
+	})
+	if err != nil {
+		t.Fatalf("NewNativeLoop returned error: %v", err)
+	}
+	if _, err := secondLoop.Run(context.Background(), Task{Input: "second task", AgentName: DefaultAgentName}); err != nil {
+		t.Fatalf("second Run returned error: %v", err)
+	}
+	if len(secondModel.requests) != 1 {
+		t.Fatalf("second model requests = %d, want 1", len(secondModel.requests))
+	}
+	messages := secondModel.requests[0].Messages
+	if len(messages) != 3 {
+		t.Fatalf("restored messages = %d, want snapshot plus current user: %#v", len(messages), messages)
+	}
+	if !strings.Contains(messages[1].Content, "final summary") {
+		t.Fatalf("restored messages missing summary: %#v", messages)
+	}
+	if strings.Contains(messages[1].Content, "first task") {
+		t.Fatalf("restored summary should not include raw old prompt unless summary chose it: %#v", messages[1])
+	}
+	if messages[2].Role != llm.RoleUser || !strings.Contains(messages[2].Content, "second task") {
+		t.Fatalf("restored messages missing current task: %#v", messages)
+	}
+}
+
+func TestNativeLoopContinuesWhenCompressionFails(t *testing.T) {
+	model := &scriptedLLM{
+		responses: []llm.Response{
+			{
+				Provider: "mock",
+				Model:    "mock-native",
+				Content:  "answer survives compression failure",
+				Usage: &llm.Usage{
+					InputTokens:  20_000,
+					OutputTokens: 20,
+					TotalTokens:  20_020,
+				},
+			},
+		},
+	}
+	store, err := session.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFileStore returned error: %v", err)
+	}
+	loop, err := NewNativeLoop(Options{
+		LLM:           model,
+		PromptBuilder: prompt.NewNativeBuilder(prompt.Options{}),
+		Compressor:    failingCompressor{err: errors.New("summary unavailable")},
+		Session:       store,
+	})
+	if err != nil {
+		t.Fatalf("NewNativeLoop returned error: %v", err)
+	}
+
+	result, err := loop.Run(context.Background(), Task{Input: "keep going", AgentName: DefaultAgentName})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if result.Content != "answer survives compression failure" {
+		t.Fatalf("Content = %q, want original answer", result.Content)
+	}
+	if len(loop.history) != 3 {
+		t.Fatalf("history = %d messages, want uncompressed system/user/assistant: %#v", len(loop.history), loop.history)
+	}
+	if strings.Contains(loop.history[1].Content, "Conversation summary") {
+		t.Fatalf("history was compressed despite compressor failure: %#v", loop.history)
+	}
+
+	records, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if snapshot := firstContextSnapshot(records); snapshot != nil {
+		t.Fatalf("unexpected snapshot after compression failure: %#v", snapshot)
+	}
+	event := firstEvent(records, session.EventTypeContextCompression)
+	if event == nil {
+		t.Fatalf("missing compression failure event: %#v", records)
+	}
+	var payload struct {
+		Status string `json:"status"`
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		t.Fatalf("parse compression payload: %v", err)
+	}
+	if payload.Status != "failed" || payload.Reason != "compressor_error" {
+		t.Fatalf("compression payload = %#v, want failed compressor_error", payload)
+	}
+}
+
 func countEventTypes(records []session.Record) map[string]int {
 	counts := make(map[string]int)
 	for _, record := range records {
@@ -329,6 +589,15 @@ func firstEvent(records []session.Record, eventType string) *session.Event {
 	for _, record := range records {
 		if record.Kind == session.RecordKindEvent && record.Event != nil && record.Event.Type == eventType {
 			return record.Event
+		}
+	}
+	return nil
+}
+
+func firstContextSnapshot(records []session.Record) *session.Record {
+	for i := range records {
+		if records[i].Kind == session.RecordKindContextSnapshot {
+			return &records[i]
 		}
 	}
 	return nil
@@ -366,4 +635,12 @@ func (c *scriptedLLM) Complete(_ context.Context, req llm.Request) (llm.Response
 	response := c.responses[0]
 	c.responses = c.responses[1:]
 	return response, nil
+}
+
+type failingCompressor struct {
+	err error
+}
+
+func (c failingCompressor) Compress(context.Context, CompressionInput) (CompressionResult, error) {
+	return CompressionResult{}, c.err
 }

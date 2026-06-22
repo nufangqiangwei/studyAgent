@@ -24,18 +24,20 @@ const (
 )
 
 const (
-	RecordKindMessage      = "message"
-	RecordKindEvent        = "event"
-	RecordKindUsageSummary = "usage_summary"
+	RecordKindMessage         = "message"
+	RecordKindEvent           = "event"
+	RecordKindUsageSummary    = "usage_summary"
+	RecordKindContextSnapshot = "context_snapshot"
 )
 
 const (
-	EventTypeLLMRequest     = "llm_request"
-	EventTypeLLMResponse    = "llm_response"
-	EventTypeToolCall       = "tool_call"
-	EventTypeToolResult     = "tool_result"
-	EventTypePolicyDecision = "policy_decision"
-	EventTypeSummary        = "summary"
+	EventTypeLLMRequest         = "llm_request"
+	EventTypeLLMResponse        = "llm_response"
+	EventTypeToolCall           = "tool_call"
+	EventTypeToolResult         = "tool_result"
+	EventTypePolicyDecision     = "policy_decision"
+	EventTypeSummary            = "summary"
+	EventTypeContextCompression = "context_compression"
 )
 
 type Recorder interface {
@@ -47,20 +49,21 @@ type Loader interface {
 }
 
 type Record struct {
-	Kind         string       `json:"kind"`
-	Timestamp    time.Time    `json:"timestamp"`
-	SessionID    string       `json:"session_id"`
-	AgentID      string       `json:"agent_id"`
-	TurnID       string       `json:"turn_id,omitempty"`
-	AgentName    string       `json:"agent_name,omitempty"`
-	Task         string       `json:"task,omitempty"`
-	WorkDir      string       `json:"work_dir,omitempty"`
-	StepIndex    int          `json:"step_index,omitempty"`
-	Message      *llm.Message `json:"message,omitempty"`
-	Event        *Event       `json:"event,omitempty"`
-	Usage        *llm.Usage   `json:"usage,omitempty"`
-	UsageSummary *llm.Usage   `json:"usage_summary,omitempty"`
-	LLMCalls     int          `json:"llm_calls,omitempty"`
+	Kind            string           `json:"kind"`
+	Timestamp       time.Time        `json:"timestamp"`
+	SessionID       string           `json:"session_id"`
+	AgentID         string           `json:"agent_id"`
+	TurnID          string           `json:"turn_id,omitempty"`
+	AgentName       string           `json:"agent_name,omitempty"`
+	Task            string           `json:"task,omitempty"`
+	WorkDir         string           `json:"work_dir,omitempty"`
+	StepIndex       int              `json:"step_index,omitempty"`
+	Message         *llm.Message     `json:"message,omitempty"`
+	Event           *Event           `json:"event,omitempty"`
+	Usage           *llm.Usage       `json:"usage,omitempty"`
+	UsageSummary    *llm.Usage       `json:"usage_summary,omitempty"`
+	LLMCalls        int              `json:"llm_calls,omitempty"`
+	ContextSnapshot *ContextSnapshot `json:"context_snapshot,omitempty"`
 }
 
 type Event struct {
@@ -70,6 +73,14 @@ type Event struct {
 	AgentName string          `json:"agent_name,omitempty"`
 	Step      int             `json:"step,omitempty"`
 	Payload   json.RawMessage `json:"payload,omitempty"`
+}
+
+type ContextSnapshot struct {
+	Messages             []llm.Message `json:"messages"`
+	Summary              string        `json:"summary"`
+	TriggerTokens        int           `json:"trigger_tokens"`
+	ContextWindowTokens  int           `json:"context_window_tokens"`
+	OriginalMessageCount int           `json:"original_message_count"`
 }
 
 type EventScope struct {
@@ -310,6 +321,7 @@ func (s *FileStore) Save(ctx context.Context, record Record) error {
 	record.Event = cloneEventPtr(record.Event)
 	record.Usage = cloneUsage(record.Usage)
 	record.UsageSummary = cloneUsage(record.UsageSummary)
+	record.ContextSnapshot = cloneContextSnapshotPtr(record.ContextSnapshot)
 	if record.Event != nil {
 		if record.Event.ID == "" {
 			eventID, err := NewID()
@@ -590,6 +602,29 @@ func cloneEventPtr(event *Event) *Event {
 	cloned := *event
 	cloned.Payload = append(json.RawMessage(nil), event.Payload...)
 	return &cloned
+}
+
+func cloneContextSnapshotPtr(snapshot *ContextSnapshot) *ContextSnapshot {
+	if snapshot == nil {
+		return nil
+	}
+	cloned := *snapshot
+	cloned.Messages = cloneMessages(snapshot.Messages)
+	return &cloned
+}
+
+func cloneMessages(messages []llm.Message) []llm.Message {
+	if len(messages) == 0 {
+		return nil
+	}
+	cloned := make([]llm.Message, 0, len(messages))
+	for _, message := range messages {
+		msg := message
+		msg.ToolCalls = cloneLLMToolCalls(message.ToolCalls)
+		msg.Usage = cloneUsage(message.Usage)
+		cloned = append(cloned, msg)
+	}
+	return cloned
 }
 
 func cloneLLMToolCalls(calls []llm.ToolCall) []llm.ToolCall {
