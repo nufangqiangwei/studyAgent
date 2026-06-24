@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"agent/internal/prompt"
+	"agent/internal/session"
 	"agent/internal/tools"
 )
 
@@ -69,5 +70,13 @@ func (a *ToolsTesterAgent) Run(ctx context.Context, userInput string) error {
 		AgentName: a.Name(),
 	}
 	_, err := a.loop.Run(ctx, userTask)
+	return err
+}
+
+func (a *ToolsTesterAgent) Resume(ctx context.Context, checkpoint session.ResumeCheckpoint) error {
+	if a == nil || a.loop == nil {
+		return fmt.Errorf("tools tester agent: not initialized")
+	}
+	_, err := a.loop.Resume(ctx, checkpoint)
 	return err
 }

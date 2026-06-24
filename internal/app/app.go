@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"agent/internal/agent"
 	"agent/internal/cli"
@@ -55,9 +56,36 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer, errOut
 	if err != nil {
 		return err
 	}
-	sessionStore, err := session.NewFileStore(sessionDir)
-	if err != nil {
-		return fmt.Errorf("create session: %w", err)
+
+	var sessionStore *session.FileStore
+	var resumeCheckpoint *session.ResumeCheckpoint
+	if cfg.ResumeSessionID != "" {
+		resumeStore, checkpoint, err := session.OpenResumeFileStore(ctx, sessionDir, cfg.ResumeSessionID, cfg.ResumeAgentID)
+		if err != nil {
+			return err
+		}
+		if cfg.Command == "cli" {
+			confirmed, err := confirmResume(in, out, checkpoint)
+			if err != nil {
+				return err
+			}
+			if confirmed {
+				sessionStore = resumeStore
+				resumeCheckpoint = &checkpoint
+			}
+		} else {
+			sessionStore = resumeStore
+			resumeCheckpoint = &checkpoint
+		}
+	}
+	if sessionStore == nil {
+		sessionStore, err = session.NewFileStore(sessionDir)
+		if err != nil {
+			return fmt.Errorf("create session: %w", err)
+		}
+	}
+	if resumeCheckpoint != nil && resumeCheckpoint.WorkDir != "" {
+		workDir = resumeCheckpoint.WorkDir
 	}
 
 	var debugRecorder provider.BodyDebugRecorder
@@ -93,7 +121,11 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer, errOut
 		logger.Debugf("context window tokens resolved for provider=%s model=%s tokens=%d source=%s", cfg.Provider, result.Model, result.Tokens, result.Source)
 	}
 
-	agentSelector, err := newAgentSelector(ctx, agent.Catalog, agent.AnalyzeAgentName, agent.CreatAgentOptions{
+	initialAgentName := agent.AnalyzeAgentName
+	if resumeCheckpoint != nil && strings.TrimSpace(resumeCheckpoint.AgentName) != "" {
+		initialAgentName = resumeCheckpoint.AgentName
+	}
+	agentSelector, err := newAgentSelector(ctx, agent.Catalog, initialAgentName, agent.CreatAgentOptions{
 		LLM:      modelClient,
 		Model:    cfg.Model,
 		Logger:   logger,
@@ -138,10 +170,67 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer, errOut
 	}
 	runCtx := content.WithEnv(ctx, &env)
 
+	if resumeCheckpoint != nil {
+		if cfg.Command == "run" {
+			return agentSelector.Resume(runCtx, *resumeCheckpoint)
+		}
+		if err := agentSelector.Resume(runCtx, *resumeCheckpoint); err != nil {
+			return err
+		}
+	}
 	if cfg.Command == "cli" {
 		return cli.Run(runCtx, env, command.Manage)
 	}
 	return startupcmd.Run(runCtx, cfg, command.Manage, env)
+}
+
+func confirmResume(in io.Reader, out io.Writer, checkpoint session.ResumeCheckpoint) (bool, error) {
+	if out != nil {
+		if _, err := fmt.Fprintf(out, "Interrupted session found:\n  Session: %s\n  Agent: %s\n  Task: %s\n  Step: %d\nContinue from interrupted point? [y/N] ",
+			checkpoint.SessionID, checkpoint.AgentName, checkpoint.Task, checkpoint.StepIndex); err != nil {
+			return false, err
+		}
+	}
+	if in == nil {
+		return false, nil
+	}
+	answer, err := readLineUnbuffered(in)
+	if err != nil {
+		return false, err
+	}
+	switch strings.ToLower(strings.TrimSpace(answer)) {
+	case "y", "yes":
+		return true, nil
+	default:
+		if out != nil {
+			_, err := fmt.Fprintln(out, "Starting a new session.")
+			return false, err
+		}
+		return false, nil
+	}
+}
+
+func readLineUnbuffered(in io.Reader) (string, error) {
+	var b strings.Builder
+	buf := make([]byte, 1)
+	for {
+		n, err := in.Read(buf)
+		if n > 0 {
+			switch buf[0] {
+			case '\n':
+				return b.String(), nil
+			case '\r':
+			default:
+				b.WriteByte(buf[0])
+			}
+		}
+		if err != nil {
+			if err == io.EOF {
+				return b.String(), nil
+			}
+			return "", fmt.Errorf("read resume confirmation: %w", err)
+		}
+	}
 }
 
 func applyFileConfig(cfg startup.Config) (startup.Config, error) {

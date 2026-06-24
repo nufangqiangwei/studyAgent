@@ -26,6 +26,7 @@ type Agent interface {
 	Name() string
 	Tools() []tools.Tool
 	Run(context.Context, string) error
+	Resume(context.Context, session.ResumeCheckpoint) error
 }
 type NewAgent func(context.Context, CreatAgentOptions) (Agent, error)
 

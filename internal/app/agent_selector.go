@@ -2,6 +2,7 @@ package app
 
 import (
 	"agent/internal/agent"
+	"agent/internal/session"
 	"context"
 	"fmt"
 	"strings"
@@ -41,6 +42,21 @@ func (s *agentSelector) Run(ctx context.Context, task string) error {
 		return fmt.Errorf("agent selector: active agent is not configured")
 	}
 	return s.current.Run(ctx, task)
+}
+
+func (s *agentSelector) Resume(ctx context.Context, checkpoint session.ResumeCheckpoint) error {
+	if s == nil {
+		return fmt.Errorf("agent selector: active agent is not configured")
+	}
+	if strings.TrimSpace(checkpoint.AgentName) != "" && !strings.EqualFold(s.ActiveAgentName(), checkpoint.AgentName) {
+		if err := s.SelectAgent(checkpoint.AgentName); err != nil {
+			return err
+		}
+	}
+	if s.current == nil {
+		return fmt.Errorf("agent selector: active agent is not configured")
+	}
+	return s.current.Resume(ctx, checkpoint)
 }
 
 func (s *agentSelector) ActiveAgentName() string {

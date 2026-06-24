@@ -7,17 +7,19 @@ import (
 )
 
 type Config struct {
-	Command     string
-	CommandArgs []string
-	ConfigPath  string
-	Provider    string
-	ModelURL    string
-	Model       string
-	APIKey      string
-	LogLevel    string
-	WorkDir     string
-	Debug       bool
-	PolicyMode  string
+	Command         string
+	CommandArgs     []string
+	ConfigPath      string
+	Provider        string
+	ModelURL        string
+	Model           string
+	APIKey          string
+	LogLevel        string
+	WorkDir         string
+	Debug           bool
+	PolicyMode      string
+	ResumeSessionID string
+	ResumeAgentID   string
 
 	setFlags map[string]bool
 }
@@ -37,6 +39,8 @@ func Parse(args []string) (Config, error) {
 	workDir := fs.String("workdir", "", "workspace directory")
 	debug := fs.Bool("debug", false, "write llm request and response bodies to session debug jsonl")
 	policyMode := fs.String("policy-mode", "read", "tool permission policy mode: read, validate, or modify")
+	resume := fs.String("resume", "", "resume an interrupted session by session id")
+	resumeAgent := fs.String("resume-agent", "", "agent id to resume within the session")
 	help := fs.Bool("help", false, "show help")
 	version := fs.Bool("version", false, "show version")
 	fs.BoolVar(help, "h", false, "show help")
@@ -52,14 +56,16 @@ func Parse(args []string) (Config, error) {
 	})
 
 	cfg := Config{
-		ConfigPath: *configPath,
-		Provider:   *provider,
-		Model:      *model,
-		LogLevel:   *logLevel,
-		WorkDir:    *workDir,
-		Debug:      *debug,
-		PolicyMode: *policyMode,
-		setFlags:   setFlags,
+		ConfigPath:      *configPath,
+		Provider:        *provider,
+		Model:           *model,
+		LogLevel:        *logLevel,
+		WorkDir:         *workDir,
+		Debug:           *debug,
+		PolicyMode:      *policyMode,
+		ResumeSessionID: *resume,
+		ResumeAgentID:   *resumeAgent,
+		setFlags:        setFlags,
 	}
 
 	if *version {
@@ -74,10 +80,32 @@ func Parse(args []string) (Config, error) {
 	remaining := fs.Args()
 	if len(remaining) == 0 {
 		cfg.Command = "cli"
+		if err := validateResumeConfig(cfg); err != nil {
+			return Config{}, err
+		}
 		return cfg, nil
 	}
 
 	cfg.Command = remaining[0]
 	cfg.CommandArgs = remaining[1:]
+	if err := validateResumeConfig(cfg); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
+}
+
+func validateResumeConfig(cfg Config) error {
+	if cfg.ResumeAgentID != "" && cfg.ResumeSessionID == "" {
+		return fmt.Errorf("--resume-agent requires --resume")
+	}
+	if cfg.ResumeSessionID == "" {
+		return nil
+	}
+	if cfg.Command != "cli" && cfg.Command != "run" {
+		return fmt.Errorf("--resume only supports cli mode or run command, got %q", cfg.Command)
+	}
+	if cfg.Command == "run" && len(cfg.CommandArgs) > 0 {
+		return fmt.Errorf("--resume run resumes the saved task and does not accept a new task")
+	}
+	return nil
 }

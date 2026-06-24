@@ -82,6 +82,8 @@ func (helpCommand) Execute(_ context.Context, env content.Env, _ []string) error
 	fmt.Fprintln(env.IO.Out, "  --log-level string  debug, info, warn, error, silent")
 	fmt.Fprintln(env.IO.Out, "  --policy-mode string tool permission mode: read, validate, modify; default: read")
 	fmt.Fprintln(env.IO.Out, "  --debug             write llm request and response bodies to session llm.jsonl")
+	fmt.Fprintln(env.IO.Out, "  --resume string     resume an interrupted session by session id")
+	fmt.Fprintln(env.IO.Out, "  --resume-agent string agent id to resume within the session")
 	fmt.Fprintln(env.IO.Out, "  --help, -h          show help")
 	fmt.Fprintln(env.IO.Out, "  --version, -v       show version")
 	fmt.Fprintln(env.IO.Out)

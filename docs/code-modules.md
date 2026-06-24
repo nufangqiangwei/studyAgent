@@ -155,17 +155,22 @@ type AgentRunner interface {
 - 定义 agent 工厂 `NewAgent` 和创建参数 `CreatAgentOptions`。
 - 维护 agent 工厂注册表。
 - 接收 task。
-- 调用 prompt builder 构建发送给 LLM 的消息。
-- 调用 LLM client。
-- 收集步骤结果。
-- 后续扩展工具调用、测试反馈和多步循环。
+- 通过 `NativeLoop` 统一执行 agent 的 LLM 调用流程。
+- 在一次 task run 内支持多步 LLM/tool 循环。
+- 收集每一步的模型响应、工具调用和工具结果。
+- 维护会话历史、上下文压缩、步骤上限和最终输出。
 
-当前 `NativeLoop` 是最小单步 loop，`MaxSteps` 默认为 1。它依赖两个接口：
+`NativeLoop` 是所有 agent 复用的原生执行循环，不再是单步 loop。它负责把一次 agent task 展开为一组受控的 LLM 调用和工具调用：先构建 prompt 和上下文，再调用 LLM；如果模型返回 tool call，就执行工具、把工具结果作为 observation 写回上下文，并进入下一步；如果模型不再返回 tool call，就结束本次 run 并输出最终结果。`MaxSteps` 用于限制单次 run 内最多允许的模型/工具循环步数。
+
+它依赖的核心接口：
 
 - `LLMClient`
 - `PromptBuilder`
+- `ContextBuilder`
+- `ToolRegistry`
+- `SessionCompressor`
 
-这让测试时可以替换 fake LLM 或 fake prompt builder，不需要真实模型。
+这让测试时可以替换 fake LLM、fake prompt builder、fake tool registry 或 fake compressor，不需要真实模型和真实工具。
 
 当前 agent 注册机制：
 
@@ -173,7 +178,8 @@ type AgentRunner interface {
 - `init` 默认注册 `default`、`analyze` 和 `tools-tester` agent。
 - `app.agentSelector` 通过 `Catalog.SelectAgent` 选择工厂并创建当前 active agent。
 - `content.AgentRunner` 和 `content.AgentSelector` 是命令层使用的外部接口，命令不依赖 `DefaultAgent`、`AnalyzeAgent` 或 `ToolsTesterAgent` 具体类型。
-- 每个 agent 创建自己的工具注册表并注入 `NativeLoop`，agent loop 只依赖 `ToolRegistry` 接口。
+- 每个 agent 负责选择自己的 prompt 策略和工具注册表，并把这些能力注入 `NativeLoop`。
+- 不同 agent 共享同一套 `NativeLoop` 执行语义；差异主要来自 prompt、工具集合、模型配置和 agent 元信息。
 
 ## Prompt Engineering 模块
 

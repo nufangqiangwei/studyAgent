@@ -179,7 +179,6 @@ func (l *NativeLoop) Run(ctx context.Context, task Task) (Result, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	result := Result{}
 	promptOutput, err := l.promptBuilder.Build(ctx, prompt.Input{
 		Task:    task.Input,
 		WorkDir: task.WorkDir,
@@ -213,10 +212,109 @@ func (l *NativeLoop) Run(ctx context.Context, task Task) (Result, error) {
 		}
 	}
 
-	var totalUsage llm.Usage
-	llmCalls := 0
+	return l.runFromStep(ctx, task, turnID, 1, promptOutput, llmContext, llm.Usage{}, 0)
+}
 
-	for step := 1; step <= l.maxSteps; step++ {
+func (l *NativeLoop) Resume(ctx context.Context, checkpoint session.ResumeCheckpoint) (Result, error) {
+	if checkpoint.TurnID == "" {
+		return Result{}, fmt.Errorf("native loop resume: turn id is required")
+	}
+	if checkpoint.Task == "" {
+		return Result{}, fmt.Errorf("native loop resume: task is required")
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	task := Task{
+		Input:     checkpoint.Task,
+		WorkDir:   checkpoint.WorkDir,
+		AgentName: checkpoint.AgentName,
+	}
+	promptOutput, err := l.promptBuilder.Build(ctx, prompt.Input{
+		Task:    task.Input,
+		WorkDir: task.WorkDir,
+	})
+	if err != nil {
+		return Result{}, fmt.Errorf("build prompt: %w", err)
+	}
+	resumePrompt := promptOutput
+	resumePrompt.Messages = nil
+
+	records := cloneSessionRecords(checkpoint.TurnRecords)
+	if len(records) == 0 {
+		records = recordsForTurn(checkpoint.Records, checkpoint.TurnID)
+	}
+	if len(records) == 0 {
+		return Result{}, fmt.Errorf("native loop resume: no records for turn %s", checkpoint.TurnID)
+	}
+	records, err = l.materializeResumeMessages(ctx, task, checkpoint.TurnID, records)
+	if err != nil {
+		return Result{}, err
+	}
+
+	history := messagesFromSession(records)
+	if len(history) == 0 {
+		return Result{}, fmt.Errorf("native loop resume: no restorable messages for turn %s", checkpoint.TurnID)
+	}
+	llmContext, err := l.contextBuilder.Build(ctx, ContextInput{
+		Prompt:  resumePrompt,
+		History: history,
+		Tools:   l.toolDefs,
+	})
+	if err != nil {
+		return Result{}, fmt.Errorf("build llm context: %w", err)
+	}
+	if llmContext == nil {
+		return Result{}, fmt.Errorf("build llm context: nil context")
+	}
+
+	totalUsage, llmCalls := usageFromResumeRecords(records)
+	requestStep := latestEventStep(records, session.EventTypeLLMRequest)
+	responseStep, response, hasResponse, err := latestLLMResponse(records)
+	if err != nil {
+		return Result{}, err
+	}
+	if requestStep == 0 {
+		return Result{}, fmt.Errorf("native loop resume: turn %s has no llm request", checkpoint.TurnID)
+	}
+	if !hasResponse || requestStep > responseStep {
+		return l.runFromStep(ctx, task, checkpoint.TurnID, requestStep, promptOutput, llmContext, totalUsage, llmCalls)
+	}
+
+	toolCalls := resumeToolCalls(records, responseStep, response)
+	if len(toolCalls) == 0 {
+		result := Result{Content: response.Content}
+		if err := l.finalizeRun(ctx, task, checkpoint.TurnID, responseStep, llmContext, response.Usage, totalUsage, llmCalls, response.Content); err != nil {
+			return Result{}, err
+		}
+		return result, nil
+	}
+
+	pending := pendingResumeToolCalls(records, responseStep, toolCalls)
+	if len(pending) > 0 {
+		if l.tools == nil {
+			return Result{}, fmt.Errorf("native loop: tool registry is required for tool calls")
+		}
+		if err := l.executeResumeToolCalls(ctx, task, checkpoint.TurnID, responseStep, llmContext, records, pending); err != nil {
+			return Result{}, err
+		}
+	}
+
+	if responseStep == l.maxSteps {
+		if err := l.finalizeRun(ctx, task, checkpoint.TurnID, responseStep, llmContext, response.Usage, totalUsage, llmCalls, ""); err != nil {
+			return Result{}, err
+		}
+		return Result{}, fmt.Errorf("native loop: reached max steps after tool calls")
+	}
+	totalUsage, llmCalls = l.updateHistoryAndMaybeCompress(ctx, task, checkpoint.TurnID, responseStep, llmContext, response.Usage, totalUsage, llmCalls)
+	return l.runFromStep(ctx, task, checkpoint.TurnID, responseStep+1, promptOutput, llmContext, totalUsage, llmCalls)
+}
+
+func (l *NativeLoop) runFromStep(ctx context.Context, task Task, turnID string, startStep int, promptOutput prompt.Output, llmContext LLMContext, totalUsage llm.Usage, llmCalls int) (Result, error) {
+	result := Result{}
+
+	for step := startStep; step <= l.maxSteps; step++ {
 		if l.logger != nil {
 			l.logger.Debugf("native loop step %d", step)
 		}
@@ -447,6 +545,307 @@ func (l *NativeLoop) maybeCompressContext(ctx context.Context, task Task, turnID
 		Usage:                cloneUsage(compression.Usage),
 	})
 	return compression.Usage, 1
+}
+
+func (l *NativeLoop) materializeResumeMessages(ctx context.Context, task Task, turnID string, records []session.Record) ([]session.Record, error) {
+	materialized := cloneSessionRecords(records)
+	for _, record := range records {
+		if record.TurnID != turnID || record.Kind != session.RecordKindEvent || record.Event == nil {
+			continue
+		}
+		switch record.Event.Type {
+		case session.EventTypeLLMResponse:
+			if hasAssistantMessage(materialized, record.StepIndex) {
+				continue
+			}
+			var payload llmResponseEventPayload
+			if err := json.Unmarshal(record.Event.Payload, &payload); err != nil {
+				return nil, fmt.Errorf("resume parse llm response event: %w", err)
+			}
+			toolCalls := resumeToolCalls(materialized, record.StepIndex, payload.Response)
+			msg, ok := assistantMessage(payload.Response, toolCalls)
+			if !ok {
+				continue
+			}
+			if err := l.saveMessage(ctx, task, turnID, record.StepIndex, msg); err != nil {
+				return nil, err
+			}
+			materialized = append(materialized, session.Record{
+				Kind:      session.RecordKindMessage,
+				TurnID:    turnID,
+				StepIndex: record.StepIndex,
+				Message:   &msg,
+			})
+		case session.EventTypeToolResult:
+			var payload toolResultEventPayload
+			if err := json.Unmarshal(record.Event.Payload, &payload); err != nil {
+				return nil, fmt.Errorf("resume parse tool result event: %w", err)
+			}
+			if hasToolMessage(materialized, record.StepIndex, payload.ID) {
+				continue
+			}
+			call := resumeToolCallByID(materialized, record.StepIndex, payload.ID, payload.Name)
+			msg := toolResultMessage(call, ToolResult{
+				Name:        payload.Name,
+				StartedAt:   payload.StartedAt,
+				CompletedAt: payload.CompletedAt,
+				Content:     payload.Content,
+				Metadata:    payload.Metadata,
+				Error:       payload.Error,
+			})
+			if err := l.saveMessage(ctx, task, turnID, record.StepIndex, msg); err != nil {
+				return nil, err
+			}
+			materialized = append(materialized, session.Record{
+				Kind:      session.RecordKindMessage,
+				TurnID:    turnID,
+				StepIndex: record.StepIndex,
+				Message:   &msg,
+			})
+		}
+	}
+	return materialized, nil
+}
+
+func usageFromResumeRecords(records []session.Record) (llm.Usage, int) {
+	var total llm.Usage
+	llmCalls := 0
+	for _, record := range records {
+		if record.Kind != session.RecordKindEvent || record.Event == nil {
+			continue
+		}
+		switch record.Event.Type {
+		case session.EventTypeLLMResponse:
+			var payload llmResponseEventPayload
+			if json.Unmarshal(record.Event.Payload, &payload) == nil && payload.Response.Usage != nil {
+				total = total.Add(*payload.Response.Usage)
+			}
+			llmCalls++
+		case session.EventTypeContextCompression:
+			var payload contextCompressionEventPayload
+			if json.Unmarshal(record.Event.Payload, &payload) == nil && payload.Usage != nil {
+				total = total.Add(*payload.Usage)
+				llmCalls++
+			}
+		}
+	}
+	return total, llmCalls
+}
+
+func latestEventStep(records []session.Record, eventType string) int {
+	step := 0
+	for _, record := range records {
+		if record.Kind == session.RecordKindEvent && record.Event != nil && record.Event.Type == eventType {
+			step = record.StepIndex
+		}
+	}
+	return step
+}
+
+func latestLLMResponse(records []session.Record) (int, llm.Response, bool, error) {
+	var response llm.Response
+	step := 0
+	found := false
+	for _, record := range records {
+		if record.Kind != session.RecordKindEvent || record.Event == nil || record.Event.Type != session.EventTypeLLMResponse {
+			continue
+		}
+		var payload llmResponseEventPayload
+		if err := json.Unmarshal(record.Event.Payload, &payload); err != nil {
+			return 0, llm.Response{}, false, fmt.Errorf("resume parse llm response event: %w", err)
+		}
+		step = record.StepIndex
+		response = payload.Response
+		found = true
+	}
+	return step, response, found, nil
+}
+
+func resumeToolCalls(records []session.Record, step int, response llm.Response) []llm.ToolCall {
+	for i := len(records) - 1; i >= 0; i-- {
+		record := records[i]
+		if record.StepIndex == step && record.Kind == session.RecordKindMessage && record.Message != nil && record.Message.Role == llm.RoleAssistant && len(record.Message.ToolCalls) > 0 {
+			return cloneLLMToolCalls(record.Message.ToolCalls)
+		}
+	}
+
+	var calls []llm.ToolCall
+	for _, record := range records {
+		if record.StepIndex != step || record.Kind != session.RecordKindEvent || record.Event == nil || record.Event.Type != session.EventTypeToolCall {
+			continue
+		}
+		var payload toolCallEventPayload
+		if json.Unmarshal(record.Event.Payload, &payload) == nil {
+			calls = append(calls, llm.ToolCall{
+				ID:    payload.ID,
+				Name:  payload.Name,
+				Input: append(json.RawMessage(nil), payload.Input...),
+			})
+		}
+	}
+	if len(calls) > 0 {
+		return calls
+	}
+	return normalizeToolCalls(response.ToolCalls, step)
+}
+
+func pendingResumeToolCalls(records []session.Record, step int, calls []llm.ToolCall) []llm.ToolCall {
+	var pending []llm.ToolCall
+	for _, call := range calls {
+		if hasToolResult(records, step, call.ID) {
+			continue
+		}
+		pending = append(pending, call)
+	}
+	return pending
+}
+
+func (l *NativeLoop) executeResumeToolCalls(ctx context.Context, task Task, turnID string, step int, llmContext LLMContext, records []session.Record, calls []llm.ToolCall) error {
+	for _, call := range calls {
+		if !hasToolCallEvent(records, step, call.ID) {
+			if err := l.saveEvent(ctx, task, turnID, step, session.EventTypeToolCall, toolCallEventPayload{
+				ID:    call.ID,
+				Name:  call.Name,
+				Input: append(json.RawMessage(nil), call.Input...),
+			}); err != nil {
+				return err
+			}
+		}
+
+		toolStartedAt := time.Now().UTC()
+		toolCtx := l.toolExecutionContext(ctx, task, turnID, step)
+		toolResult, err := l.tools.Execute(toolCtx, call.Name, call.Input)
+		toolCompletedAt := time.Now().UTC()
+		recorded := ToolResult{
+			Name:        call.Name,
+			StartedAt:   toolStartedAt,
+			CompletedAt: toolCompletedAt,
+		}
+		if err != nil {
+			recorded.Error = err.Error()
+		} else {
+			recorded.Content = toolResult.Content
+			recorded.Metadata = toolResult.Metadata
+		}
+		if err := l.saveEvent(ctx, task, turnID, step, session.EventTypeToolResult, toolResultEventPayload{
+			ID:          call.ID,
+			Name:        call.Name,
+			StartedAt:   toolStartedAt,
+			CompletedAt: toolCompletedAt,
+			Content:     recorded.Content,
+			Metadata:    recorded.Metadata,
+			Error:       recorded.Error,
+		}); err != nil {
+			return err
+		}
+		toolMessage := llmContext.AddToolResult(call, recorded)
+		if err := l.saveMessage(ctx, task, turnID, step, toolMessage); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func hasAssistantMessage(records []session.Record, step int) bool {
+	for _, record := range records {
+		if record.StepIndex == step && record.Kind == session.RecordKindMessage && record.Message != nil && record.Message.Role == llm.RoleAssistant {
+			return true
+		}
+	}
+	return false
+}
+
+func hasToolMessage(records []session.Record, step int, callID string) bool {
+	for _, record := range records {
+		if record.StepIndex == step && record.Kind == session.RecordKindMessage && record.Message != nil && record.Message.Role == llm.RoleTool && record.Message.ToolCallID == callID {
+			return true
+		}
+	}
+	return false
+}
+
+func hasToolResult(records []session.Record, step int, callID string) bool {
+	if hasToolMessage(records, step, callID) {
+		return true
+	}
+	for _, record := range records {
+		if record.StepIndex != step || record.Kind != session.RecordKindEvent || record.Event == nil || record.Event.Type != session.EventTypeToolResult {
+			continue
+		}
+		var payload toolResultEventPayload
+		if json.Unmarshal(record.Event.Payload, &payload) == nil && payload.ID == callID {
+			return true
+		}
+	}
+	return false
+}
+
+func hasToolCallEvent(records []session.Record, step int, callID string) bool {
+	for _, record := range records {
+		if record.StepIndex != step || record.Kind != session.RecordKindEvent || record.Event == nil || record.Event.Type != session.EventTypeToolCall {
+			continue
+		}
+		var payload toolCallEventPayload
+		if json.Unmarshal(record.Event.Payload, &payload) == nil && payload.ID == callID {
+			return true
+		}
+	}
+	return false
+}
+
+func resumeToolCallByID(records []session.Record, step int, callID, name string) llm.ToolCall {
+	calls := resumeToolCalls(records, step, llm.Response{})
+	for _, call := range calls {
+		if call.ID == callID {
+			return call
+		}
+	}
+	return llm.ToolCall{
+		ID:    callID,
+		Name:  name,
+		Input: json.RawMessage(`{}`),
+	}
+}
+
+func recordsForTurn(records []session.Record, turnID string) []session.Record {
+	var filtered []session.Record
+	for _, record := range records {
+		if record.TurnID == turnID {
+			filtered = append(filtered, cloneSessionRecord(record))
+		}
+	}
+	return filtered
+}
+
+func cloneSessionRecords(records []session.Record) []session.Record {
+	if len(records) == 0 {
+		return nil
+	}
+	cloned := make([]session.Record, 0, len(records))
+	for _, record := range records {
+		cloned = append(cloned, cloneSessionRecord(record))
+	}
+	return cloned
+}
+
+func cloneSessionRecord(record session.Record) session.Record {
+	if record.Message != nil {
+		msg := cloneMessage(*record.Message)
+		record.Message = &msg
+	}
+	if record.Event != nil {
+		event := *record.Event
+		event.Payload = append(json.RawMessage(nil), record.Event.Payload...)
+		record.Event = &event
+	}
+	record.Usage = cloneUsage(record.Usage)
+	record.UsageSummary = cloneUsage(record.UsageSummary)
+	if record.ContextSnapshot != nil {
+		snapshot := *record.ContextSnapshot
+		snapshot.Messages = cloneMessages(record.ContextSnapshot.Messages)
+		record.ContextSnapshot = &snapshot
+	}
+	return record
 }
 
 func (l *NativeLoop) loadSessionRecords(ctx context.Context) ([]session.Record, error) {

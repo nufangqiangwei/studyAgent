@@ -85,10 +85,10 @@
 - 定义对外 `Agent` 接口和 `NewAgent` 工厂类型。
 - 维护 agent 工厂注册表 `Catalog`。
 - 当前默认注册 `default`、`analyze` 和 `tools-tester` agent。
-- agent 任务循环。
-- 决定下一步是调用模型、调用工具还是结束。
-- 管理步骤状态。
-- 处理模型响应和工具结果。
+- 提供所有 agent 共享的 `NativeLoop` 执行循环。
+- 在一次 task run 内统一调度多步 LLM 调用、工具调用、工具结果回填和结束条件判断。
+- 管理步骤状态、会话历史、上下文压缩和步骤上限。
+- 具体 agent 主要负责选择 prompt 策略、工具集合、模型配置和 agent 元信息。
 
 ### internal/prompt
 

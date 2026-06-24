@@ -54,3 +54,27 @@ func TestParseRunCommand(t *testing.T) {
 		t.Fatalf("CommandArgs = %#v, want [hello]", cfg.CommandArgs)
 	}
 }
+
+func TestParseResumeRunCommand(t *testing.T) {
+	cfg, err := Parse([]string{"--resume", "session-1", "--resume-agent", "agent-1", "run"})
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if cfg.Command != "run" || cfg.ResumeSessionID != "session-1" || cfg.ResumeAgentID != "agent-1" {
+		t.Fatalf("cfg = %#v", cfg)
+	}
+}
+
+func TestParseResumeRejectsUnsupportedCommand(t *testing.T) {
+	_, err := Parse([]string{"--resume", "session-1", "status"})
+	if err == nil {
+		t.Fatal("Parse returned nil error")
+	}
+}
+
+func TestParseResumeRunRejectsNewTask(t *testing.T) {
+	_, err := Parse([]string{"--resume", "session-1", "run", "new task"})
+	if err == nil {
+		t.Fatal("Parse returned nil error")
+	}
+}

@@ -575,6 +575,140 @@ func TestNativeLoopContinuesWhenCompressionFails(t *testing.T) {
 	}
 }
 
+func TestNativeLoopResumeReplaysLLMAfterSavedRequest(t *testing.T) {
+	store, checkpoint := createInterruptedTurn(t, nil)
+	if err := session.SaveEvent(context.Background(), store, session.EventScope{
+		TurnID:    checkpoint.TurnID,
+		Task:      checkpoint.Task,
+		AgentName: checkpoint.AgentName,
+		Step:      1,
+	}, session.EventTypeLLMRequest, llmRequestEventPayload{Request: llm.Request{Model: "mock-native"}}); err != nil {
+		t.Fatalf("SaveEvent request returned error: %v", err)
+	}
+	checkpoint = loadInterruptedCheckpoint(t, store)
+
+	model := &scriptedLLM{responses: []llm.Response{{Provider: "mock", Model: "mock-native", Content: "resumed final"}}}
+	var out strings.Builder
+	loop := newResumeLoop(t, model, store, nil, &out)
+
+	result, err := loop.Resume(context.Background(), checkpoint)
+	if err != nil {
+		t.Fatalf("Resume returned error: %v", err)
+	}
+	if result.Content != "resumed final" || len(model.requests) != 1 {
+		t.Fatalf("result/model requests = %#v/%d", result, len(model.requests))
+	}
+	if !strings.Contains(out.String(), "resumed final") {
+		t.Fatalf("output missing resumed final:\n%s", out.String())
+	}
+}
+
+func TestNativeLoopResumeMaterializesLLMResponseAndFinalizes(t *testing.T) {
+	store, checkpoint := createInterruptedTurn(t, nil)
+	if err := session.SaveEvent(context.Background(), store, session.EventScope{
+		TurnID:    checkpoint.TurnID,
+		Task:      checkpoint.Task,
+		AgentName: checkpoint.AgentName,
+		Step:      1,
+	}, session.EventTypeLLMRequest, llmRequestEventPayload{Request: llm.Request{Model: "mock-native"}}); err != nil {
+		t.Fatalf("SaveEvent request returned error: %v", err)
+	}
+	if err := session.SaveEvent(context.Background(), store, session.EventScope{
+		TurnID:    checkpoint.TurnID,
+		Task:      checkpoint.Task,
+		AgentName: checkpoint.AgentName,
+		Step:      1,
+	}, session.EventTypeLLMResponse, llmResponseEventPayload{
+		Response: llm.Response{Provider: "mock", Model: "mock-native", Content: "saved final", Usage: &llm.Usage{TotalTokens: 9}},
+	}); err != nil {
+		t.Fatalf("SaveEvent response returned error: %v", err)
+	}
+	checkpoint = loadInterruptedCheckpoint(t, store)
+
+	model := &scriptedLLM{}
+	var out strings.Builder
+	loop := newResumeLoop(t, model, store, nil, &out)
+
+	result, err := loop.Resume(context.Background(), checkpoint)
+	if err != nil {
+		t.Fatalf("Resume returned error: %v", err)
+	}
+	if result.Content != "saved final" || len(model.requests) != 0 {
+		t.Fatalf("result/model requests = %#v/%d", result, len(model.requests))
+	}
+	records, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	messages := messagesFromRecords(records)
+	if messages[len(messages)-1].Role != llm.RoleAssistant || messages[len(messages)-1].Content != "saved final" {
+		t.Fatalf("records did not materialize assistant message: %#v", messages)
+	}
+	if usageSummaryRecord(records) == nil {
+		t.Fatalf("missing usage summary after resume: %#v", records)
+	}
+}
+
+func TestNativeLoopResumeReexecutesMissingToolResult(t *testing.T) {
+	call := llm.ToolCall{ID: "call_1", Name: tools.AskUserToolName, Input: json.RawMessage(`{"question":"Which target?"}`)}
+	assistantMsg := llm.Message{Role: llm.RoleAssistant, Content: "need target", ToolCalls: []llm.ToolCall{call}}
+	store, checkpoint := createInterruptedTurn(t, []session.Record{
+		{Kind: session.RecordKindEvent, StepIndex: 1, Event: &session.Event{Type: session.EventTypeLLMRequest, Payload: mustJSON(t, llmRequestEventPayload{Request: llm.Request{Model: "mock-native"}})}},
+		{Kind: session.RecordKindEvent, StepIndex: 1, Event: &session.Event{Type: session.EventTypeLLMResponse, Payload: mustJSON(t, llmResponseEventPayload{Response: llm.Response{Provider: "mock", Model: "mock-native", Content: "need target", ToolCalls: []llm.ToolCall{call}}})}},
+		{Kind: session.RecordKindMessage, StepIndex: 1, Message: &assistantMsg},
+		{Kind: session.RecordKindEvent, StepIndex: 1, Event: &session.Event{Type: session.EventTypeToolCall, Payload: mustJSON(t, toolCallEventPayload{ID: call.ID, Name: call.Name, Input: call.Input})}},
+	})
+	toolRegistry := tools.NewRegistry()
+	if err := toolRegistry.Register(tools.NewAskUserTool()); err != nil {
+		t.Fatalf("register ask_user: %v", err)
+	}
+	model := &scriptedLLM{responses: []llm.Response{{Provider: "mock", Model: "mock-native", Content: "final after tool"}}}
+	var out strings.Builder
+	loop := newResumeLoop(t, model, store, toolRegistry, &out)
+	ctx := content.WithEnv(context.Background(), &content.Env{IO: content.IO{In: strings.NewReader("web app\n"), Out: &out}})
+
+	result, err := loop.Resume(ctx, checkpoint)
+	if err != nil {
+		t.Fatalf("Resume returned error: %v", err)
+	}
+	if result.Content != "final after tool" || len(model.requests) != 1 {
+		t.Fatalf("result/model requests = %#v/%d", result, len(model.requests))
+	}
+	if got := countEventTypes(mustLoadRecords(t, store))[session.EventTypeToolResult]; got != 1 {
+		t.Fatalf("tool result events = %d, want 1", got)
+	}
+	if !strings.Contains(model.requests[0].Messages[len(model.requests[0].Messages)-1].Content, "web app") {
+		t.Fatalf("resume request missing reexecuted tool result: %#v", model.requests[0].Messages)
+	}
+}
+
+func TestNativeLoopResumeContinuesAfterMaterializingToolResultEvent(t *testing.T) {
+	call := llm.ToolCall{ID: "call_1", Name: tools.AskUserToolName, Input: json.RawMessage(`{"question":"Which target?"}`)}
+	assistantMsg := llm.Message{Role: llm.RoleAssistant, Content: "need target", ToolCalls: []llm.ToolCall{call}}
+	store, checkpoint := createInterruptedTurn(t, []session.Record{
+		{Kind: session.RecordKindEvent, StepIndex: 1, Event: &session.Event{Type: session.EventTypeLLMRequest, Payload: mustJSON(t, llmRequestEventPayload{Request: llm.Request{Model: "mock-native"}})}},
+		{Kind: session.RecordKindEvent, StepIndex: 1, Event: &session.Event{Type: session.EventTypeLLMResponse, Payload: mustJSON(t, llmResponseEventPayload{Response: llm.Response{Provider: "mock", Model: "mock-native", Content: "need target", ToolCalls: []llm.ToolCall{call}}})}},
+		{Kind: session.RecordKindMessage, StepIndex: 1, Message: &assistantMsg},
+		{Kind: session.RecordKindEvent, StepIndex: 1, Event: &session.Event{Type: session.EventTypeToolCall, Payload: mustJSON(t, toolCallEventPayload{ID: call.ID, Name: call.Name, Input: call.Input})}},
+		{Kind: session.RecordKindEvent, StepIndex: 1, Event: &session.Event{Type: session.EventTypeToolResult, Payload: mustJSON(t, toolResultEventPayload{ID: call.ID, Name: call.Name, Content: "saved tool result"})}},
+	})
+	model := &scriptedLLM{responses: []llm.Response{{Provider: "mock", Model: "mock-native", Content: "final after saved tool"}}}
+	var out strings.Builder
+	loop := newResumeLoop(t, model, store, nil, &out)
+
+	result, err := loop.Resume(context.Background(), checkpoint)
+	if err != nil {
+		t.Fatalf("Resume returned error: %v", err)
+	}
+	if result.Content != "final after saved tool" || len(model.requests) != 1 {
+		t.Fatalf("result/model requests = %#v/%d", result, len(model.requests))
+	}
+	last := model.requests[0].Messages[len(model.requests[0].Messages)-1]
+	if last.Role != llm.RoleTool || last.Content != "saved tool result" {
+		t.Fatalf("resume request missing materialized tool message: %#v", model.requests[0].Messages)
+	}
+}
+
 func countEventTypes(records []session.Record) map[string]int {
 	counts := make(map[string]int)
 	for _, record := range records {
@@ -620,6 +754,94 @@ func usageSummaryRecord(records []session.Record) *session.Record {
 		}
 	}
 	return nil
+}
+
+func createInterruptedTurn(t *testing.T, extra []session.Record) (*session.FileStore, session.ResumeCheckpoint) {
+	t.Helper()
+	store, err := session.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFileStore returned error: %v", err)
+	}
+	base := []session.Record{
+		{
+			Kind:      session.RecordKindMessage,
+			TurnID:    "turn-1",
+			Task:      "resume task",
+			WorkDir:   "C:\\Code\\GO\\agent",
+			AgentName: DefaultAgentName,
+			Message:   &llm.Message{Role: llm.RoleSystem, Content: "system prompt"},
+		},
+		{
+			Kind:      session.RecordKindMessage,
+			TurnID:    "turn-1",
+			Task:      "resume task",
+			WorkDir:   "C:\\Code\\GO\\agent",
+			AgentName: DefaultAgentName,
+			Message:   &llm.Message{Role: llm.RoleUser, Content: "Task:\nresume task"},
+		},
+	}
+	for _, record := range append(base, extra...) {
+		if record.TurnID == "" {
+			record.TurnID = "turn-1"
+		}
+		if record.Task == "" {
+			record.Task = "resume task"
+		}
+		if record.WorkDir == "" {
+			record.WorkDir = "C:\\Code\\GO\\agent"
+		}
+		if record.AgentName == "" {
+			record.AgentName = DefaultAgentName
+		}
+		if err := store.Save(context.Background(), record); err != nil {
+			t.Fatalf("Save returned error: %v", err)
+		}
+	}
+	return store, loadInterruptedCheckpoint(t, store)
+}
+
+func loadInterruptedCheckpoint(t *testing.T, store *session.FileStore) session.ResumeCheckpoint {
+	t.Helper()
+	records := mustLoadRecords(t, store)
+	checkpoint, err := session.FindInterruptedTurn(records)
+	if err != nil {
+		t.Fatalf("FindInterruptedTurn returned error: %v", err)
+	}
+	return checkpoint
+}
+
+func mustLoadRecords(t *testing.T, store *session.FileStore) []session.Record {
+	t.Helper()
+	records, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	return records
+}
+
+func newResumeLoop(t *testing.T, model *scriptedLLM, store *session.FileStore, registry *tools.Registry, out *strings.Builder) *NativeLoop {
+	t.Helper()
+	loop, err := NewNativeLoop(Options{
+		LLM:           model,
+		PromptBuilder: prompt.NewNativeBuilder(prompt.Options{}),
+		Tools:         registry,
+		MaxSteps:      3,
+		Session:       store,
+		Out:           out,
+	})
+	if err != nil {
+		t.Fatalf("NewNativeLoop returned error: %v", err)
+	}
+	return loop
+}
+
+func mustJSON(t *testing.T, value any) json.RawMessage {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	return data
 }
 
 type scriptedLLM struct {

@@ -2,6 +2,7 @@ package app
 
 import (
 	"agent/internal/agent"
+	"agent/internal/llm"
 	agentsession "agent/internal/session"
 	"bytes"
 	"context"
@@ -58,6 +59,66 @@ func TestRunCommandUsesStartupWrapper(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Mock LLM response") {
 		t.Fatalf("output missing mock response:\n%s", out.String())
+	}
+}
+
+func TestRunCommandResumesInterruptedSession(t *testing.T) {
+	homeDir := configureTestHome(t)
+	workDir := t.TempDir()
+	sessionID := createInterruptedAppSession(t, homeDir, workDir, agent.DefaultAgentName)
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	err := Run(context.Background(), []string{"--resume", sessionID, "run"}, strings.NewReader(""), &out, &errOut)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if !strings.Contains(out.String(), "Mock LLM response") || !strings.Contains(out.String(), "resume from app") {
+		t.Fatalf("output missing resumed response:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "Agent CLI") {
+		t.Fatalf("cmd resume should not enter CLI:\n%s", out.String())
+	}
+}
+
+func TestRunCLIAsksBeforeResumingInterruptedSession(t *testing.T) {
+	homeDir := configureTestHome(t)
+	workDir := t.TempDir()
+	sessionID := createInterruptedAppSession(t, homeDir, workDir, agent.DefaultAgentName)
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	err := Run(context.Background(), []string{"--resume", sessionID, "cli"}, strings.NewReader("y\n/exit\n"), &out, &errOut)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{"Interrupted session found", "Continue from interrupted point?", "Mock LLM response", "Agent CLI"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("output missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestRunCLIDeclinesResumeAndStartsNewSession(t *testing.T) {
+	homeDir := configureTestHome(t)
+	workDir := t.TempDir()
+	sessionID := createInterruptedAppSession(t, homeDir, workDir, agent.DefaultAgentName)
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	err := Run(context.Background(), []string{"--resume", sessionID}, strings.NewReader("n\n/exit\n"), &out, &errOut)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{"Interrupted session found", "Starting a new session.", "Agent CLI"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("output missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "Mock LLM response") {
+		t.Fatalf("declined resume still executed resumed turn:\n%s", got)
 	}
 }
 
@@ -409,6 +470,51 @@ func writeDefaultConfig(t *testing.T, homeDir string, data []byte) {
 	if err := os.WriteFile(configPath, data, 0600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
+}
+
+func createInterruptedAppSession(t *testing.T, homeDir, workDir, agentName string) string {
+	t.Helper()
+
+	sessionRoot := filepath.Join(homeDir, ".testAgent", "sessions")
+	store, err := agentsession.NewFileStore(sessionRoot)
+	if err != nil {
+		t.Fatalf("NewFileStore returned error: %v", err)
+	}
+	records := []agentsession.Record{
+		{
+			Kind:      agentsession.RecordKindMessage,
+			TurnID:    "turn-1",
+			Task:      "resume from app",
+			WorkDir:   workDir,
+			AgentName: agentName,
+			Message:   &llm.Message{Role: llm.RoleSystem, Content: "system prompt"},
+		},
+		{
+			Kind:      agentsession.RecordKindMessage,
+			TurnID:    "turn-1",
+			Task:      "resume from app",
+			WorkDir:   workDir,
+			AgentName: agentName,
+			Message:   &llm.Message{Role: llm.RoleUser, Content: "Task:\nresume from app"},
+		},
+	}
+	for _, record := range records {
+		if err := store.Save(context.Background(), record); err != nil {
+			t.Fatalf("Save returned error: %v", err)
+		}
+	}
+	if err := agentsession.SaveEvent(context.Background(), store, agentsession.EventScope{
+		TurnID:    "turn-1",
+		Task:      "resume from app",
+		WorkDir:   workDir,
+		AgentName: agentName,
+		Step:      1,
+	}, agentsession.EventTypeLLMRequest, map[string]any{
+		"request": map[string]any{"model": "mock-native"},
+	}); err != nil {
+		t.Fatalf("SaveEvent returned error: %v", err)
+	}
+	return store.ID()
 }
 
 func parseSessionRecords(t *testing.T, data []byte) []agentsession.Record {

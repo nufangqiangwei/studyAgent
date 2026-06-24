@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"agent/internal/prompt"
+	"agent/internal/session"
 	"agent/internal/tools"
 )
 
@@ -66,5 +67,13 @@ func (a *DefaultAgent) Run(ctx context.Context, userInput string) error {
 		AgentName: a.Name(),
 	}
 	_, err := a.loop.Run(ctx, userTask)
+	return err
+}
+
+func (a *DefaultAgent) Resume(ctx context.Context, checkpoint session.ResumeCheckpoint) error {
+	if a == nil || a.loop == nil {
+		return fmt.Errorf("default agent: not initialized")
+	}
+	_, err := a.loop.Resume(ctx, checkpoint)
 	return err
 }
