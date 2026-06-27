@@ -1,17 +1,18 @@
 package agent
 
 import (
+	"agent/internal/capability/builtin/askUser"
+	"agent/internal/capability/builtin/workspace"
+	tools2 "agent/internal/capability/tool"
+	"agent/internal/foundation/llmClient"
 	"context"
 	"strings"
 	"testing"
-
-	"agent/internal/llm"
-	"agent/internal/tools"
 )
 
 func TestDefaultAgentUsesNativePromptAndDefaultTools(t *testing.T) {
 	model := &scriptedLLM{
-		responses: []llm.Response{
+		responses: []llmClient.Response{
 			{
 				Provider: "mock",
 				Model:    "mock-native",
@@ -53,20 +54,20 @@ func TestDefaultAgentUsesNativePromptAndDefaultTools(t *testing.T) {
 	}
 }
 
-func assertAgentDefaultTools(t *testing.T, got []tools.Tool) {
+func assertAgentDefaultTools(t *testing.T, got []tools2.Tool) {
 	t.Helper()
 
 	want := []string{
-		tools.ApplyPatchToolName,
-		tools.AskUserToolName,
-		tools.GetWorkspaceSummaryToolName,
-		tools.ListFilesToolName,
-		tools.ReadFileToolName,
-		tools.SearchTextToolName,
-		tools.WriteFileToolName,
+		tools2.ApplyPatchToolName,
+		askUser.Name,
+		workspace.GetWorkspaceSummaryToolName,
+		workspace.ListFilesToolName,
+		workspace.ReadFileToolName,
+		workspace.SearchTextToolName,
+		tools2.WriteFileToolName,
 	}
 	if len(got) != len(want) {
-		t.Fatalf("agent tools = %d, want %d: %#v", len(got), len(want), got)
+		t.Fatalf("agent tool = %d, want %d: %#v", len(got), len(want), got)
 	}
 	for i, tool := range got {
 		if tool.Name() != want[i] {
@@ -75,20 +76,20 @@ func assertAgentDefaultTools(t *testing.T, got []tools.Tool) {
 	}
 }
 
-func assertLLMDefaultTools(t *testing.T, got []llm.ToolDefinition) {
+func assertLLMDefaultTools(t *testing.T, got []llmClient.ToolDefinition) {
 	t.Helper()
 
 	want := []string{
-		tools.ApplyPatchToolName,
-		tools.AskUserToolName,
-		tools.GetWorkspaceSummaryToolName,
-		tools.ListFilesToolName,
-		tools.ReadFileToolName,
-		tools.SearchTextToolName,
-		tools.WriteFileToolName,
+		tools2.ApplyPatchToolName,
+		askUser.Name,
+		workspace.GetWorkspaceSummaryToolName,
+		workspace.ListFilesToolName,
+		workspace.ReadFileToolName,
+		workspace.SearchTextToolName,
+		tools2.WriteFileToolName,
 	}
 	if len(got) != len(want) {
-		t.Fatalf("llm tools = %d, want %d: %#v", len(got), len(want), got)
+		t.Fatalf("llm tool = %d, want %d: %#v", len(got), len(want), got)
 	}
 	for i, tool := range got {
 		if tool.Name != want[i] {

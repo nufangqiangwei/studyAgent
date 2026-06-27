@@ -1,8 +1,8 @@
 package agent
 
 import (
+	"agent/internal/capability/tool"
 	"agent/internal/prompt"
-	"agent/internal/tools"
 	"context"
 	"fmt"
 )
@@ -11,14 +11,14 @@ const AnalyzeAgentName = "analyze"
 
 type AnalyzeAgent struct {
 	loop     *NativeLoop
-	tools    []tools.Tool
+	tools    []tool.Tool
 	workPath string
 }
 
 func NewAnalyzeAgent(ctx context.Context, opts CreatAgentOptions) (Agent, error) {
-	toolRegistry, err := tools.NewDefaultRegistry(tools.WithPolicy(opts.Policy))
+	toolRegistry, err := tool.NewDefaultRegistry(tool.WithPolicy(opts.Policy))
 	if err != nil {
-		return nil, fmt.Errorf("analyze agent: register default tools: %w", err)
+		return nil, fmt.Errorf("analyze agent: register default tool: %w", err)
 	}
 	registeredTools := toolRegistry.List()
 
@@ -49,11 +49,11 @@ func (a *AnalyzeAgent) Name() string {
 	return AnalyzeAgentName
 }
 
-func (a *AnalyzeAgent) Tools() []tools.Tool {
+func (a *AnalyzeAgent) Tools() []tool.Tool {
 	if a == nil {
 		return nil
 	}
-	return append([]tools.Tool(nil), a.tools...)
+	return append([]tool.Tool(nil), a.tools...)
 }
 
 func (a *AnalyzeAgent) Run(ctx context.Context, userInput string) error {

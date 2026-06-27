@@ -1,11 +1,10 @@
 package agent
 
 import (
+	"agent/internal/foundation/llmClient"
 	"context"
 	"reflect"
 	"testing"
-
-	"agent/internal/llm"
 )
 
 func TestCatalogListsRegisteredAgentFactories(t *testing.T) {
@@ -25,7 +24,7 @@ func TestCatalogSelectAgentCreatesAgent(t *testing.T) {
 	}
 
 	created, err := factory(context.Background(), CreatAgentOptions{
-		LLM: &scriptedLLM{responses: []llm.Response{
+		LLM: &scriptedLLM{responses: []llmClient.Response{
 			{Provider: "mock", Model: "mock-native", Content: "ready"},
 		}},
 		Model:    "mock-native",

@@ -1,9 +1,9 @@
 package agent
 
 import (
-	"agent/internal/policy"
+	"agent/internal/capability/tool"
+	"agent/internal/foundation/policy"
 	"agent/internal/session"
-	"agent/internal/tools"
 	"context"
 	"fmt"
 	systemIO "io"
@@ -24,7 +24,7 @@ type CreatAgentOptions struct {
 
 type Agent interface {
 	Name() string
-	Tools() []tools.Tool
+	Tools() []tool.Tool
 	Run(context.Context, string) error
 }
 type NewAgent func(context.Context, CreatAgentOptions) (Agent, error)

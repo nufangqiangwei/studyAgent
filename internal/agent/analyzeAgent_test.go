@@ -1,17 +1,16 @@
 package agent
 
 import (
+	"agent/internal/capability/tool"
+	"agent/internal/foundation/llmClient"
 	"context"
 	"strings"
 	"testing"
-
-	"agent/internal/llm"
-	"agent/internal/tools"
 )
 
 func TestAnalyzeAgentUsesAnalyzePromptAndDefaultTools(t *testing.T) {
 	model := &scriptedLLM{
-		responses: []llm.Response{
+		responses: []llmClient.Response{
 			{
 				Provider: "mock",
 				Model:    "mock-native",
@@ -35,7 +34,7 @@ func TestAnalyzeAgentUsesAnalyzePromptAndDefaultTools(t *testing.T) {
 		t.Fatalf("Name = %q, want %q", analyzeAgent.Name(), AnalyzeAgentName)
 	}
 	assertAgentDefaultTools(t, analyzeAgent.Tools())
-	assertAgentDefaultTools(t, tools.RegisteredTools())
+	assertAgentDefaultTools(t, tool.RegisteredTools())
 
 	if err := analyzeAgent.Run(context.Background(), "研究 AI 代码助手"); err != nil {
 		t.Fatalf("Run returned error: %v", err)

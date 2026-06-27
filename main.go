@@ -1,11 +1,10 @@
 package main
 
 import (
+	"agent/internal/entrance/app"
 	"context"
 	"fmt"
 	"os"
-
-	"agent/internal/app"
 )
 
 func main() {

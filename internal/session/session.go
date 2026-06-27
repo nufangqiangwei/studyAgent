@@ -1,6 +1,7 @@
 package session
 
 import (
+	"agent/internal/foundation/llmClient"
 	"bufio"
 	"context"
 	"crypto/rand"
@@ -12,8 +13,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"agent/internal/llm"
 )
 
 const (
@@ -26,13 +25,20 @@ const (
 const (
 	RecordKindMessage      = "message"
 	RecordKindEvent        = "event"
+	RecordKindRunState     = "run_state"
 	RecordKindUsageSummary = "usage_summary"
 )
 
 const (
+	EventTypeRunStarted     = "run_started"
+	EventTypeRunResumed     = "run_resumed"
+	EventTypeRunCompleted   = "run_completed"
+	EventTypeRunFailed      = "run_failed"
+	EventTypeRunCancelled   = "run_cancelled"
 	EventTypeLLMRequest     = "llm_request"
 	EventTypeLLMResponse    = "llm_response"
 	EventTypeToolCall       = "tool_call"
+	EventTypeToolDispatched = "tool_dispatched"
 	EventTypeToolResult     = "tool_result"
 	EventTypePolicyDecision = "policy_decision"
 	EventTypeSummary        = "summary"
@@ -47,20 +53,21 @@ type Loader interface {
 }
 
 type Record struct {
-	Kind         string       `json:"kind"`
-	Timestamp    time.Time    `json:"timestamp"`
-	SessionID    string       `json:"session_id"`
-	AgentID      string       `json:"agent_id"`
-	TurnID       string       `json:"turn_id,omitempty"`
-	AgentName    string       `json:"agent_name,omitempty"`
-	Task         string       `json:"task,omitempty"`
-	WorkDir      string       `json:"work_dir,omitempty"`
-	StepIndex    int          `json:"step_index,omitempty"`
-	Message      *llm.Message `json:"message,omitempty"`
-	Event        *Event       `json:"event,omitempty"`
-	Usage        *llm.Usage   `json:"usage,omitempty"`
-	UsageSummary *llm.Usage   `json:"usage_summary,omitempty"`
-	LLMCalls     int          `json:"llm_calls,omitempty"`
+	Kind         string             `json:"kind"`
+	Timestamp    time.Time          `json:"timestamp"`
+	SessionID    string             `json:"session_id"`
+	AgentID      string             `json:"agent_id"`
+	TurnID       string             `json:"turn_id,omitempty"`
+	AgentName    string             `json:"agent_name,omitempty"`
+	Task         string             `json:"task,omitempty"`
+	WorkDir      string             `json:"work_dir,omitempty"`
+	StepIndex    int                `json:"step_index,omitempty"`
+	Message      *llmClient.Message `json:"message,omitempty"`
+	Event        *Event             `json:"event,omitempty"`
+	RunState     json.RawMessage    `json:"run_state,omitempty"`
+	Usage        *llmClient.Usage   `json:"usage,omitempty"`
+	UsageSummary *llmClient.Usage   `json:"usage_summary,omitempty"`
+	LLMCalls     int                `json:"llm_calls,omitempty"`
 }
 
 type Event struct {
@@ -308,6 +315,7 @@ func (s *FileStore) Save(ctx context.Context, record Record) error {
 	record.AgentID = s.agentID
 	record.Message = cloneMessagePtr(record.Message)
 	record.Event = cloneEventPtr(record.Event)
+	record.RunState = append(json.RawMessage(nil), record.RunState...)
 	record.Usage = cloneUsage(record.Usage)
 	record.UsageSummary = cloneUsage(record.UsageSummary)
 	if record.Event != nil {
@@ -573,7 +581,7 @@ func upsertAgentFile(entries []AgentFileEntry, next AgentFileEntry) []AgentFileE
 	return append(entries, next)
 }
 
-func cloneMessagePtr(message *llm.Message) *llm.Message {
+func cloneMessagePtr(message *llmClient.Message) *llmClient.Message {
 	if message == nil {
 		return nil
 	}
@@ -592,13 +600,13 @@ func cloneEventPtr(event *Event) *Event {
 	return &cloned
 }
 
-func cloneLLMToolCalls(calls []llm.ToolCall) []llm.ToolCall {
+func cloneLLMToolCalls(calls []llmClient.ToolCall) []llmClient.ToolCall {
 	if len(calls) == 0 {
 		return nil
 	}
-	cloned := make([]llm.ToolCall, 0, len(calls))
+	cloned := make([]llmClient.ToolCall, 0, len(calls))
 	for _, call := range calls {
-		cloned = append(cloned, llm.ToolCall{
+		cloned = append(cloned, llmClient.ToolCall{
 			ID:    call.ID,
 			Name:  call.Name,
 			Input: append(json.RawMessage(nil), call.Input...),
@@ -607,7 +615,7 @@ func cloneLLMToolCalls(calls []llm.ToolCall) []llm.ToolCall {
 	return cloned
 }
 
-func cloneUsage(usage *llm.Usage) *llm.Usage {
+func cloneUsage(usage *llmClient.Usage) *llmClient.Usage {
 	if usage == nil {
 		return nil
 	}
