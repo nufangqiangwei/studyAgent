@@ -1,131 +1,194 @@
 package tool
 
 import (
-	"agent/internal/capability/builtin/askUser"
-	"agent/internal/capability/builtin/workspace"
 	"agent/internal/content"
 	"agent/internal/foundation/policy"
 	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func TestNewDefaultRegistryRegistersAndPublishesTools(t *testing.T) {
-	registry, err := NewDefaultRegistry()
-	if err != nil {
-		t.Fatalf("NewDefaultRegistry returned error: %v", err)
-	}
-
-	assertDefaultTools(t, registry.List())
-	assertDefaultTools(t, RegisteredTools())
-}
-
-func assertDefaultTools(t *testing.T, got []Tool) {
-	t.Helper()
-
-	want := []string{
-		ApplyPatchToolName,
-		askUser.Name,
-		workspace.GetWorkspaceSummaryToolName,
-		workspace.ListFilesToolName,
-		workspace.ReadFileToolName,
-		workspace.SearchTextToolName,
-		WriteFileToolName,
-	}
-	if len(got) != len(want) {
-		t.Fatalf("tool = %d, want %d: %#v", len(got), len(want), got)
-	}
-	for i, tool := range got {
-		if tool.Name() != want[i] {
-			t.Fatalf("tool[%d] name = %q, want %q", i, tool.Name(), want[i])
-		}
-	}
-}
-
-func TestRegistryChecksPolicyBeforeExecutingTool(t *testing.T) {
-	tool := &recordingTool{name: WriteFileToolName}
+func TestRegistryRegisterReturnsPolicyWrappedTool(t *testing.T) {
+	inner := &recordingTool{name: "read_file", result: Result{Content: "ok"}}
 	registry := NewRegistry()
-	if err := registry.Register(tool); err != nil {
-		t.Fatalf("Register returned error: %v", err)
+	if err := registry.RegisterWithPolicyAnalyzer(inner, PolicyAnalyzerFunc(func(json.RawMessage) (PolicyFacts, error) {
+		return PolicyFacts{Read: true, Paths: []string{"notes.txt"}, Operation: "read_file"}, nil
+	})); err != nil {
+		t.Fatalf("RegisterWithPolicyAnalyzer returned error: %v", err)
 	}
 
-	_, err := registry.Execute(context.Background(), WriteFileToolName, json.RawMessage(`{"path":"notes.txt","content":"hello","dry_run":false}`))
+	wrapped, ok := registry.Lookup("read_file")
+	if !ok {
+		t.Fatal("Lookup returned ok=false")
+	}
+	result, err := wrapped.Execute(context.Background(), json.RawMessage(`{"path":"notes.txt"}`))
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if result.Content != "ok" || !inner.called {
+		t.Fatalf("result/called = %q/%v, want ok/true", result.Content, inner.called)
+	}
+	if got := registry.List(); len(got) != 1 || got[0].Name() != "read_file" {
+		t.Fatalf("List = %#v, want wrapped read_file", got)
+	}
+}
+
+func TestPolicyFactsForWriteDryRunBuildsDryRunWriteRequest(t *testing.T) {
+	checker := &recordingChecker{result: policy.Result{Decision: policy.Allow, Reason: "ok"}}
+	registry := NewRegistry(WithPolicy(checker))
+	if err := registry.RegisterWithPolicyAnalyzer(&recordingTool{name: "write_file"}, PolicyAnalyzerFunc(func(json.RawMessage) (PolicyFacts, error) {
+		return PolicyFacts{Paths: []string{"notes.txt"}, DryRun: true, Write: true, Operation: "dry-run write"}, nil
+	})); err != nil {
+		t.Fatalf("RegisterWithPolicyAnalyzer returned error: %v", err)
+	}
+
+	wrapped, _ := registry.Lookup("write_file")
+	if _, err := wrapped.Execute(context.Background(), json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	request := checker.lastRequest()
+	if request.Risk != policy.RiskWrite || !request.DryRun || request.Operation != "dry-run write" || request.Path != "notes.txt" {
+		t.Fatalf("request = %#v, want dry-run write risk", request)
+	}
+}
+
+func TestPolicyFactsForWriteBuildsWriteRequest(t *testing.T) {
+	checker := &recordingChecker{result: policy.Result{Decision: policy.Allow, Reason: "ok"}}
+	registry := NewRegistry(WithPolicy(checker))
+	if err := registry.RegisterWithPolicyAnalyzer(&recordingTool{name: "write_file"}, PolicyAnalyzerFunc(func(json.RawMessage) (PolicyFacts, error) {
+		return PolicyFacts{Paths: []string{"notes.txt"}, Write: true, Operation: "write"}, nil
+	})); err != nil {
+		t.Fatalf("RegisterWithPolicyAnalyzer returned error: %v", err)
+	}
+
+	wrapped, _ := registry.Lookup("write_file")
+	if _, err := wrapped.Execute(context.Background(), json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	request := checker.lastRequest()
+	if request.Risk != policy.RiskWrite || request.DryRun || request.Operation != "write" || request.Path != "notes.txt" {
+		t.Fatalf("request = %#v, want write risk", request)
+	}
+}
+
+func TestPolicyFactsForApplyPatchDeleteBuildsDeleteRequest(t *testing.T) {
+	request := policyRequestForToolCall("apply_patch", PolicyFacts{
+		Paths:     []string{"notes.txt"},
+		Write:     true,
+		Delete:    true,
+		Operation: "delete",
+	})
+	if request.Risk != policy.RiskDelete || request.Operation != "delete" || request.Path != "notes.txt" {
+		t.Fatalf("request = %#v, want delete risk", request)
+	}
+}
+
+func TestPolicyFactsForHighRiskWriteBuildsHighRiskOperation(t *testing.T) {
+	request := policyRequestForToolCall("apply_patch", PolicyFacts{
+		Paths:    []string{"go.mod"},
+		Write:    true,
+		HighRisk: true,
+	})
+	if request.Risk != policy.RiskWrite || request.Operation != "high-risk write" || request.Path != "go.mod" {
+		t.Fatalf("request = %#v, want high-risk write", request)
+	}
+}
+
+func TestPolicyDenyDoesNotExecuteInnerTool(t *testing.T) {
+	inner := &recordingTool{name: "write_file"}
+	registry := NewRegistry(WithPolicy(policy.New(policy.ModeReadOnly)))
+	if err := registry.RegisterWithPolicyAnalyzer(inner, PolicyAnalyzerFunc(func(json.RawMessage) (PolicyFacts, error) {
+		return PolicyFacts{Write: true, Paths: []string{"notes.txt"}, Operation: "write"}, nil
+	})); err != nil {
+		t.Fatalf("RegisterWithPolicyAnalyzer returned error: %v", err)
+	}
+
+	wrapped, _ := registry.Lookup("write_file")
+	_, err := wrapped.Execute(context.Background(), json.RawMessage(`{}`))
 	if err == nil {
 		t.Fatal("Execute returned nil error")
 	}
 	if !strings.Contains(err.Error(), "policy denied tool") {
 		t.Fatalf("error = %q, want policy denied tool", err.Error())
 	}
-	if tool.called {
-		t.Fatal("tool executed even though policy denied it")
+	if inner.called {
+		t.Fatal("inner tool executed even though policy denied it")
 	}
 }
 
-func TestRegistryAllowsDryRunWriteValidationInReadOnlyMode(t *testing.T) {
-	root := t.TempDir()
-	registry := NewRegistry()
-	if err := registry.Register(NewWriteFileTool()); err != nil {
-		t.Fatalf("Register returned error: %v", err)
-	}
-
-	result, err := registry.Execute(workspace.workspaceToolContext(root), WriteFileToolName, json.RawMessage(`{"path":"notes.txt","content":"hello"}`))
-	if err != nil {
-		t.Fatalf("Execute returned error: %v", err)
-	}
-	if !strings.Contains(result.Content, "dry-run") {
-		t.Fatalf("content missing dry-run summary:\n%s", result.Content)
-	}
-	if _, err := os.Stat(filepath.Join(root, "notes.txt")); !os.IsNotExist(err) {
-		t.Fatalf("notes.txt stat error = %v, want not exist", err)
-	}
-}
-
-func TestRegistryAllowsWriteFileInModifyMode(t *testing.T) {
-	root := t.TempDir()
+func TestPolicyAskUserDeclineDoesNotExecuteInnerTool(t *testing.T) {
+	inner := &recordingTool{name: "network"}
 	registry := NewRegistry(WithPolicy(policy.New(policy.ModeModify)))
-	if err := registry.Register(NewWriteFileTool()); err != nil {
-		t.Fatalf("Register returned error: %v", err)
-	}
-
-	_, err := registry.Execute(workspace.workspaceToolContext(root), WriteFileToolName, json.RawMessage(`{"path":"notes.txt","content":"hello\n","dry_run":false}`))
-	if err != nil {
-		t.Fatalf("Execute returned error: %v", err)
-	}
-	if got := readToolTestFile(t, root, "notes.txt"); got != "hello\n" {
-		t.Fatalf("notes.txt content = %q, want hello", got)
-	}
-}
-
-func TestRegistryAsksForPolicyConfirmation(t *testing.T) {
-	tool := &recordingTool{name: "network", result: Result{Content: "sent"}}
-	registry := NewRegistry(WithPolicy(policy.New(policy.ModeModify)))
-	if err := registry.Register(tool); err != nil {
-		t.Fatalf("Register returned error: %v", err)
+	if err := registry.RegisterWithPolicyAnalyzer(inner, PolicyAnalyzerFunc(func(json.RawMessage) (PolicyFacts, error) {
+		return PolicyFacts{Network: true, Operation: "network"}, nil
+	})); err != nil {
+		t.Fatalf("RegisterWithPolicyAnalyzer returned error: %v", err)
 	}
 	var out strings.Builder
 	ctx := content.WithEnv(context.Background(), &content.Env{
 		IO: content.IO{
-			In:  strings.NewReader("yes\n"),
+			In:  strings.NewReader("no\n"),
 			Out: &out,
 		},
 	})
 
-	result, err := registry.Execute(ctx, "network", json.RawMessage(`{}`))
-	if err != nil {
-		t.Fatalf("Execute returned error: %v", err)
+	wrapped, _ := registry.Lookup("network")
+	_, err := wrapped.Execute(ctx, json.RawMessage(`{}`))
+	if err == nil {
+		t.Fatal("Execute returned nil error")
 	}
-	if !tool.called {
-		t.Fatal("tool did not execute after confirmation")
+	if !strings.Contains(err.Error(), "user declined confirmation") {
+		t.Fatalf("error = %q, want declined confirmation", err.Error())
 	}
-	if result.Content != "sent" {
-		t.Fatalf("content = %q, want sent", result.Content)
+	if inner.called {
+		t.Fatal("inner tool executed even though user declined policy confirmation")
 	}
 	if !strings.Contains(out.String(), "Policy confirmation required") {
-		t.Fatalf("confirmation prompt missing:\n%s", out.String())
+		t.Fatalf("prompt missing confirmation text:\n%s", out.String())
 	}
+}
+
+func TestLookupToolExecuteStillTriggersPolicy(t *testing.T) {
+	inner := &recordingTool{name: "write_file"}
+	registry := NewRegistry(WithPolicy(policy.New(policy.ModeReadOnly)))
+	if err := registry.RegisterWithPolicyAnalyzer(inner, PolicyAnalyzerFunc(func(json.RawMessage) (PolicyFacts, error) {
+		return PolicyFacts{Write: true, Paths: []string{"notes.txt"}, Operation: "write"}, nil
+	})); err != nil {
+		t.Fatalf("RegisterWithPolicyAnalyzer returned error: %v", err)
+	}
+
+	wrapped, ok := registry.Lookup("write_file")
+	if !ok {
+		t.Fatal("Lookup returned ok=false")
+	}
+	_, err := wrapped.Execute(context.Background(), json.RawMessage(`{}`))
+	if err == nil {
+		t.Fatal("direct wrapped Execute returned nil error")
+	}
+	if inner.called {
+		t.Fatal("inner tool executed through direct Lookup result despite policy denial")
+	}
+}
+
+type recordingChecker struct {
+	requests []policy.Request
+	result   policy.Result
+}
+
+func (c *recordingChecker) Check(request policy.Request) policy.Result {
+	c.requests = append(c.requests, request)
+	if c.result.Decision == "" {
+		return policy.Result{Decision: policy.Allow, Reason: "ok"}
+	}
+	return c.result
+}
+
+func (c *recordingChecker) lastRequest() policy.Request {
+	if len(c.requests) == 0 {
+		return policy.Request{}
+	}
+	return c.requests[len(c.requests)-1]
 }
 
 type recordingTool struct {

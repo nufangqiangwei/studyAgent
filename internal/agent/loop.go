@@ -25,7 +25,7 @@ type PromptBuilder interface {
 }
 
 type ToolRegistry interface {
-	Execute(ctx context.Context, name string, input json.RawMessage) (tool.Result, error)
+	Lookup(name string) (tool.Tool, bool)
 	List() []tool.Tool
 }
 

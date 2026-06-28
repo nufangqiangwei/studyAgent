@@ -536,7 +536,11 @@ func (l *NativeLoop) executeAction(ctx context.Context, action LoopAction) (Loop
 		}
 		startedAt := time.Now().UTC()
 		toolCtx := l.toolExecutionContext(ctx, action.Task, action.TurnID, action.Step)
-		toolResult, err := l.tools.Execute(toolCtx, action.ToolCall.ToolName, action.ToolCall.Arguments)
+		executor, ok := l.tools.Lookup(action.ToolCall.ToolName)
+		if !ok {
+			return nil, fmt.Errorf("native loop: unknown tool %q", action.ToolCall.ToolName)
+		}
+		toolResult, err := executor.Execute(toolCtx, action.ToolCall.Arguments)
 		completedAt := time.Now().UTC()
 		recorded := ToolResult{
 			Name:        action.ToolCall.ToolName,

@@ -58,13 +58,13 @@ func assertAgentDefaultTools(t *testing.T, got []tools2.Tool) {
 	t.Helper()
 
 	want := []string{
-		tools2.ApplyPatchToolName,
+		workspace.ApplyPatchToolName,
 		askUser.Name,
 		workspace.GetWorkspaceSummaryToolName,
 		workspace.ListFilesToolName,
 		workspace.ReadFileToolName,
 		workspace.SearchTextToolName,
-		tools2.WriteFileToolName,
+		workspace.WriteFileToolName,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("agent tool = %d, want %d: %#v", len(got), len(want), got)
@@ -80,13 +80,13 @@ func assertLLMDefaultTools(t *testing.T, got []llmClient.ToolDefinition) {
 	t.Helper()
 
 	want := []string{
-		tools2.ApplyPatchToolName,
+		workspace.ApplyPatchToolName,
 		askUser.Name,
 		workspace.GetWorkspaceSummaryToolName,
 		workspace.ListFilesToolName,
 		workspace.ReadFileToolName,
 		workspace.SearchTextToolName,
-		tools2.WriteFileToolName,
+		workspace.WriteFileToolName,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("llm tool = %d, want %d: %#v", len(got), len(want), got)

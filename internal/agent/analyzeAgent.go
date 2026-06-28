@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"agent/internal/capability/defaulttools"
 	"agent/internal/capability/tool"
 	"agent/internal/prompt"
 	"context"
@@ -16,7 +17,7 @@ type AnalyzeAgent struct {
 }
 
 func NewAnalyzeAgent(ctx context.Context, opts CreatAgentOptions) (Agent, error) {
-	toolRegistry, err := tool.NewDefaultRegistry(tool.WithPolicy(opts.Policy))
+	toolRegistry, err := defaulttools.NewRegistry(tool.WithPolicy(opts.Policy))
 	if err != nil {
 		return nil, fmt.Errorf("analyze agent: register default tool: %w", err)
 	}

@@ -1,11 +1,8 @@
 package tool
 
 import (
-	"agent/internal/capability/builtin/askUser"
-	"agent/internal/capability/builtin/workspace"
-	"agent/internal/content"
+	"agent/internal/capability/builtin"
 	"agent/internal/foundation/policy"
-	"agent/internal/session"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -20,17 +17,32 @@ type Tool interface {
 	Execute(ctx context.Context, input json.RawMessage) (Result, error)
 }
 
-type Result struct {
-	Content  string          `json:"content"`
-	Metadata map[string]any  `json:"metadata,omitempty"`
-	Raw      json.RawMessage `json:"raw,omitempty"`
+type Result = builtin.Result
+
+type PolicyAnalyzer interface {
+	AnalyzePolicy(input json.RawMessage) (PolicyFacts, error)
 }
 
-type policyDecisionEventPayload struct {
-	Request           policy.Request `json:"request"`
-	Result            policy.Result  `json:"result"`
-	Confirmed         *bool          `json:"confirmed,omitempty"`
-	ConfirmationError string         `json:"confirmation_error,omitempty"`
+type PolicyAnalyzerFunc func(input json.RawMessage) (PolicyFacts, error)
+
+func (f PolicyAnalyzerFunc) AnalyzePolicy(input json.RawMessage) (PolicyFacts, error) {
+	if f == nil {
+		return PolicyFacts{}, nil
+	}
+	return f(input)
+}
+
+type PolicyFacts struct {
+	Paths     []string
+	Command   []string
+	DryRun    bool
+	Read      bool
+	Write     bool
+	Delete    bool
+	Exec      bool
+	Network   bool
+	HighRisk  bool
+	Operation string
 }
 
 type Registry struct {
@@ -40,7 +52,7 @@ type Registry struct {
 
 var (
 	currentRegistryMu sync.RWMutex
-	currentRegistry   = mustNewDefaultRegistry()
+	currentRegistry   *Registry
 )
 
 type RegistryOption func(*Registry)
@@ -66,36 +78,6 @@ func NewRegistry(options ...RegistryOption) *Registry {
 	return registry
 }
 
-func NewDefaultRegistry(options ...RegistryOption) (*Registry, error) {
-	registry := NewRegistry(options...)
-	if err := RegisterDefaults(registry); err != nil {
-		return nil, err
-	}
-	SetCurrentRegistry(registry)
-	return registry, nil
-}
-
-func RegisterDefaults(registry *Registry) error {
-	if registry == nil {
-		return fmt.Errorf("register default tool: nil registry")
-	}
-	defaults := []Tool{
-		NewApplyPatchTool(),
-		askUser.NewAskUserTool(),
-		workspace.NewListFilesTool(),
-		workspace.NewReadFileTool(),
-		workspace.NewSearchTextTool(),
-		workspace.NewGetWorkspaceSummaryTool(),
-		NewWriteFileTool(),
-	}
-	for _, tool := range defaults {
-		if err := registry.Register(tool); err != nil {
-			return fmt.Errorf("register default tool %q: %w", tool.Name(), err)
-		}
-	}
-	return nil
-}
-
 func CurrentRegistry() *Registry {
 	currentRegistryMu.RLock()
 	defer currentRegistryMu.RUnlock()
@@ -119,6 +101,10 @@ func RegisteredTools() []Tool {
 }
 
 func (r *Registry) Register(tool Tool) error {
+	return r.RegisterWithPolicyAnalyzer(tool, nil)
+}
+
+func (r *Registry) RegisterWithPolicyAnalyzer(tool Tool, analyzer PolicyAnalyzer) error {
 	if r == nil {
 		return fmt.Errorf("register tool: nil registry")
 	}
@@ -132,55 +118,21 @@ func (r *Registry) Register(tool Tool) error {
 	if _, exists := r.tools[name]; exists {
 		return fmt.Errorf("register tool %q: already exists", name)
 	}
-	r.tools[name] = tool
+	if analyzer == nil {
+		if candidate, ok := tool.(PolicyAnalyzer); ok {
+			analyzer = candidate
+		}
+	}
+	r.tools[name] = newPolicyTool(tool, analyzer, r.policy)
 	return nil
 }
 
-func (r *Registry) Execute(ctx context.Context, name string, input json.RawMessage) (Result, error) {
+func (r *Registry) Lookup(name string) (Tool, bool) {
 	if r == nil {
-		return Result{}, fmt.Errorf("tool registry is nil")
+		return nil, false
 	}
 	tool, ok := r.tools[name]
-	if !ok {
-		return Result{}, fmt.Errorf("unknown tool %q", name)
-	}
-	request := policyRequestForToolCall(name, input)
-	checker := r.policy
-	if checker == nil {
-		checker = policy.Default()
-	}
-	decision := checker.Check(request)
-	switch decision.Decision {
-	case policy.Allow:
-		if err := recordPolicyDecisionEvent(ctx, request, decision, nil, ""); err != nil {
-			return Result{}, err
-		}
-	case policy.Ask:
-		confirmed, err := confirmPolicyDecision(ctx, request, decision)
-		if err != nil {
-			if recordErr := recordPolicyDecisionEvent(ctx, request, decision, nil, err.Error()); recordErr != nil {
-				return Result{}, recordErr
-			}
-			return Result{}, fmt.Errorf("policy confirmation for tool %q: %w", name, err)
-		}
-		if err := recordPolicyDecisionEvent(ctx, request, decision, &confirmed, ""); err != nil {
-			return Result{}, err
-		}
-		if !confirmed {
-			return Result{}, fmt.Errorf("policy denied tool %q: user declined confirmation: %s", name, decision.Reason)
-		}
-	case policy.Deny:
-		if err := recordPolicyDecisionEvent(ctx, request, decision, nil, ""); err != nil {
-			return Result{}, err
-		}
-		return Result{}, fmt.Errorf("policy denied tool %q: %s", name, decision.Reason)
-	default:
-		if err := recordPolicyDecisionEvent(ctx, request, decision, nil, ""); err != nil {
-			return Result{}, err
-		}
-		return Result{}, fmt.Errorf("policy returned unknown decision %q for tool %q", decision.Decision, name)
-	}
-	return tool.Execute(ctx, input)
+	return tool, ok
 }
 
 func (r *Registry) List() []Tool {
@@ -198,33 +150,4 @@ func (r *Registry) List() []Tool {
 		result = append(result, r.tools[name])
 	}
 	return result
-}
-
-func recordPolicyDecisionEvent(ctx context.Context, request policy.Request, result policy.Result, confirmed *bool, confirmationError string) error {
-	env, ok := content.EnvFromContext(ctx)
-	if !ok || env.Session == nil {
-		return nil
-	}
-	scope := env.EventScope
-	if scope.AgentName == "" {
-		scope.AgentName = env.Config.AgentName
-	}
-	err := session.SaveEvent(ctx, env.Session, scope, session.EventTypePolicyDecision, policyDecisionEventPayload{
-		Request:           request,
-		Result:            result,
-		Confirmed:         confirmed,
-		ConfirmationError: confirmationError,
-	})
-	if err != nil {
-		return fmt.Errorf("record policy decision event: %w", err)
-	}
-	return nil
-}
-
-func mustNewDefaultRegistry() *Registry {
-	registry := NewRegistry()
-	if err := RegisterDefaults(registry); err != nil {
-		panic(err)
-	}
-	return registry
 }

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"agent/internal/capability/defaulttools"
 	"agent/internal/capability/tool"
 	"context"
 	"fmt"
@@ -17,7 +18,7 @@ type ToolsTesterAgent struct {
 }
 
 func NewToolsTesterAgent(ctx context.Context, opts CreatAgentOptions) (Agent, error) {
-	toolRegistry, err := tool.NewDefaultRegistry(tool.WithPolicy(opts.Policy))
+	toolRegistry, err := defaulttools.NewRegistry(tool.WithPolicy(opts.Policy))
 	if err != nil {
 		return nil, fmt.Errorf("tool tester agent: register default tool: %w", err)
 	}

@@ -1,10 +1,9 @@
 package tool
 
 import (
-	"agent/internal/capability/builtin/askUser"
-	"agent/internal/capability/builtin/workspace"
 	"agent/internal/content"
 	"agent/internal/foundation/policy"
+	"agent/internal/session"
 	"bufio"
 	"context"
 	"encoding/json"
@@ -14,152 +13,163 @@ import (
 	"strings"
 )
 
-func policyRequestForToolCall(name string, input json.RawMessage) policy.Request {
-	request := policy.Request{
-		ToolName:  name,
-		Operation: name,
-	}
-	switch name {
-	case askUser.Name:
-		request.Risk = policy.RiskRead
-	case workspace.ListFilesToolName:
-		request.Risk = policy.RiskRead
-		request.Path = inputStringField(input, "path")
-	case workspace.ReadFileToolName:
-		request.Risk = policy.RiskRead
-		request.Path = inputStringField(input, "path")
-	case workspace.SearchTextToolName:
-		request.Risk = policy.RiskRead
-		request.Path = inputStringField(input, "path")
-	case workspace.GetWorkspaceSummaryToolName:
-		request.Risk = policy.RiskRead
-		request.Path = inputStringField(input, "path")
-	case WriteFileToolName:
-		request.Risk = policy.RiskWrite
-		request.Path = inputStringField(input, "path")
-		request.DryRun = inputBoolField(input, "dry_run", true)
-		if request.DryRun {
-			request.Operation = "dry-run write"
-		}
-	case ApplyPatchToolName:
-		request = applyPatchPolicyRequest(input)
-	default:
-		request.Risk = inferredPolicyRiskForToolName(name)
-		if name == "run_command" {
-			request.Command = firstInputStringSliceField(input, "command", "cmd", "args")
-		}
-	}
-	return request
+type policyTool struct {
+	inner    Tool
+	analyzer PolicyAnalyzer
+	checker  policy.Checker
 }
 
-func applyPatchPolicyRequest(input json.RawMessage) policy.Request {
-	request := policy.Request{
-		ToolName:  ApplyPatchToolName,
-		Risk:      policy.RiskWrite,
-		Operation: ApplyPatchToolName,
-		DryRun:    inputBoolField(input, "dry_run", true),
-	}
-	if request.DryRun {
-		request.Operation = "dry-run patch"
-	}
-	var req applyPatchInput
-	if err := workspace.decodeWorkspaceToolInput(ApplyPatchToolName, input, &req); err != nil {
-		return request
-	}
-	filePatches, err := parseUnifiedPatch(req.Patch)
-	if err != nil {
-		return request
-	}
-
-	paths := make([]string, 0, len(filePatches))
-	highRisk := false
-	for _, filePatch := range filePatches {
-		target := filePatch.targetPath()
-		if target != "" {
-			paths = append(paths, target)
-		}
-		if filePatch.operation() == "delete" {
-			request.Risk = policy.RiskDelete
-			request.Operation = "delete"
-		}
-		if isHighRisk, _ := highRiskWritePath(target); isHighRisk {
-			highRisk = true
-		}
-	}
-	request.Path = strings.Join(paths, ",")
-	if highRisk && request.Operation != "delete" {
-		request.Operation = "high-risk write"
-	}
-	return request
+type policyDecisionEventPayload struct {
+	Request           policy.Request `json:"request"`
+	Result            policy.Result  `json:"result"`
+	Confirmed         *bool          `json:"confirmed,omitempty"`
+	ConfirmationError string         `json:"confirmation_error,omitempty"`
 }
 
-func inputBoolField(input json.RawMessage, field string, fallback bool) bool {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(input, &raw); err != nil {
-		return fallback
-	}
-	value, ok := raw[field]
-	if !ok {
-		return fallback
-	}
-	var parsed bool
-	if err := json.Unmarshal(value, &parsed); err != nil {
-		return fallback
-	}
-	return parsed
+func newPolicyTool(inner Tool, analyzer PolicyAnalyzer, checker policy.Checker) Tool {
+	return &policyTool{inner: inner, analyzer: analyzer, checker: checker}
 }
 
-func inputStringField(input json.RawMessage, field string) string {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(input, &raw); err != nil {
+func (t *policyTool) Name() string {
+	if t == nil || t.inner == nil {
 		return ""
 	}
-	var value string
-	if err := json.Unmarshal(raw[field], &value); err != nil {
+	return t.inner.Name()
+}
+
+func (t *policyTool) Description() string {
+	if t == nil || t.inner == nil {
 		return ""
 	}
-	return value
+	return t.inner.Description()
 }
 
-func firstInputStringSliceField(input json.RawMessage, fields ...string) []string {
-	for _, field := range fields {
-		values := inputStringSliceField(input, field)
-		if len(values) > 0 {
-			return values
-		}
-	}
-	return nil
-}
-
-func inputStringSliceField(input json.RawMessage, field string) []string {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(input, &raw); err != nil {
+func (t *policyTool) InputSchema() json.RawMessage {
+	if t == nil || t.inner == nil {
 		return nil
 	}
-	var values []string
-	if err := json.Unmarshal(raw[field], &values); err == nil {
-		return values
-	}
-	var value string
-	if err := json.Unmarshal(raw[field], &value); err == nil {
-		return strings.Fields(value)
-	}
-	return nil
+	return t.inner.InputSchema()
 }
 
-func inferredPolicyRiskForToolName(name string) policy.RiskLevel {
-	switch name {
-	case "git_status", "git_diff":
-		return policy.RiskRead
-	case "run_command", "run_tests":
-		return policy.RiskExec
-	case "network":
-		return policy.RiskNet
-	case "delete":
+func (t *policyTool) Execute(ctx context.Context, input json.RawMessage) (Result, error) {
+	if t == nil || t.inner == nil {
+		return Result{}, errors.New("policy tool: inner tool is nil")
+	}
+	request, err := t.policyRequest(input)
+	if err != nil {
+		return Result{}, err
+	}
+	checker := t.checker
+	if checker == nil {
+		checker = policy.Default()
+	}
+	decision := checker.Check(request)
+	switch decision.Decision {
+	case policy.Allow:
+		if err := recordPolicyDecisionEvent(ctx, request, decision, nil, ""); err != nil {
+			return Result{}, err
+		}
+	case policy.Ask:
+		confirmed, err := confirmPolicyDecision(ctx, request, decision)
+		if err != nil {
+			if recordErr := recordPolicyDecisionEvent(ctx, request, decision, nil, err.Error()); recordErr != nil {
+				return Result{}, recordErr
+			}
+			return Result{}, fmt.Errorf("policy confirmation for tool %q: %w", t.Name(), err)
+		}
+		if err := recordPolicyDecisionEvent(ctx, request, decision, &confirmed, ""); err != nil {
+			return Result{}, err
+		}
+		if !confirmed {
+			return Result{}, fmt.Errorf("policy denied tool %q: user declined confirmation: %s", t.Name(), decision.Reason)
+		}
+	case policy.Deny:
+		if err := recordPolicyDecisionEvent(ctx, request, decision, nil, ""); err != nil {
+			return Result{}, err
+		}
+		return Result{}, fmt.Errorf("policy denied tool %q: %s", t.Name(), decision.Reason)
+	default:
+		if err := recordPolicyDecisionEvent(ctx, request, decision, nil, ""); err != nil {
+			return Result{}, err
+		}
+		return Result{}, fmt.Errorf("policy returned unknown decision %q for tool %q", decision.Decision, t.Name())
+	}
+	return t.inner.Execute(ctx, input)
+}
+
+func (t *policyTool) policyRequest(input json.RawMessage) (policy.Request, error) {
+	var facts PolicyFacts
+	if t.analyzer != nil {
+		analyzed, err := t.analyzer.AnalyzePolicy(input)
+		if err != nil {
+			return policy.Request{}, fmt.Errorf("policy analysis for tool %q: %w", t.Name(), err)
+		}
+		facts = analyzed
+	}
+	return policyRequestForToolCall(t.Name(), facts), nil
+}
+
+func policyRequestForToolCall(name string, facts PolicyFacts) policy.Request {
+	operation := strings.TrimSpace(facts.Operation)
+	if operation == "" {
+		operation = name
+	}
+	if facts.HighRisk && facts.Write && !facts.Delete && !facts.DryRun && !strings.Contains(strings.ToLower(operation), "high-risk") {
+		operation = "high-risk write"
+	}
+	return policy.Request{
+		ToolName:  name,
+		Risk:      policyRiskForFacts(facts),
+		Operation: operation,
+		Path:      strings.Join(normalizedPolicyFactPaths(facts.Paths), ","),
+		Command:   normalizedPolicyFactCommand(facts.Command),
+		DryRun:    facts.DryRun,
+	}
+}
+
+func policyRiskForFacts(facts PolicyFacts) policy.RiskLevel {
+	switch {
+	case facts.Delete:
 		return policy.RiskDelete
+	case facts.Network:
+		return policy.RiskNet
+	case facts.Exec:
+		return policy.RiskExec
+	case facts.Write:
+		return policy.RiskWrite
+	case facts.Read:
+		return policy.RiskRead
 	default:
 		return ""
 	}
+}
+
+func normalizedPolicyFactPaths(paths []string) []string {
+	if len(paths) == 0 {
+		return nil
+	}
+	cleaned := make([]string, 0, len(paths))
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path != "" {
+			cleaned = append(cleaned, path)
+		}
+	}
+	return cleaned
+}
+
+func normalizedPolicyFactCommand(command []string) []string {
+	if len(command) == 0 {
+		return nil
+	}
+	cleaned := make([]string, 0, len(command))
+	for _, arg := range command {
+		arg = strings.TrimSpace(arg)
+		if arg != "" {
+			cleaned = append(cleaned, arg)
+		}
+	}
+	return cleaned
 }
 
 func confirmPolicyDecision(ctx context.Context, request policy.Request, decision policy.Result) (bool, error) {
@@ -193,4 +203,25 @@ func policyRequestSummary(request policy.Request) string {
 		parts = append(parts, "command "+strings.Join(request.Command, " "))
 	}
 	return strings.Join(parts, ", ")
+}
+
+func recordPolicyDecisionEvent(ctx context.Context, request policy.Request, result policy.Result, confirmed *bool, confirmationError string) error {
+	env, ok := content.EnvFromContext(ctx)
+	if !ok || env.Session == nil {
+		return nil
+	}
+	scope := env.EventScope
+	if scope.AgentName == "" {
+		scope.AgentName = env.Config.AgentName
+	}
+	err := session.SaveEvent(ctx, env.Session, scope, session.EventTypePolicyDecision, policyDecisionEventPayload{
+		Request:           request,
+		Result:            result,
+		Confirmed:         confirmed,
+		ConfirmationError: confirmationError,
+	})
+	if err != nil {
+		return fmt.Errorf("record policy decision event: %w", err)
+	}
+	return nil
 }
