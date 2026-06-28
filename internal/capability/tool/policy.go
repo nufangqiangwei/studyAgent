@@ -1,8 +1,6 @@
 package tool
 
 import (
-	"agent/internal/capability/builtin/askUser"
-	"agent/internal/capability/builtin/workspace"
 	"agent/internal/content"
 	"agent/internal/foundation/policy"
 	"bufio"
@@ -18,107 +16,12 @@ func policyRequestForToolCall(name string, input json.RawMessage) policy.Request
 	request := policy.Request{
 		ToolName:  name,
 		Operation: name,
+		Risk:      inferredPolicyRiskForToolName(name),
 	}
-	switch name {
-	case askUser.Name:
-		request.Risk = policy.RiskRead
-	case workspace.ListFilesToolName:
-		request.Risk = policy.RiskRead
-		request.Path = inputStringField(input, "path")
-	case workspace.ReadFileToolName:
-		request.Risk = policy.RiskRead
-		request.Path = inputStringField(input, "path")
-	case workspace.SearchTextToolName:
-		request.Risk = policy.RiskRead
-		request.Path = inputStringField(input, "path")
-	case workspace.GetWorkspaceSummaryToolName:
-		request.Risk = policy.RiskRead
-		request.Path = inputStringField(input, "path")
-	case WriteFileToolName:
-		request.Risk = policy.RiskWrite
-		request.Path = inputStringField(input, "path")
-		request.DryRun = inputBoolField(input, "dry_run", true)
-		if request.DryRun {
-			request.Operation = "dry-run write"
-		}
-	case ApplyPatchToolName:
-		request = applyPatchPolicyRequest(input)
-	default:
-		request.Risk = inferredPolicyRiskForToolName(name)
-		if name == "run_command" {
-			request.Command = firstInputStringSliceField(input, "command", "cmd", "args")
-		}
+	if name == "run_command" {
+		request.Command = firstInputStringSliceField(input, "command", "cmd", "args")
 	}
 	return request
-}
-
-func applyPatchPolicyRequest(input json.RawMessage) policy.Request {
-	request := policy.Request{
-		ToolName:  ApplyPatchToolName,
-		Risk:      policy.RiskWrite,
-		Operation: ApplyPatchToolName,
-		DryRun:    inputBoolField(input, "dry_run", true),
-	}
-	if request.DryRun {
-		request.Operation = "dry-run patch"
-	}
-	var req applyPatchInput
-	if err := workspace.decodeWorkspaceToolInput(ApplyPatchToolName, input, &req); err != nil {
-		return request
-	}
-	filePatches, err := parseUnifiedPatch(req.Patch)
-	if err != nil {
-		return request
-	}
-
-	paths := make([]string, 0, len(filePatches))
-	highRisk := false
-	for _, filePatch := range filePatches {
-		target := filePatch.targetPath()
-		if target != "" {
-			paths = append(paths, target)
-		}
-		if filePatch.operation() == "delete" {
-			request.Risk = policy.RiskDelete
-			request.Operation = "delete"
-		}
-		if isHighRisk, _ := highRiskWritePath(target); isHighRisk {
-			highRisk = true
-		}
-	}
-	request.Path = strings.Join(paths, ",")
-	if highRisk && request.Operation != "delete" {
-		request.Operation = "high-risk write"
-	}
-	return request
-}
-
-func inputBoolField(input json.RawMessage, field string, fallback bool) bool {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(input, &raw); err != nil {
-		return fallback
-	}
-	value, ok := raw[field]
-	if !ok {
-		return fallback
-	}
-	var parsed bool
-	if err := json.Unmarshal(value, &parsed); err != nil {
-		return fallback
-	}
-	return parsed
-}
-
-func inputStringField(input json.RawMessage, field string) string {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(input, &raw); err != nil {
-		return ""
-	}
-	var value string
-	if err := json.Unmarshal(raw[field], &value); err != nil {
-		return ""
-	}
-	return value
 }
 
 func firstInputStringSliceField(input json.RawMessage, fields ...string) []string {

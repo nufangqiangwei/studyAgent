@@ -1,7 +1,6 @@
-package tool
+package workspace
 
 import (
-	"agent/internal/capability/builtin/workspace"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -11,10 +10,10 @@ import (
 
 func TestApplyPatchToolDefaultsToDryRun(t *testing.T) {
 	root := t.TempDir()
-	workspace.writeToolTestFile(t, root, "notes.txt", "alpha\nbeta\n")
+	writeToolTestFile(t, root, "notes.txt", "alpha\nbeta\n")
 
 	tool := NewApplyPatchTool()
-	result, err := tool.Execute(workspace.workspaceToolContext(root), json.RawMessage(`{
+	result, err := tool.Execute(workspaceToolContext(root), json.RawMessage(`{
 		"patch":"--- a/notes.txt\n+++ b/notes.txt\n@@ -1,2 +1,2 @@\n alpha\n-beta\n+gamma\n"
 	}`))
 	if err != nil {
@@ -38,7 +37,7 @@ func TestApplyPatchToolDefaultsToDryRun(t *testing.T) {
 
 func TestApplyPatchToolAppliesUnifiedDiff(t *testing.T) {
 	root := t.TempDir()
-	workspace.writeToolTestFile(t, root, "notes.txt", "alpha\nbeta\n")
+	writeToolTestFile(t, root, "notes.txt", "alpha\nbeta\n")
 
 	dryRun := false
 	input, err := json.Marshal(applyPatchInput{
@@ -50,7 +49,7 @@ func TestApplyPatchToolAppliesUnifiedDiff(t *testing.T) {
 	}
 
 	tool := NewApplyPatchTool()
-	result, err := tool.Execute(workspace.workspaceToolContext(root), input)
+	result, err := tool.Execute(workspaceToolContext(root), input)
 	if err != nil {
 		t.Fatalf("Execute returned error: %v", err)
 	}
@@ -66,7 +65,7 @@ func TestApplyPatchToolRejectsPathsOutsideWorkspace(t *testing.T) {
 	root := t.TempDir()
 	tool := NewApplyPatchTool()
 
-	_, err := tool.Execute(workspace.workspaceToolContext(root), json.RawMessage(`{
+	_, err := tool.Execute(workspaceToolContext(root), json.RawMessage(`{
 		"patch":"--- /dev/null\n+++ b/../outside.txt\n@@ -0,0 +1,1 @@\n+outside\n"
 	}`))
 	if err == nil {
@@ -81,7 +80,7 @@ func TestApplyPatchToolRejectsGitPath(t *testing.T) {
 	root := t.TempDir()
 	tool := NewApplyPatchTool()
 
-	_, err := tool.Execute(workspace.workspaceToolContext(root), json.RawMessage(`{
+	_, err := tool.Execute(workspaceToolContext(root), json.RawMessage(`{
 		"patch":"--- /dev/null\n+++ b/.git/config\n@@ -0,0 +1,1 @@\n+secret\n"
 	}`))
 	if err == nil {
@@ -96,7 +95,7 @@ func TestApplyPatchToolRejectsOversizedPatch(t *testing.T) {
 	root := t.TempDir()
 	tool := NewApplyPatchTool()
 
-	_, err := tool.Execute(workspace.workspaceToolContext(root), json.RawMessage(`{"patch":"`+strings.Repeat("x", maxPatchBytes+1)+`"}`))
+	_, err := tool.Execute(workspaceToolContext(root), json.RawMessage(`{"patch":"`+strings.Repeat("x", maxPatchBytes+1)+`"}`))
 	if err == nil {
 		t.Fatal("Execute returned nil error")
 	}
@@ -109,7 +108,7 @@ func TestWriteFileToolDefaultsToDryRun(t *testing.T) {
 	root := t.TempDir()
 	tool := NewWriteFileTool()
 
-	result, err := tool.Execute(workspace.workspaceToolContext(root), json.RawMessage(`{"path":"new.txt","content":"hello\n"}`))
+	result, err := tool.Execute(workspaceToolContext(root), json.RawMessage(`{"path":"new.txt","content":"hello\n"}`))
 	if err != nil {
 		t.Fatalf("Execute returned error: %v", err)
 	}
@@ -138,7 +137,7 @@ func TestWriteFileToolWritesWhenDryRunFalse(t *testing.T) {
 		t.Fatalf("marshal input: %v", err)
 	}
 
-	if _, err := tool.Execute(workspace.workspaceToolContext(root), input); err != nil {
+	if _, err := tool.Execute(workspaceToolContext(root), input); err != nil {
 		t.Fatalf("Execute returned error: %v", err)
 	}
 	if got := readToolTestFile(t, root, "nested/new.txt"); got != "hello\n" {
@@ -148,7 +147,7 @@ func TestWriteFileToolWritesWhenDryRunFalse(t *testing.T) {
 
 func TestWriteFileToolRequiresOverwriteForExistingFiles(t *testing.T) {
 	root := t.TempDir()
-	workspace.writeToolTestFile(t, root, "notes.txt", "original\n")
+	writeToolTestFile(t, root, "notes.txt", "original\n")
 	tool := NewWriteFileTool()
 
 	dryRun := false
@@ -161,7 +160,7 @@ func TestWriteFileToolRequiresOverwriteForExistingFiles(t *testing.T) {
 		t.Fatalf("marshal input: %v", err)
 	}
 
-	_, err = tool.Execute(workspace.workspaceToolContext(root), input)
+	_, err = tool.Execute(workspaceToolContext(root), input)
 	if err == nil {
 		t.Fatal("Execute returned nil error")
 	}
@@ -177,7 +176,7 @@ func TestWriteFileToolRejectsBinaryContent(t *testing.T) {
 	root := t.TempDir()
 	tool := NewWriteFileTool()
 
-	_, err := tool.Execute(workspace.workspaceToolContext(root), json.RawMessage(`{"path":"bad.txt","content":"abc\u0000def"}`))
+	_, err := tool.Execute(workspaceToolContext(root), json.RawMessage(`{"path":"bad.txt","content":"abc\u0000def"}`))
 	if err == nil {
 		t.Fatal("Execute returned nil error")
 	}
@@ -199,7 +198,7 @@ func TestWriteToolsRequireConfirmationForHighRiskPaths(t *testing.T) {
 		t.Fatalf("marshal input: %v", err)
 	}
 
-	_, err = tool.Execute(workspace.workspaceToolContext(root), input)
+	_, err = tool.Execute(workspaceToolContext(root), input)
 	if err == nil {
 		t.Fatal("Execute returned nil error")
 	}

@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"agent/internal/capability/builtin"
 	"agent/internal/capability/builtin/askUser"
 	"agent/internal/capability/builtin/workspace"
 	"agent/internal/content"
@@ -20,11 +21,11 @@ type Tool interface {
 	Execute(ctx context.Context, input json.RawMessage) (Result, error)
 }
 
-type Result struct {
-	Content  string          `json:"content"`
-	Metadata map[string]any  `json:"metadata,omitempty"`
-	Raw      json.RawMessage `json:"raw,omitempty"`
+type PolicyRequester interface {
+	PolicyRequest(input json.RawMessage) policy.Request
 }
+
+type Result = builtin.Result
 
 type policyDecisionEventPayload struct {
 	Request           policy.Request `json:"request"`
@@ -80,13 +81,13 @@ func RegisterDefaults(registry *Registry) error {
 		return fmt.Errorf("register default tool: nil registry")
 	}
 	defaults := []Tool{
-		NewApplyPatchTool(),
+		workspace.NewApplyPatchTool(),
 		askUser.NewAskUserTool(),
 		workspace.NewListFilesTool(),
 		workspace.NewReadFileTool(),
 		workspace.NewSearchTextTool(),
 		workspace.NewGetWorkspaceSummaryTool(),
-		NewWriteFileTool(),
+		workspace.NewWriteFileTool(),
 	}
 	for _, tool := range defaults {
 		if err := registry.Register(tool); err != nil {
@@ -145,6 +146,9 @@ func (r *Registry) Execute(ctx context.Context, name string, input json.RawMessa
 		return Result{}, fmt.Errorf("unknown tool %q", name)
 	}
 	request := policyRequestForToolCall(name, input)
+	if requester, ok := tool.(PolicyRequester); ok {
+		request = requester.PolicyRequest(input)
+	}
 	checker := r.policy
 	if checker == nil {
 		checker = policy.Default()

@@ -27,13 +27,13 @@ func assertDefaultTools(t *testing.T, got []Tool) {
 	t.Helper()
 
 	want := []string{
-		ApplyPatchToolName,
+		workspace.ApplyPatchToolName,
 		askUser.Name,
 		workspace.GetWorkspaceSummaryToolName,
 		workspace.ListFilesToolName,
 		workspace.ReadFileToolName,
 		workspace.SearchTextToolName,
-		WriteFileToolName,
+		workspace.WriteFileToolName,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("tool = %d, want %d: %#v", len(got), len(want), got)
@@ -46,13 +46,13 @@ func assertDefaultTools(t *testing.T, got []Tool) {
 }
 
 func TestRegistryChecksPolicyBeforeExecutingTool(t *testing.T) {
-	tool := &recordingTool{name: WriteFileToolName}
+	tool := &recordingTool{name: workspace.WriteFileToolName}
 	registry := NewRegistry()
 	if err := registry.Register(tool); err != nil {
 		t.Fatalf("Register returned error: %v", err)
 	}
 
-	_, err := registry.Execute(context.Background(), WriteFileToolName, json.RawMessage(`{"path":"notes.txt","content":"hello","dry_run":false}`))
+	_, err := registry.Execute(context.Background(), workspace.WriteFileToolName, json.RawMessage(`{"path":"notes.txt","content":"hello","dry_run":false}`))
 	if err == nil {
 		t.Fatal("Execute returned nil error")
 	}
@@ -67,11 +67,11 @@ func TestRegistryChecksPolicyBeforeExecutingTool(t *testing.T) {
 func TestRegistryAllowsDryRunWriteValidationInReadOnlyMode(t *testing.T) {
 	root := t.TempDir()
 	registry := NewRegistry()
-	if err := registry.Register(NewWriteFileTool()); err != nil {
+	if err := registry.Register(workspace.NewWriteFileTool()); err != nil {
 		t.Fatalf("Register returned error: %v", err)
 	}
 
-	result, err := registry.Execute(workspace.workspaceToolContext(root), WriteFileToolName, json.RawMessage(`{"path":"notes.txt","content":"hello"}`))
+	result, err := registry.Execute(registryToolContext(root), workspace.WriteFileToolName, json.RawMessage(`{"path":"notes.txt","content":"hello"}`))
 	if err != nil {
 		t.Fatalf("Execute returned error: %v", err)
 	}
@@ -86,15 +86,15 @@ func TestRegistryAllowsDryRunWriteValidationInReadOnlyMode(t *testing.T) {
 func TestRegistryAllowsWriteFileInModifyMode(t *testing.T) {
 	root := t.TempDir()
 	registry := NewRegistry(WithPolicy(policy.New(policy.ModeModify)))
-	if err := registry.Register(NewWriteFileTool()); err != nil {
+	if err := registry.Register(workspace.NewWriteFileTool()); err != nil {
 		t.Fatalf("Register returned error: %v", err)
 	}
 
-	_, err := registry.Execute(workspace.workspaceToolContext(root), WriteFileToolName, json.RawMessage(`{"path":"notes.txt","content":"hello\n","dry_run":false}`))
+	_, err := registry.Execute(registryToolContext(root), workspace.WriteFileToolName, json.RawMessage(`{"path":"notes.txt","content":"hello\n","dry_run":false}`))
 	if err != nil {
 		t.Fatalf("Execute returned error: %v", err)
 	}
-	if got := readToolTestFile(t, root, "notes.txt"); got != "hello\n" {
+	if got := readRegistryTestFile(t, root, "notes.txt"); got != "hello\n" {
 		t.Fatalf("notes.txt content = %q, want hello", got)
 	}
 }
@@ -149,4 +149,20 @@ func (t *recordingTool) InputSchema() json.RawMessage {
 func (t *recordingTool) Execute(context.Context, json.RawMessage) (Result, error) {
 	t.called = true
 	return t.result, nil
+}
+
+func registryToolContext(root string) context.Context {
+	return content.WithEnv(context.Background(), &content.Env{
+		Config: content.Config{WorkDir: root},
+	})
+}
+
+func readRegistryTestFile(t *testing.T, root, relPath string) string {
+	t.Helper()
+
+	data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(relPath)))
+	if err != nil {
+		t.Fatalf("read %s: %v", relPath, err)
+	}
+	return string(data)
 }
