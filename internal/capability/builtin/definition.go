@@ -3,7 +3,7 @@ package builtin
 import "encoding/json"
 
 type Result struct {
-	Content  string
-	Metadata map[string]any
-	Raw      json.RawMessage
+	Content  string          `json:"content"`
+	Metadata map[string]any  `json:"metadata,omitempty"`
+	Raw      json.RawMessage `json:"raw,omitempty"`
 }

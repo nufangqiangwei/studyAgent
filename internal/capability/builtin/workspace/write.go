@@ -1,7 +1,7 @@
 package workspace
 
 import (
-	"agent/internal/capability/tool"
+	"agent/internal/capability/builtin"
 	"agent/internal/foundation/workspace"
 	"bytes"
 	"context"
@@ -16,7 +16,7 @@ import (
 	"strings"
 )
 
-type Result = tool.Result
+type Result = builtin.Result
 
 const (
 	ApplyPatchToolName = "apply_patch"

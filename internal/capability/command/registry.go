@@ -1,6 +1,7 @@
 package command
 
 import (
+	"agent/internal/capability/builtin/command"
 	"agent/internal/content"
 	"context"
 	"fmt"
@@ -16,23 +17,18 @@ type Registry struct {
 	commands map[string]Command
 }
 
-func NewRegistry() *Registry {
-	return &Registry{commands: make(map[string]Command)}
-}
-
-func (r *Registry) Register(cmd Command) error {
+func (r *Registry) register(cmd Command) {
 	if cmd == nil {
-		return fmt.Errorf("register command: nil command")
+		panic("builtin.command 注册命令时报错：传入的Command对象为空")
 	}
 	name := cmd.Name()
 	if name == "" {
-		return fmt.Errorf("register command: empty name")
+		panic("builtin.command 注册命令时报错：传入的Command对象名称为空")
 	}
 	if _, exists := r.commands[name]; exists {
-		return fmt.Errorf("register command %q: already exists", name)
+		panic(fmt.Sprintf("builtin.command 注册命令时报错：传入的Command对象名称：%q已存在", name))
 	}
 	r.commands[name] = cmd
-	return nil
 }
 
 func (r *Registry) Execute(ctx context.Context, name string, env content.Env, args []string) error {
@@ -70,6 +66,11 @@ func (r *Registry) List() []content.CommandInfo {
 var Manage *Registry
 
 func init() {
-	Manage = NewRegistry()
-	RegisterDefaults(Manage)
+	Manage = &Registry{commands: make(map[string]Command)}
+	Manage.register(command.Model{})
+	Manage.register(command.Status{})
+	Manage.register(command.Run{})
+	Manage.register(command.Help{})
+	Manage.register(command.Agent{})
+	Manage.register(command.SetAgent{})
 }

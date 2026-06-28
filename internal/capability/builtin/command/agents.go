@@ -7,17 +7,17 @@ import (
 	"strings"
 )
 
-type agentsCommand struct{}
+type Agent struct{}
 
-func (agentsCommand) Name() string {
+func (Agent) Name() string {
 	return "agent"
 }
 
-func (agentsCommand) Description() string {
+func (Agent) Description() string {
 	return "show active and available agents"
 }
 
-func (agentsCommand) Execute(_ context.Context, env content.Env, _ []string) error {
+func (Agent) Execute(_ context.Context, env content.Env, _ []string) error {
 	useAgentName := activeAgentName(env)
 	if _, err := fmt.Fprintf(env.IO.Out, "Agent: %s\n", useAgentName); err != nil {
 		return err
@@ -38,17 +38,17 @@ func (agentsCommand) Execute(_ context.Context, env content.Env, _ []string) err
 	return nil
 }
 
-type setAgentCommand struct{}
+type SetAgent struct{}
 
-func (setAgentCommand) Name() string {
+func (SetAgent) Name() string {
 	return "set-agent"
 }
 
-func (setAgentCommand) Description() string {
+func (SetAgent) Description() string {
 	return "switch the active agent"
 }
 
-func (setAgentCommand) Execute(ctx context.Context, env content.Env, args []string) error {
+func (SetAgent) Execute(ctx context.Context, env content.Env, args []string) error {
 	name := strings.TrimSpace(strings.Join(args, " "))
 	if name == "" {
 		return fmt.Errorf("set-agent requires an agent name")
