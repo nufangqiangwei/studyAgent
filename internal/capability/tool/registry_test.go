@@ -13,14 +13,13 @@ import (
 	"testing"
 )
 
-func TestNewDefaultRegistryRegistersAndPublishesTools(t *testing.T) {
-	registry, err := NewDefaultRegistry()
+func TestNewDefaultManagePublishesTools(t *testing.T) {
+	registry, err := NewDefaultManage()
 	if err != nil {
-		t.Fatalf("NewDefaultRegistry returned error: %v", err)
+		t.Fatalf("NewDefaultManage returned error: %v", err)
 	}
 
 	assertDefaultTools(t, registry.List())
-	assertDefaultTools(t, RegisteredTools())
 }
 
 func assertDefaultTools(t *testing.T, got []Tool) {
@@ -45,10 +44,84 @@ func assertDefaultTools(t *testing.T, got []Tool) {
 	}
 }
 
-func TestRegistryChecksPolicyBeforeExecutingTool(t *testing.T) {
+func TestAddToolCopiesRegisteredToolByName(t *testing.T) {
+	registry := NewManage()
+	if err := AddTool(workspace.ListFilesToolName, registry); err != nil {
+		t.Fatalf("AddTool returned error: %v", err)
+	}
+
+	got := registry.List()
+	if len(got) != 1 || got[0].Name() != workspace.ListFilesToolName {
+		t.Fatalf("managed tools = %#v, want only %q", got, workspace.ListFilesToolName)
+	}
+
+	_, err := registry.Execute(registryToolContext(t.TempDir()), workspace.ListFilesToolName, json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Execute added tool returned error: %v", err)
+	}
+}
+
+func TestManageSubsetSelectsRegisteredToolsByName(t *testing.T) {
+	registry := NewManage()
+	readTool := &recordingTool{name: workspace.ReadFileToolName, result: Result{Content: "read"}}
+	writeTool := &recordingTool{name: workspace.WriteFileToolName}
+	if err := registry.register(readTool); err != nil {
+		t.Fatalf("Register read tool returned error: %v", err)
+	}
+	if err := registry.register(writeTool); err != nil {
+		t.Fatalf("Register write tool returned error: %v", err)
+	}
+
+	subset, err := registry.Subset([]string{workspace.ReadFileToolName})
+	if err != nil {
+		t.Fatalf("Subset returned error: %v", err)
+	}
+
+	got := subset.List()
+	if len(got) != 1 || got[0].Name() != workspace.ReadFileToolName {
+		t.Fatalf("subset tools = %#v, want only %q", got, workspace.ReadFileToolName)
+	}
+	result, err := subset.Execute(context.Background(), workspace.ReadFileToolName, json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Execute read tool returned error: %v", err)
+	}
+	if result.Content != "read" || !readTool.called {
+		t.Fatalf("read tool result = %#v called=%t, want content read and called", result, readTool.called)
+	}
+
+	_, err = subset.Execute(context.Background(), workspace.WriteFileToolName, json.RawMessage(`{}`))
+	if err == nil || !strings.Contains(err.Error(), "unknown tool") {
+		t.Fatalf("Execute unselected tool error = %v, want unknown tool", err)
+	}
+	if writeTool.called {
+		t.Fatal("unselected write tool executed")
+	}
+}
+
+func TestManageSubsetAppliesPolicyOptions(t *testing.T) {
+	registry := NewManage()
+	writeTool := &recordingTool{name: workspace.WriteFileToolName}
+	if err := registry.register(writeTool); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+
+	subset, err := registry.Subset([]string{workspace.WriteFileToolName}, WithPolicy(policy.New(policy.ModeModify)))
+	if err != nil {
+		t.Fatalf("Subset returned error: %v", err)
+	}
+	_, err = subset.Execute(context.Background(), workspace.WriteFileToolName, json.RawMessage(`{"path":"notes.txt","content":"hello","dry_run":false}`))
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !writeTool.called {
+		t.Fatal("write tool did not execute with subset policy")
+	}
+}
+
+func TestManageChecksPolicyBeforeExecutingTool(t *testing.T) {
 	tool := &recordingTool{name: workspace.WriteFileToolName}
-	registry := NewRegistry()
-	if err := registry.Register(tool); err != nil {
+	registry := NewManage()
+	if err := registry.register(tool); err != nil {
 		t.Fatalf("Register returned error: %v", err)
 	}
 
@@ -64,10 +137,10 @@ func TestRegistryChecksPolicyBeforeExecutingTool(t *testing.T) {
 	}
 }
 
-func TestRegistryAllowsDryRunWriteValidationInReadOnlyMode(t *testing.T) {
+func TestManageAllowsDryRunWriteValidationInReadOnlyMode(t *testing.T) {
 	root := t.TempDir()
-	registry := NewRegistry()
-	if err := registry.Register(workspace.NewWriteFileTool()); err != nil {
+	registry := NewManage()
+	if err := registry.register(workspace.NewWriteFileTool()); err != nil {
 		t.Fatalf("Register returned error: %v", err)
 	}
 
@@ -83,10 +156,10 @@ func TestRegistryAllowsDryRunWriteValidationInReadOnlyMode(t *testing.T) {
 	}
 }
 
-func TestRegistryAllowsWriteFileInModifyMode(t *testing.T) {
+func TestManageAllowsWriteFileInModifyMode(t *testing.T) {
 	root := t.TempDir()
-	registry := NewRegistry(WithPolicy(policy.New(policy.ModeModify)))
-	if err := registry.Register(workspace.NewWriteFileTool()); err != nil {
+	registry := NewManage(WithPolicy(policy.New(policy.ModeModify)))
+	if err := registry.register(workspace.NewWriteFileTool()); err != nil {
 		t.Fatalf("Register returned error: %v", err)
 	}
 
@@ -99,10 +172,10 @@ func TestRegistryAllowsWriteFileInModifyMode(t *testing.T) {
 	}
 }
 
-func TestRegistryAsksForPolicyConfirmation(t *testing.T) {
+func TestManageAsksForPolicyConfirmation(t *testing.T) {
 	tool := &recordingTool{name: "network", result: Result{Content: "sent"}}
-	registry := NewRegistry(WithPolicy(policy.New(policy.ModeModify)))
-	if err := registry.Register(tool); err != nil {
+	registry := NewManage(WithPolicy(policy.New(policy.ModeModify)))
+	if err := registry.register(tool); err != nil {
 		t.Fatalf("Register returned error: %v", err)
 	}
 	var out strings.Builder

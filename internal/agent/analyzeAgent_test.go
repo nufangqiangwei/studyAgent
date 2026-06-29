@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"agent/internal/capability/tool"
 	"agent/internal/foundation/llmClient"
 	"context"
 	"strings"
@@ -34,7 +33,6 @@ func TestAnalyzeAgentUsesAnalyzePromptAndDefaultTools(t *testing.T) {
 		t.Fatalf("Name = %q, want %q", analyzeAgent.Name(), AnalyzeAgentName)
 	}
 	assertAgentDefaultTools(t, analyzeAgent.Tools())
-	assertAgentDefaultTools(t, tool.RegisteredTools())
 
 	if err := analyzeAgent.Run(context.Background(), "研究 AI 代码助手"); err != nil {
 		t.Fatalf("Run returned error: %v", err)

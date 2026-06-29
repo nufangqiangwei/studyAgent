@@ -242,11 +242,12 @@ prompt 模块只负责构建消息，不负责调用模型。
 
 当前注册机制：
 
-- `tools.NewRegistry` 创建空工具注册表。
-- `RegisterDefaults` 注册默认工具。
-- `NewDefaultRegistry` 创建默认注册表，并通过 `SetCurrentRegistry` 发布为当前工具注册表。
-- `RegisteredTools` 和 `CurrentRegistry` 读取当前工具注册表；内部使用锁保护。
-- agent 创建时把工具注册表注入 `NativeLoop`，loop 只依赖 `ToolRegistry` 接口。
+- `tools.NewManage` 创建空工具管理对象。
+- tool 包在 `init` 中把默认工具注册到内部 `currentRegistry`。
+- `NewDefaultManage` 按默认工具名从 `currentRegistry` 派生 agent 持有的工具管理对象。
+- `AddTool(name, manage)` 只能按名称从 `currentRegistry` 复制已注册工具到目标管理对象；直接注册方法保持包内私有。
+- `RegisteredTools` 读取当前默认工具列表；内部使用锁保护。
+- agent 创建时把工具管理对象注入 `NativeLoop`，loop 只依赖 `ToolRegistry` 接口。
 
 当前已实现 `ask_user` 工具，用于让 agent 在关键信息缺失时向终端用户提问。该工具通过 `content.EnvFromContext` 获取当前执行流的输入输出，因此不会直接依赖全局 stdin/stdout。agent loop 已能把注册工具声明传给 LLM，并在模型返回 tool call 后执行工具、把结果带入下一步模型请求。后续加入文件读取、文本搜索、shell 执行、补丁应用等能力时，可以继续复用同一套工具注册和执行接口。
 
