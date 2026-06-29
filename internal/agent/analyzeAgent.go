@@ -16,11 +16,11 @@ type AnalyzeAgent struct {
 }
 
 func NewAnalyzeAgent(ctx context.Context, opts CreatAgentOptions) (Agent, error) {
-	toolRegistry, err := tool.NewDefaultRegistry(tool.WithPolicy(opts.Policy))
+	toolManage, err := tool.NewDefaultManage(tool.WithPolicy(opts.Policy))
 	if err != nil {
-		return nil, fmt.Errorf("analyze agent: register default tool: %w", err)
+		return nil, fmt.Errorf("analyze agent: select tools: %w", err)
 	}
-	registeredTools := toolRegistry.List()
+	registeredTools := toolManage.List()
 
 	loop, err := NewNativeLoop(Options{
 		LLM: opts.LLM,
@@ -28,7 +28,7 @@ func NewAnalyzeAgent(ctx context.Context, opts CreatAgentOptions) (Agent, error)
 			SystemPrompt: prompt.AnalyzeSystemPrompt,
 			Model:        opts.Model,
 		}),
-		Tools:    toolRegistry,
+		Tools:    toolManage,
 		Logger:   opts.Logger,
 		MaxSteps: opts.MaxSteps,
 		Out:      opts.Out,

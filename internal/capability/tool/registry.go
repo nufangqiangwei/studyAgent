@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"sync"
 )
 
 type Tool interface {
@@ -34,52 +33,20 @@ type policyDecisionEventPayload struct {
 	ConfirmationError string         `json:"confirmation_error,omitempty"`
 }
 
-type Registry struct {
+type Manage struct {
 	tools  map[string]Tool
 	policy policy.Checker
 }
 
 var (
-	currentRegistryMu sync.RWMutex
-	currentRegistry   = mustNewDefaultRegistry()
+	currentRegistry *Manage // 运行时候只读对象，只有在init中可被写入
+	toolsNames      []string
 )
 
-type RegistryOption func(*Registry)
+type ManageOption func(*Manage)
 
-func WithPolicy(checker policy.Checker) RegistryOption {
-	return func(registry *Registry) {
-		if checker != nil {
-			registry.policy = checker
-		}
-	}
-}
-
-func NewRegistry(options ...RegistryOption) *Registry {
-	registry := &Registry{
-		tools:  make(map[string]Tool),
-		policy: policy.Default(),
-	}
-	for _, option := range options {
-		if option != nil {
-			option(registry)
-		}
-	}
-	return registry
-}
-
-func NewDefaultRegistry(options ...RegistryOption) (*Registry, error) {
-	registry := NewRegistry(options...)
-	if err := RegisterDefaults(registry); err != nil {
-		return nil, err
-	}
-	SetCurrentRegistry(registry)
-	return registry, nil
-}
-
-func RegisterDefaults(registry *Registry) error {
-	if registry == nil {
-		return fmt.Errorf("register default tool: nil registry")
-	}
+func init() {
+	currentRegistry = NewManage()
 	defaults := []Tool{
 		workspace.NewApplyPatchTool(),
 		askUser.NewAskUserTool(),
@@ -90,38 +57,68 @@ func RegisterDefaults(registry *Registry) error {
 		workspace.NewWriteFileTool(),
 	}
 	for _, tool := range defaults {
-		if err := registry.Register(tool); err != nil {
-			return fmt.Errorf("register default tool %q: %w", tool.Name(), err)
+		if err := currentRegistry.register(tool); err != nil {
+			panic(fmt.Errorf("register default tool %q: %w", tool.Name(), err))
 		}
 	}
-	return nil
 }
 
-func CurrentRegistry() *Registry {
-	currentRegistryMu.RLock()
-	defer currentRegistryMu.RUnlock()
-	return currentRegistry
-}
-
-func SetCurrentRegistry(registry *Registry) {
-	currentRegistryMu.Lock()
-	defer currentRegistryMu.Unlock()
-	currentRegistry = registry
-}
-
-func RegisteredTools() []Tool {
-	currentRegistryMu.RLock()
-	registry := currentRegistry
-	currentRegistryMu.RUnlock()
-	if registry == nil {
-		return nil
+func WithPolicy(checker policy.Checker) ManageOption {
+	return func(manager *Manage) {
+		if checker != nil {
+			manager.policy = checker
+		}
 	}
-	return registry.List()
 }
 
-func (r *Registry) Register(tool Tool) error {
+func NewManage(options ...ManageOption) *Manage {
+	manager := &Manage{
+		tools:  make(map[string]Tool),
+		policy: policy.Default(),
+	}
+	for _, option := range options {
+		if option != nil {
+			option(manager)
+		}
+	}
+	return manager
+}
+
+func NewDefaultManage(options ...ManageOption) (*Manage, error) {
+	return currentRegistry.Subset(AllToolNames(), options...)
+}
+
+func AllToolNames() []string {
+	return toolsNames
+}
+
+func AddTool(name string, manager *Manage) error {
+	if manager == nil {
+		return fmt.Errorf("add tool %q: nil Manage", name)
+	}
+	return addToolFrom(currentRegistry, name, manager)
+}
+
+func addToolFrom(source *Manage, name string, target *Manage) error {
+	if source == nil {
+		return fmt.Errorf("add tool %q: nil source Manage", name)
+	}
+	if target == nil {
+		return fmt.Errorf("add tool %q: nil target Manage", name)
+	}
+	if name == "" {
+		return fmt.Errorf("add tool: empty name")
+	}
+	tool, ok := source.tools[name]
+	if !ok {
+		return fmt.Errorf("add tool %q: not registered", name)
+	}
+	return target.register(tool)
+}
+
+func (r *Manage) register(tool Tool) error {
 	if r == nil {
-		return fmt.Errorf("register tool: nil registry")
+		return fmt.Errorf("register tool: nil Manage")
 	}
 	if tool == nil {
 		return fmt.Errorf("register tool: nil tool")
@@ -137,9 +134,33 @@ func (r *Registry) Register(tool Tool) error {
 	return nil
 }
 
-func (r *Registry) Execute(ctx context.Context, name string, input json.RawMessage) (Result, error) {
+func (r *Manage) Subset(names []string, options ...ManageOption) (*Manage, error) {
 	if r == nil {
-		return Result{}, fmt.Errorf("tool registry is nil")
+		return nil, fmt.Errorf("select tools: nil Manage")
+	}
+	manager := &Manage{
+		tools:  make(map[string]Tool, len(names)),
+		policy: r.policy,
+	}
+	if manager.policy == nil {
+		manager.policy = policy.Default()
+	}
+	for _, option := range options {
+		if option != nil {
+			option(manager)
+		}
+	}
+	for _, name := range names {
+		if err := addToolFrom(r, name, manager); err != nil {
+			return nil, fmt.Errorf("select tool: %w", err)
+		}
+	}
+	return manager, nil
+}
+
+func (r *Manage) Execute(ctx context.Context, name string, input json.RawMessage) (Result, error) {
+	if r == nil {
+		return Result{}, fmt.Errorf("tool Manage is nil")
 	}
 	tool, ok := r.tools[name]
 	if !ok {
@@ -187,7 +208,7 @@ func (r *Registry) Execute(ctx context.Context, name string, input json.RawMessa
 	return tool.Execute(ctx, input)
 }
 
-func (r *Registry) List() []Tool {
+func (r *Manage) List() []Tool {
 	if r == nil {
 		return nil
 	}
@@ -223,12 +244,4 @@ func recordPolicyDecisionEvent(ctx context.Context, request policy.Request, resu
 		return fmt.Errorf("record policy decision event: %w", err)
 	}
 	return nil
-}
-
-func mustNewDefaultRegistry() *Registry {
-	registry := NewRegistry()
-	if err := RegisterDefaults(registry); err != nil {
-		panic(err)
-	}
-	return registry
 }

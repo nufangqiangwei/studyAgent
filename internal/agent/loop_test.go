@@ -38,9 +38,9 @@ func TestNativeLoopExecutesToolCallAndContinues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFileStore returned error: %v", err)
 	}
-	toolRegistry := tools2.NewRegistry()
-	if err := toolRegistry.Register(askUser.NewAskUserTool()); err != nil {
-		t.Fatalf("register ask_user: %v", err)
+	toolManage := tools2.NewManage()
+	if err := tools2.AddTool(askUser.Name, toolManage); err != nil {
+		t.Fatalf("add ask_user: %v", err)
 	}
 	ctx := content.WithEnv(context.Background(), &content.Env{
 		IO: content.IO{
@@ -52,7 +52,7 @@ func TestNativeLoopExecutesToolCallAndContinues(t *testing.T) {
 	loop, err := NewNativeLoop(Options{
 		LLM:           model,
 		PromptBuilder: prompt.NewNativeBuilder(prompt.Options{}),
-		Tools:         toolRegistry,
+		Tools:         toolManage,
 		MaxSteps:      2,
 		Session:       store,
 	})
@@ -317,14 +317,14 @@ func TestNativeLoopSavesSessionTurns(t *testing.T) {
 }
 
 func TestNativeLoopHandleEventSuspendsForToolResultAndResumes(t *testing.T) {
-	toolRegistry := tools2.NewRegistry()
-	if err := toolRegistry.Register(askUser.NewAskUserTool()); err != nil {
-		t.Fatalf("register ask_user: %v", err)
+	toolManage := tools2.NewManage()
+	if err := tools2.AddTool(askUser.Name, toolManage); err != nil {
+		t.Fatalf("add ask_user: %v", err)
 	}
 	loop, err := NewNativeLoop(Options{
 		LLM:           &scriptedLLM{},
 		PromptBuilder: prompt.NewNativeBuilder(prompt.Options{}),
-		Tools:         toolRegistry,
+		Tools:         toolManage,
 		MaxSteps:      3,
 	})
 	if err != nil {
@@ -400,14 +400,14 @@ func TestNativeLoopResumesWaitingToolStateFromSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFileStore returned error: %v", err)
 	}
-	toolRegistry := tools2.NewRegistry()
-	if err := toolRegistry.Register(askUser.NewAskUserTool()); err != nil {
-		t.Fatalf("register ask_user: %v", err)
+	toolManage := tools2.NewManage()
+	if err := tools2.AddTool(askUser.Name, toolManage); err != nil {
+		t.Fatalf("add ask_user: %v", err)
 	}
 	loop, err := NewNativeLoop(Options{
 		LLM:           &scriptedLLM{},
 		PromptBuilder: prompt.NewNativeBuilder(prompt.Options{}),
-		Tools:         toolRegistry,
+		Tools:         toolManage,
 		MaxSteps:      3,
 		Session:       store,
 	})
@@ -444,7 +444,7 @@ func TestNativeLoopResumesWaitingToolStateFromSession(t *testing.T) {
 	resumedLoop, err := NewNativeLoop(Options{
 		LLM:           &scriptedLLM{},
 		PromptBuilder: prompt.NewNativeBuilder(prompt.Options{}),
-		Tools:         toolRegistry,
+		Tools:         toolManage,
 		MaxSteps:      3,
 		Session:       store,
 	})

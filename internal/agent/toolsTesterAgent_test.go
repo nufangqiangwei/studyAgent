@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"agent/internal/capability/tool"
 	"agent/internal/foundation/llmClient"
 	"context"
 	"strings"
@@ -34,7 +33,6 @@ func TestToolsTesterAgentUsesToolsPromptAndDefaultTools(t *testing.T) {
 		t.Fatalf("Name = %q, want %q", toolsAgent.Name(), ToolsTesterAgentName)
 	}
 	assertAgentDefaultTools(t, toolsAgent.Tools())
-	assertAgentDefaultTools(t, tool.RegisteredTools())
 
 	if err := toolsAgent.Run(context.Background(), "test read_file tool"); err != nil {
 		t.Fatalf("Run returned error: %v", err)

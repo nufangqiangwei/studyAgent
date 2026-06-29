@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 )
 
-func (t *AskUserTool) PolicyRequest(input json.RawMessage) policy.Request {
+func (t *Question) PolicyRequest(input json.RawMessage) policy.Request {
 	return policy.Request{
 		ToolName:  Name,
 		Operation: Name,

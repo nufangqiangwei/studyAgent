@@ -14,22 +14,22 @@ import (
 
 const Name = "ask_user"
 
-type AskUserTool struct {
+type Question struct {
 }
 
-func NewAskUserTool() *AskUserTool {
-	return &AskUserTool{}
+func NewAskUserTool() *Question {
+	return &Question{}
 }
 
-func (t *AskUserTool) Name() string {
+func (t *Question) Name() string {
 	return Name
 }
 
-func (t *AskUserTool) Description() string {
+func (t *Question) Description() string {
 	return "Ask the user a concise clarifying question and return their answer."
 }
 
-func (t *AskUserTool) InputSchema() json.RawMessage {
+func (t *Question) InputSchema() json.RawMessage {
 	return json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -47,7 +47,7 @@ func (t *AskUserTool) InputSchema() json.RawMessage {
 }`)
 }
 
-func (t *AskUserTool) Execute(ctx context.Context, input json.RawMessage) (builtin.Result, error) {
+func (t *Question) Execute(ctx context.Context, input json.RawMessage) (builtin.Result, error) {
 	if err := ctx.Err(); err != nil {
 		return builtin.Result{}, err
 	}
