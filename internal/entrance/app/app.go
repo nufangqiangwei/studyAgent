@@ -82,6 +82,16 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer, errOut
 		return err
 	}
 	cfg.Provider = resolvedProvider
+	if result, lookupErr := agent.ResolveAndCacheContextWindowTokens(ctx, agent.ContextWindowLookupOptions{
+		Provider: cfg.Provider,
+		Model:    cfg.Model,
+		ModelURL: cfg.ModelURL,
+		APIKey:   cfg.APIKey,
+	}); lookupErr != nil {
+		logger.Warnf("context window metadata lookup failed for provider=%s model=%s: %v", cfg.Provider, cfg.Model, lookupErr)
+	} else {
+		logger.Debugf("context window tokens resolved for provider=%s model=%s tokens=%d source=%s", cfg.Provider, result.Model, result.Tokens, result.Source)
+	}
 
 	agentSelector, err := newAgentSelector(ctx, agent.Catalog, agent.AnalyzeAgentName, agent.CreatAgentOptions{
 		LLM:      modelClient,

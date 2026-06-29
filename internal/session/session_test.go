@@ -81,6 +81,46 @@ func TestFileStoreSaveAppendsJSONLRecords(t *testing.T) {
 	}
 }
 
+func TestFileStoreSaveContextSnapshot(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFileStore returned error: %v", err)
+	}
+
+	if err := store.Save(context.Background(), Record{
+		Kind:      RecordKindContextSnapshot,
+		TurnID:    "turn-1",
+		StepIndex: 2,
+		ContextSnapshot: &ContextSnapshot{
+			Messages: []llm.Message{
+				{Role: llm.RoleSystem, Content: "system"},
+				{Role: llm.RoleUser, Content: "Conversation summary:\nsummary"},
+			},
+			Summary:              "summary",
+			TriggerTokens:        20_000,
+			ContextWindowTokens:  32_000,
+			OriginalMessageCount: 5,
+		},
+	}); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+
+	records, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records = %d, want 1: %#v", len(records), records)
+	}
+	snapshot := records[0].ContextSnapshot
+	if records[0].Kind != RecordKindContextSnapshot || snapshot == nil {
+		t.Fatalf("record = %#v, want context snapshot", records[0])
+	}
+	if len(snapshot.Messages) != 2 || snapshot.Summary != "summary" || snapshot.TriggerTokens != 20_000 {
+		t.Fatalf("snapshot = %#v", snapshot)
+	}
+}
+
 func TestFileStoreSaveSerializesConcurrentWriters(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewFileStore(dir)

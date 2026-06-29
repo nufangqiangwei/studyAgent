@@ -148,6 +148,64 @@ func TestNativeContextBuilderFallsBackToSessionRecords(t *testing.T) {
 	}
 }
 
+func TestNativeContextBuilderRestoresFromLatestContextSnapshot(t *testing.T) {
+	builder := NewNativeContextBuilder()
+	llmContext, err := builder.Build(context.Background(), ContextInput{
+		Prompt: prompt.Output{
+			Model: "mock-native",
+			Messages: []llm.Message{
+				{Role: llm.RoleSystem, Content: "new system prompt"},
+				{Role: llm.RoleUser, Content: "current task"},
+			},
+		},
+		SessionRecords: []session.Record{
+			{
+				Kind:    session.RecordKindMessage,
+				Message: &llm.Message{Role: llm.RoleSystem, Content: "old system prompt"},
+			},
+			{
+				Kind:    session.RecordKindMessage,
+				Message: &llm.Message{Role: llm.RoleUser, Content: "old raw user task"},
+			},
+			{
+				Kind: session.RecordKindContextSnapshot,
+				ContextSnapshot: &session.ContextSnapshot{
+					Messages: []llm.Message{
+						{Role: llm.RoleSystem, Content: "snapshot system prompt"},
+						{Role: llm.RoleUser, Content: "Conversation summary:\ncompressed state"},
+					},
+					Summary: "compressed state",
+				},
+			},
+			{
+				Kind:    session.RecordKindMessage,
+				Message: &llm.Message{Role: llm.RoleAssistant, Content: "post snapshot answer"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build returned error: %v", err)
+	}
+
+	request := llmContext.BuildRequest(RunState{StepIndex: 1})
+	if len(request.Messages) != 4 {
+		t.Fatalf("request messages = %d, want snapshot + post-snapshot + current: %#v", len(request.Messages), request.Messages)
+	}
+	if request.Messages[0].Content != "snapshot system prompt" ||
+		!strings.Contains(request.Messages[1].Content, "compressed state") ||
+		request.Messages[2].Content != "post snapshot answer" {
+		t.Fatalf("request did not restore from snapshot: %#v", request.Messages)
+	}
+	for _, msg := range request.Messages {
+		if strings.Contains(msg.Content, "old raw user task") {
+			t.Fatalf("request leaked pre-snapshot raw history: %#v", request.Messages)
+		}
+	}
+	if request.Messages[3].Role != llm.RoleUser || request.Messages[3].Content != "current task" {
+		t.Fatalf("request missing current task: %#v", request.Messages)
+	}
+}
+
 func TestNativeLoopLoadsSessionHistoryWhenMemoryHistoryIsEmpty(t *testing.T) {
 	store, err := session.NewFileStore(t.TempDir())
 	if err != nil {
