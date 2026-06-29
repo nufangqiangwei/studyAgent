@@ -1,14 +1,13 @@
 package session
 
 import (
+	"agent/internal/foundation/llmClient"
 	"context"
 	"encoding/json"
 	"regexp"
 	"strconv"
 	"sync"
 	"testing"
-
-	"agent/internal/llm"
 )
 
 func TestNewIDReturnsUUID(t *testing.T) {
@@ -29,8 +28,8 @@ func TestFileStoreSaveAppendsJSONLRecords(t *testing.T) {
 		t.Fatalf("NewFileStore returned error: %v", err)
 	}
 
-	firstMessage := llm.Message{Role: llm.RoleUser, Content: "first"}
-	secondUsage := llm.Usage{InputTokens: 3, OutputTokens: 5, TotalTokens: 8}
+	firstMessage := llmClient.Message{Role: llmClient.RoleUser, Content: "first"}
+	secondUsage := llmClient.Usage{InputTokens: 3, OutputTokens: 5, TotalTokens: 8}
 	if err := store.Save(context.Background(), Record{
 		Kind:    RecordKindMessage,
 		TurnID:  "turn-1",
@@ -142,7 +141,7 @@ func TestFileStoreSaveSerializesConcurrentWriters(t *testing.T) {
 				errs <- err
 				return
 			}
-			message := llm.Message{Role: llm.RoleUser, Content: "task-" + strconv.Itoa(i)}
+			message := llmClient.Message{Role: llmClient.RoleUser, Content: "task-" + strconv.Itoa(i)}
 			errs <- otherStore.Save(context.Background(), Record{
 				Kind:    RecordKindMessage,
 				TurnID:  "turn-" + strconv.Itoa(i),
@@ -230,8 +229,8 @@ func TestFileStoreUsesSeparateFilesForSeparateAgents(t *testing.T) {
 		t.Fatalf("agent IDs should differ: %s", first.AgentID())
 	}
 
-	firstMessage := llm.Message{Role: llm.RoleUser, Content: "first"}
-	secondMessage := llm.Message{Role: llm.RoleUser, Content: "second"}
+	firstMessage := llmClient.Message{Role: llmClient.RoleUser, Content: "first"}
+	secondMessage := llmClient.Message{Role: llmClient.RoleUser, Content: "second"}
 	if err := first.Save(context.Background(), Record{Kind: RecordKindMessage, AgentName: "worker-a", Message: &firstMessage}); err != nil {
 		t.Fatalf("first Save returned error: %v", err)
 	}

@@ -1,15 +1,15 @@
 package agent
 
 import (
+	"agent/internal/capability/builtin/askUser"
+	"agent/internal/foundation/llmClient"
 	"context"
 	"encoding/json"
 	"strings"
 	"testing"
 
-	"agent/internal/llm"
 	"agent/internal/prompt"
 	"agent/internal/session"
-	"agent/internal/tools"
 )
 
 func TestNativeContextBuilderBuildsRequestFromHistoryAndToolResults(t *testing.T) {
@@ -18,19 +18,19 @@ func TestNativeContextBuilderBuildsRequestFromHistoryAndToolResults(t *testing.T
 		Prompt: prompt.Output{
 			Model:       "mock-native",
 			Temperature: 0.3,
-			Messages: []llm.Message{
-				{Role: llm.RoleSystem, Content: "system prompt"},
-				{Role: llm.RoleUser, Content: "current task"},
+			Messages: []llmClient.Message{
+				{Role: llmClient.RoleSystem, Content: "system prompt"},
+				{Role: llmClient.RoleUser, Content: "current task"},
 			},
 		},
-		History: []llm.Message{
-			{Role: llm.RoleSystem, Content: "system prompt"},
-			{Role: llm.RoleUser, Content: "first task"},
-			{Role: llm.RoleAssistant, Content: "first answer"},
+		History: []llmClient.Message{
+			{Role: llmClient.RoleSystem, Content: "system prompt"},
+			{Role: llmClient.RoleUser, Content: "first task"},
+			{Role: llmClient.RoleAssistant, Content: "first answer"},
 		},
-		Tools: []llm.ToolDefinition{
+		Tools: []llmClient.ToolDefinition{
 			{
-				Name:        tools.AskUserToolName,
+				Name:        askUser.Name,
 				Description: "ask user",
 				InputSchema: json.RawMessage(`{"type":"object"}`),
 			},
@@ -41,7 +41,7 @@ func TestNativeContextBuilderBuildsRequestFromHistoryAndToolResults(t *testing.T
 	}
 
 	initialMessages := llmContext.InitialMessages()
-	if len(initialMessages) != 1 || initialMessages[0].Role != llm.RoleUser || initialMessages[0].Content != "current task" {
+	if len(initialMessages) != 1 || initialMessages[0].Role != llmClient.RoleUser || initialMessages[0].Content != "current task" {
 		t.Fatalf("initial messages = %#v, want only current user message", initialMessages)
 	}
 
@@ -55,34 +55,34 @@ func TestNativeContextBuilderBuildsRequestFromHistoryAndToolResults(t *testing.T
 	if len(request.Messages) != 4 {
 		t.Fatalf("request messages = %d, want history plus current user: %#v", len(request.Messages), request.Messages)
 	}
-	if request.Messages[3].Role != llm.RoleUser || request.Messages[3].Content != "current task" {
+	if request.Messages[3].Role != llmClient.RoleUser || request.Messages[3].Content != "current task" {
 		t.Fatalf("request missing current user message: %#v", request.Messages)
 	}
-	if len(request.Tools) != 1 || request.Tools[0].Name != tools.AskUserToolName {
-		t.Fatalf("request tools = %#v", request.Tools)
+	if len(request.Tools) != 1 || request.Tools[0].Name != askUser.Name {
+		t.Fatalf("request tool = %#v", request.Tools)
 	}
 
-	call := llm.ToolCall{
+	call := llmClient.ToolCall{
 		ID:    "call_1",
-		Name:  tools.AskUserToolName,
+		Name:  askUser.Name,
 		Input: json.RawMessage(`{"question":"Which target?"}`),
 	}
-	assistantMessage, ok := llmContext.AddAssistantResponse(llm.Response{
+	assistantMessage, ok := llmContext.AddAssistantResponse(llmClient.Response{
 		Content: "need target",
-		Usage:   &llm.Usage{TotalTokens: 3},
-	}, []llm.ToolCall{call})
+		Usage:   &llmClient.Usage{TotalTokens: 3},
+	}, []llmClient.ToolCall{call})
 	if !ok {
 		t.Fatal("AddAssistantResponse returned ok=false")
 	}
-	if assistantMessage.Role != llm.RoleAssistant || len(assistantMessage.ToolCalls) != 1 {
+	if assistantMessage.Role != llmClient.RoleAssistant || len(assistantMessage.ToolCalls) != 1 {
 		t.Fatalf("assistant message = %#v", assistantMessage)
 	}
 
 	toolMessage := llmContext.AddToolResult(call, ToolResult{
-		Name:    tools.AskUserToolName,
+		Name:    askUser.Name,
 		Content: "web app",
 	})
-	if toolMessage.Role != llm.RoleTool || toolMessage.ToolCallID != "call_1" || toolMessage.Content != "web app" {
+	if toolMessage.Role != llmClient.RoleTool || toolMessage.ToolCallID != "call_1" || toolMessage.Content != "web app" {
 		t.Fatalf("tool message = %#v", toolMessage)
 	}
 
@@ -90,7 +90,7 @@ func TestNativeContextBuilderBuildsRequestFromHistoryAndToolResults(t *testing.T
 	if len(nextRequest.Messages) != 6 {
 		t.Fatalf("next request messages = %d, want 6: %#v", len(nextRequest.Messages), nextRequest.Messages)
 	}
-	if got := nextRequest.Messages[5]; got.Role != llm.RoleTool || got.Content != "web app" {
+	if got := nextRequest.Messages[5]; got.Role != llmClient.RoleTool || got.Content != "web app" {
 		t.Fatalf("next request last message = %#v", got)
 	}
 }
@@ -100,23 +100,23 @@ func TestNativeContextBuilderFallsBackToSessionRecords(t *testing.T) {
 	llmContext, err := builder.Build(context.Background(), ContextInput{
 		Prompt: prompt.Output{
 			Model: "mock-native",
-			Messages: []llm.Message{
-				{Role: llm.RoleSystem, Content: "new system prompt"},
-				{Role: llm.RoleUser, Content: "second task"},
+			Messages: []llmClient.Message{
+				{Role: llmClient.RoleSystem, Content: "new system prompt"},
+				{Role: llmClient.RoleUser, Content: "second task"},
 			},
 		},
 		SessionRecords: []session.Record{
 			{
 				Kind:    session.RecordKindMessage,
-				Message: &llm.Message{Role: llm.RoleSystem, Content: "old system prompt"},
+				Message: &llmClient.Message{Role: llmClient.RoleSystem, Content: "old system prompt"},
 			},
 			{
 				Kind:    session.RecordKindMessage,
-				Message: &llm.Message{Role: llm.RoleUser, Content: "first task"},
+				Message: &llmClient.Message{Role: llmClient.RoleUser, Content: "first task"},
 			},
 			{
 				Kind:    session.RecordKindMessage,
-				Message: &llm.Message{Role: llm.RoleAssistant, Content: "first answer"},
+				Message: &llmClient.Message{Role: llmClient.RoleAssistant, Content: "first answer"},
 			},
 			{
 				Kind: session.RecordKindEvent,
@@ -124,7 +124,7 @@ func TestNativeContextBuilderFallsBackToSessionRecords(t *testing.T) {
 					Type: session.EventTypeToolCall,
 				},
 			},
-			{Kind: session.RecordKindUsageSummary, UsageSummary: &llm.Usage{TotalTokens: 12}},
+			{Kind: session.RecordKindUsageSummary, UsageSummary: &llmClient.Usage{TotalTokens: 12}},
 		},
 	})
 	if err != nil {
@@ -143,7 +143,7 @@ func TestNativeContextBuilderFallsBackToSessionRecords(t *testing.T) {
 	if request.Messages[0].Content != "old system prompt" {
 		t.Fatalf("request did not use session history: %#v", request.Messages)
 	}
-	if request.Messages[3].Role != llm.RoleUser || request.Messages[3].Content != "second task" {
+	if request.Messages[3].Role != llmClient.RoleUser || request.Messages[3].Content != "second task" {
 		t.Fatalf("request missing current task: %#v", request.Messages)
 	}
 }
@@ -215,17 +215,17 @@ func TestNativeLoopLoadsSessionHistoryWhenMemoryHistoryIsEmpty(t *testing.T) {
 		{
 			Kind:    session.RecordKindMessage,
 			TurnID:  "turn-1",
-			Message: &llm.Message{Role: llm.RoleSystem, Content: "system prompt"},
+			Message: &llmClient.Message{Role: llmClient.RoleSystem, Content: "system prompt"},
 		},
 		{
 			Kind:    session.RecordKindMessage,
 			TurnID:  "turn-1",
-			Message: &llm.Message{Role: llm.RoleUser, Content: "Task:\nfirst task"},
+			Message: &llmClient.Message{Role: llmClient.RoleUser, Content: "Task:\nfirst task"},
 		},
 		{
 			Kind:    session.RecordKindMessage,
 			TurnID:  "turn-1",
-			Message: &llm.Message{Role: llm.RoleAssistant, Content: "first answer"},
+			Message: &llmClient.Message{Role: llmClient.RoleAssistant, Content: "first answer"},
 		},
 	} {
 		if err := store.Save(context.Background(), record); err != nil {
@@ -234,7 +234,7 @@ func TestNativeLoopLoadsSessionHistoryWhenMemoryHistoryIsEmpty(t *testing.T) {
 	}
 
 	model := &scriptedLLM{
-		responses: []llm.Response{{Provider: "mock", Model: "mock-native", Content: "second answer"}},
+		responses: []llmClient.Response{{Provider: "mock", Model: "mock-native", Content: "second answer"}},
 	}
 	loop, err := NewNativeLoop(Options{
 		LLM:           model,
@@ -256,10 +256,10 @@ func TestNativeLoopLoadsSessionHistoryWhenMemoryHistoryIsEmpty(t *testing.T) {
 	if len(messages) != 4 {
 		t.Fatalf("request messages = %d, want previous session plus current user: %#v", len(messages), messages)
 	}
-	if messages[2].Role != llm.RoleAssistant || messages[2].Content != "first answer" {
+	if messages[2].Role != llmClient.RoleAssistant || messages[2].Content != "first answer" {
 		t.Fatalf("request missing previous assistant response: %#v", messages)
 	}
-	if messages[3].Role != llm.RoleUser || !strings.Contains(messages[3].Content, "second task") {
+	if messages[3].Role != llmClient.RoleUser || !strings.Contains(messages[3].Content, "second task") {
 		t.Fatalf("request missing current user message: %#v", messages)
 	}
 }

@@ -1,25 +1,25 @@
 package agent
 
 import (
+	"agent/internal/capability/tool"
 	"context"
 	"fmt"
 
 	"agent/internal/prompt"
-	"agent/internal/tools"
 )
 
 const DefaultAgentName = "default"
 
 type DefaultAgent struct {
 	loop     *NativeLoop
-	tools    []tools.Tool
+	tools    []tool.Tool
 	workPath string
 }
 
 func NewDefaultAgent(ctx context.Context, opts CreatAgentOptions) (Agent, error) {
-	toolRegistry, err := tools.NewDefaultRegistry(tools.WithPolicy(opts.Policy))
+	toolRegistry, err := tool.NewDefaultRegistry(tool.WithPolicy(opts.Policy))
 	if err != nil {
-		return nil, fmt.Errorf("default agent: register default tools: %w", err)
+		return nil, fmt.Errorf("default agent: register default tool: %w", err)
 	}
 	registeredTools := toolRegistry.List()
 
@@ -49,11 +49,11 @@ func (a *DefaultAgent) Name() string {
 	return DefaultAgentName
 }
 
-func (a *DefaultAgent) Tools() []tools.Tool {
+func (a *DefaultAgent) Tools() []tool.Tool {
 	if a == nil {
 		return nil
 	}
-	return append([]tools.Tool(nil), a.tools...)
+	return append([]tool.Tool(nil), a.tools...)
 }
 
 func (a *DefaultAgent) Run(ctx context.Context, userInput string) error {

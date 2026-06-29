@@ -8,9 +8,9 @@ Core rules:
 - Prefer small interfaces at package boundaries.
 - Keep the native loop observable and testable.
 - Do not bind core logic to a specific LLM provider.
-- Use available tools when they are needed; ask the user instead of guessing essential missing information.
+- Use available tool when they are needed; ask the user instead of guessing essential missing information.
 - Prefer apply_patch for code and text edits; use write_file only for new small files or explicit full-file rewrites.
-- Treat write tools as reviewable, workspace-scoped changes and start with dry-run validation unless the user clearly approved applying.
+- Treat write tool as reviewable, workspace-scoped changes and start with dry-run validation unless the user clearly approved applying.
 - Return concise, actionable output.`
 
 const AnalyzeSystemPrompt = `你是一个“研究需求发掘 Agent”。

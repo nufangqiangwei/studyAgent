@@ -1,28 +1,28 @@
 package agent
 
 import (
+	"agent/internal/capability/builtin/askUser"
+	tools2 "agent/internal/capability/tool"
 	"agent/internal/content"
+	"agent/internal/foundation/llmClient"
 	"context"
 	"encoding/json"
-	"errors"
 	"strings"
 	"testing"
 
-	"agent/internal/llm"
 	"agent/internal/prompt"
 	"agent/internal/session"
-	"agent/internal/tools"
 )
 
 func TestNativeLoopExecutesToolCallAndContinues(t *testing.T) {
 	model := &scriptedLLM{
-		responses: []llm.Response{
+		responses: []llmClient.Response{
 			{
 				Provider: "mock",
 				Model:    "mock-native",
 				Content:  "need target",
-				ToolCalls: []llm.ToolCall{
-					{Name: tools.AskUserToolName, Input: json.RawMessage(`{"question":"Which target?"}`)},
+				ToolCalls: []llmClient.ToolCall{
+					{Name: askUser.Name, Input: json.RawMessage(`{"question":"Which target?"}`)},
 				},
 			},
 			{
@@ -38,8 +38,8 @@ func TestNativeLoopExecutesToolCallAndContinues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFileStore returned error: %v", err)
 	}
-	toolRegistry := tools.NewRegistry()
-	if err := toolRegistry.Register(tools.NewAskUserTool()); err != nil {
+	toolRegistry := tools2.NewRegistry()
+	if err := toolRegistry.Register(askUser.NewAskUserTool()); err != nil {
 		t.Fatalf("register ask_user: %v", err)
 	}
 	ctx := content.WithEnv(context.Background(), &content.Env{
@@ -74,8 +74,8 @@ func TestNativeLoopExecutesToolCallAndContinues(t *testing.T) {
 	if len(model.requests) != 2 {
 		t.Fatalf("requests = %d, want 2", len(model.requests))
 	}
-	if len(model.requests[0].Tools) != 1 || model.requests[0].Tools[0].Name != tools.AskUserToolName {
-		t.Fatalf("first request tools = %#v, want ask_user", model.requests[0].Tools)
+	if len(model.requests[0].Tools) != 1 || model.requests[0].Tools[0].Name != askUser.Name {
+		t.Fatalf("first request tool = %#v, want ask_user", model.requests[0].Tools)
 	}
 	secondMessages := model.requests[1].Messages
 	if len(secondMessages) < 2 {
@@ -86,7 +86,7 @@ func TestNativeLoopExecutesToolCallAndContinues(t *testing.T) {
 	if len(assistantMsg.ToolCalls) != 1 {
 		t.Fatalf("second request missing assistant tool call: %#v", secondMessages)
 	}
-	if toolMsg.Role != llm.RoleTool || toolMsg.Name != tools.AskUserToolName || toolMsg.Content != "web app" {
+	if toolMsg.Role != llmClient.RoleTool || toolMsg.Name != askUser.Name || toolMsg.Content != "web app" {
 		t.Fatalf("second request tool result = %#v", toolMsg)
 	}
 	if toolMsg.ToolCallID == "" || toolMsg.ToolCallID != assistantMsg.ToolCalls[0].ID {
@@ -138,18 +138,18 @@ func TestNativeLoopExecutesToolCallAndContinues(t *testing.T) {
 	if err := json.Unmarshal(policyEvent.Payload, &policyPayload); err != nil {
 		t.Fatalf("parse policy payload: %v", err)
 	}
-	if policyPayload.Request.ToolName != tools.AskUserToolName || policyPayload.Result.Decision != "allow" {
+	if policyPayload.Request.ToolName != askUser.Name || policyPayload.Result.Decision != "allow" {
 		t.Fatalf("policy payload = %#v", policyPayload)
 	}
 }
 
 func TestNativeLoopRequiresToolRegistryForToolCalls(t *testing.T) {
 	model := &scriptedLLM{
-		responses: []llm.Response{
+		responses: []llmClient.Response{
 			{
 				Provider:  "mock",
 				Model:     "mock-native",
-				ToolCalls: []llm.ToolCall{{Name: tools.AskUserToolName, Input: json.RawMessage(`{"question":"Which target?"}`)}},
+				ToolCalls: []llmClient.ToolCall{{Name: askUser.Name, Input: json.RawMessage(`{"question":"Which target?"}`)}},
 			},
 		},
 	}
@@ -174,7 +174,7 @@ func TestNativeLoopRequiresToolRegistryForToolCalls(t *testing.T) {
 
 func TestNativeLoopCarriesConversationAcrossRuns(t *testing.T) {
 	model := &scriptedLLM{
-		responses: []llm.Response{
+		responses: []llmClient.Response{
 			{
 				Provider: "mock",
 				Model:    "mock-native",
@@ -219,28 +219,28 @@ func TestNativeLoopCarriesConversationAcrossRuns(t *testing.T) {
 	if len(messages) != 4 {
 		t.Fatalf("second request messages = %d, want 4: %#v", len(messages), messages)
 	}
-	if messages[0].Role != llm.RoleSystem {
+	if messages[0].Role != llmClient.RoleSystem {
 		t.Fatalf("first second-request message role = %q, want system", messages[0].Role)
 	}
-	if messages[1].Role != llm.RoleUser || !strings.Contains(messages[1].Content, "first question") {
+	if messages[1].Role != llmClient.RoleUser || !strings.Contains(messages[1].Content, "first question") {
 		t.Fatalf("second request missing first user message: %#v", messages)
 	}
-	if messages[2].Role != llm.RoleAssistant || messages[2].Content != "first answer" {
+	if messages[2].Role != llmClient.RoleAssistant || messages[2].Content != "first answer" {
 		t.Fatalf("second request missing first assistant response: %#v", messages)
 	}
-	if messages[3].Role != llm.RoleUser || !strings.Contains(messages[3].Content, "second question") {
+	if messages[3].Role != llmClient.RoleUser || !strings.Contains(messages[3].Content, "second question") {
 		t.Fatalf("second request missing current user message: %#v", messages)
 	}
 }
 
 func TestNativeLoopSavesSessionTurns(t *testing.T) {
 	model := &scriptedLLM{
-		responses: []llm.Response{
+		responses: []llmClient.Response{
 			{
 				Provider: "mock",
 				Model:    "mock-native",
 				Content:  "saved answer",
-				Usage: &llm.Usage{
+				Usage: &llmClient.Usage{
 					InputTokens:  11,
 					OutputTokens: 7,
 					TotalTokens:  18,
@@ -287,13 +287,13 @@ func TestNativeLoopSavesSessionTurns(t *testing.T) {
 	if len(messages) != 3 {
 		t.Fatalf("messages = %d, want system/user/assistant: %#v", len(messages), messages)
 	}
-	if messages[0].Role != llm.RoleSystem {
+	if messages[0].Role != llmClient.RoleSystem {
 		t.Fatalf("first message = %#v, want system message", messages[0])
 	}
-	if messages[1].Role != llm.RoleUser {
+	if messages[1].Role != llmClient.RoleUser {
 		t.Fatalf("second message = %#v, want user message", messages[1])
 	}
-	if messages[2].Role != llm.RoleAssistant || messages[2].Content != "saved answer" {
+	if messages[2].Role != llmClient.RoleAssistant || messages[2].Content != "saved answer" {
 		t.Fatalf("third message = %#v, want assistant message", messages[2])
 	}
 	if messages[2].Usage == nil || messages[2].Usage.TotalTokens != 18 {
@@ -316,56 +316,96 @@ func TestNativeLoopSavesSessionTurns(t *testing.T) {
 	}
 }
 
-func TestNativeLoopCompressesContextBetweenToolSteps(t *testing.T) {
-	model := &scriptedLLM{
-		responses: []llm.Response{
-			{
-				Provider: "mock",
-				Model:    "mock-native",
-				Content:  "need target",
-				ToolCalls: []llm.ToolCall{
-					{Name: tools.AskUserToolName, Input: json.RawMessage(`{"question":"Which target?"}`)},
-				},
-				Usage: &llm.Usage{
-					InputTokens:  20_000,
-					OutputTokens: 50,
-					TotalTokens:  20_050,
-				},
-			},
-			{
-				Provider: "mock",
-				Model:    "mock-native",
-				Content:  "compressed handoff",
-				Usage: &llm.Usage{
-					InputTokens:  100,
-					OutputTokens: 10,
-					TotalTokens:  110,
-				},
-			},
-			{
-				Provider: "mock",
-				Model:    "mock-native",
-				Content:  "final answer",
-			},
-		},
+func TestNativeLoopHandleEventSuspendsForToolResultAndResumes(t *testing.T) {
+	toolRegistry := tools2.NewRegistry()
+	if err := toolRegistry.Register(askUser.NewAskUserTool()); err != nil {
+		t.Fatalf("register ask_user: %v", err)
 	}
+	loop, err := NewNativeLoop(Options{
+		LLM:           &scriptedLLM{},
+		PromptBuilder: prompt.NewNativeBuilder(prompt.Options{}),
+		Tools:         toolRegistry,
+		MaxSteps:      3,
+	})
+	if err != nil {
+		t.Fatalf("NewNativeLoop returned error: %v", err)
+	}
+
+	started, err := loop.HandleEvent(context.Background(), NewRunStartedEvent(Task{Input: "build a feature"}))
+	if err != nil {
+		t.Fatalf("HandleEvent RunStarted returned error: %v", err)
+	}
+	if started.Status != RunStatusCallingModel || len(started.Actions) != 1 || started.Actions[0].Kind != LoopActionCallModel {
+		t.Fatalf("started advance = %#v, want one model action", started)
+	}
+
+	toolInput := json.RawMessage(`{"question":"Which target?"}`)
+	waiting, err := loop.HandleEvent(context.Background(), ModelResponseReceivedEvent{
+		RunIDValue: started.RunID,
+		Response: llmClient.Response{
+			Provider: "mock",
+			Model:    "mock-native",
+			Content:  "need target",
+			ToolCalls: []llmClient.ToolCall{{
+				ID:    "call_external_1",
+				Name:  askUser.Name,
+				Input: toolInput,
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("HandleEvent ModelResponseReceived returned error: %v", err)
+	}
+	if waiting.Status != RunStatusWaitingForToolResult || !waiting.Suspended {
+		t.Fatalf("waiting advance status = %s suspended=%v, want WaitingForToolResult suspended", waiting.Status, waiting.Suspended)
+	}
+	if len(waiting.Actions) != 1 || waiting.Actions[0].Kind != LoopActionDispatchTool {
+		t.Fatalf("waiting actions = %#v, want one dispatch tool action", waiting.Actions)
+	}
+	if len(waiting.State.PendingTools) != 1 || waiting.State.PendingTools[0].ToolCallID != "call_external_1" {
+		t.Fatalf("pending tool = %#v, want call_external_1", waiting.State.PendingTools)
+	}
+
+	continued, err := loop.HandleEvent(context.Background(), ToolCallCompletedEvent{
+		RunIDValue: started.RunID,
+		ToolCallID: "call_external_1",
+		ToolName:   askUser.Name,
+		Result: ToolResult{
+			Name:    askUser.Name,
+			Content: "web app",
+		},
+	})
+	if err != nil {
+		t.Fatalf("HandleEvent ToolCallCompleted returned error: %v", err)
+	}
+	if continued.Status != RunStatusCallingModel || len(continued.Actions) != 1 || continued.Actions[0].Kind != LoopActionCallModel {
+		t.Fatalf("continued advance = %#v, want next model action", continued)
+	}
+	messages := continued.Actions[0].ModelRequest.Messages
+	if len(messages) < 2 {
+		t.Fatalf("continued request messages = %#v", messages)
+	}
+	assistantMsg := messages[len(messages)-2]
+	toolMsg := messages[len(messages)-1]
+	if len(assistantMsg.ToolCalls) != 1 || assistantMsg.ToolCalls[0].ID != "call_external_1" {
+		t.Fatalf("assistant tool call message = %#v", assistantMsg)
+	}
+	if toolMsg.Role != llmClient.RoleTool || toolMsg.ToolCallID != "call_external_1" || toolMsg.Content != "web app" {
+		t.Fatalf("tool result message = %#v, want external result", toolMsg)
+	}
+}
+
+func TestNativeLoopResumesWaitingToolStateFromSession(t *testing.T) {
 	store, err := session.NewFileStore(t.TempDir())
 	if err != nil {
 		t.Fatalf("NewFileStore returned error: %v", err)
 	}
-	toolRegistry := tools.NewRegistry()
-	if err := toolRegistry.Register(tools.NewAskUserTool()); err != nil {
+	toolRegistry := tools2.NewRegistry()
+	if err := toolRegistry.Register(askUser.NewAskUserTool()); err != nil {
 		t.Fatalf("register ask_user: %v", err)
 	}
-	ctx := content.WithEnv(context.Background(), &content.Env{
-		IO: content.IO{
-			In:  strings.NewReader("web app\n"),
-			Out: &strings.Builder{},
-		},
-	})
-
 	loop, err := NewNativeLoop(Options{
-		LLM:           model,
+		LLM:           &scriptedLLM{},
 		PromptBuilder: prompt.NewNativeBuilder(prompt.Options{}),
 		Tools:         toolRegistry,
 		MaxSteps:      3,
@@ -375,206 +415,71 @@ func TestNativeLoopCompressesContextBetweenToolSteps(t *testing.T) {
 		t.Fatalf("NewNativeLoop returned error: %v", err)
 	}
 
-	result, err := loop.Run(ctx, Task{
+	started, err := loop.HandleEvent(context.Background(), NewRunStartedEvent(Task{
 		Input:     "build a feature",
-		WorkDir:   "C:\\Code\\GO\\agent",
 		AgentName: DefaultAgentName,
+	}))
+	if err != nil {
+		t.Fatalf("HandleEvent RunStarted returned error: %v", err)
+	}
+	waiting, err := loop.HandleEvent(context.Background(), ModelResponseReceivedEvent{
+		RunIDValue: started.RunID,
+		Response: llmClient.Response{
+			Provider: "mock",
+			Model:    "mock-native",
+			ToolCalls: []llmClient.ToolCall{{
+				ID:    "call_persisted_1",
+				Name:  askUser.Name,
+				Input: json.RawMessage(`{"question":"Which target?"}`),
+			}},
+		},
 	})
 	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
+		t.Fatalf("HandleEvent ModelResponseReceived returned error: %v", err)
 	}
-	if result.Content != "final answer" {
-		t.Fatalf("Content = %q, want final answer", result.Content)
+	if waiting.Status != RunStatusWaitingForToolResult {
+		t.Fatalf("waiting status = %s, want WaitingForToolResult", waiting.Status)
 	}
-	if len(model.requests) != 3 {
-		t.Fatalf("requests = %d, want business/compression/business", len(model.requests))
+
+	resumedLoop, err := NewNativeLoop(Options{
+		LLM:           &scriptedLLM{},
+		PromptBuilder: prompt.NewNativeBuilder(prompt.Options{}),
+		Tools:         toolRegistry,
+		MaxSteps:      3,
+		Session:       store,
+	})
+	if err != nil {
+		t.Fatalf("NewNativeLoop resumed returned error: %v", err)
 	}
-	if model.requests[1].Metadata["purpose"] != "context_compression" {
-		t.Fatalf("second request metadata = %#v, want compression request", model.requests[1].Metadata)
+	resumed, err := resumedLoop.HandleEvent(context.Background(), RunResumedEvent{RunIDValue: started.RunID})
+	if err != nil {
+		t.Fatalf("HandleEvent RunResumed returned error: %v", err)
 	}
-	secondBusinessMessages := model.requests[2].Messages
-	if len(secondBusinessMessages) != 2 {
-		t.Fatalf("second business messages = %d, want compressed system+summary: %#v", len(secondBusinessMessages), secondBusinessMessages)
+	if resumed.Status != RunStatusWaitingForToolResult || !resumed.Suspended {
+		t.Fatalf("resumed status = %s suspended=%v, want waiting suspended", resumed.Status, resumed.Suspended)
 	}
-	if secondBusinessMessages[0].Role != llm.RoleSystem {
-		t.Fatalf("first compressed message = %#v, want system", secondBusinessMessages[0])
+	if len(resumed.Actions) != 1 || resumed.Actions[0].Kind != LoopActionDispatchTool {
+		t.Fatalf("resumed actions = %#v, want dispatch tool action", resumed.Actions)
 	}
-	if secondBusinessMessages[1].Role != llm.RoleUser || !strings.Contains(secondBusinessMessages[1].Content, "compressed handoff") {
-		t.Fatalf("second compressed message = %#v, want summary user message", secondBusinessMessages[1])
+	if resumed.Actions[0].ToolCall == nil || resumed.Actions[0].ToolCall.ToolCallID != "call_persisted_1" {
+		t.Fatalf("resumed tool action = %#v, want persisted call", resumed.Actions[0])
 	}
-	for _, msg := range secondBusinessMessages {
-		if msg.Role == llm.RoleTool || strings.Contains(msg.Content, "Which target?") {
-			t.Fatalf("compressed request leaked raw tool context: %#v", secondBusinessMessages)
+
+	records, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	foundRunState := false
+	for _, record := range records {
+		if record.Kind == session.RecordKindRunState && len(record.RunState) > 0 {
+			foundRunState = true
+			break
 		}
 	}
-
-	records, err := store.Load(context.Background())
-	if err != nil {
-		t.Fatalf("Load returned error: %v", err)
-	}
-	snapshot := firstContextSnapshot(records)
-	if snapshot == nil || snapshot.ContextSnapshot == nil {
-		t.Fatalf("missing context snapshot: %#v", records)
-	}
-	if snapshot.ContextSnapshot.TriggerTokens != 20_000 || snapshot.ContextSnapshot.ContextWindowTokens != defaultContextWindowTokens {
-		t.Fatalf("snapshot token metadata = %#v", snapshot.ContextSnapshot)
-	}
-	if events := countEventTypes(records); events[session.EventTypeContextCompression] != 1 {
-		t.Fatalf("context compression events = %#v, want one", events)
-	}
-	usageSummary := usageSummaryRecord(records)
-	if usageSummary == nil || usageSummary.UsageSummary == nil || usageSummary.UsageSummary.TotalTokens != 20_160 || usageSummary.LLMCalls != 3 {
-		t.Fatalf("usage summary = %#v, want business plus compression usage", usageSummary)
+	if !foundRunState {
+		t.Fatalf("session records did not include persisted run_state: %#v", records)
 	}
 }
-
-func TestNativeLoopCompressesAtRunEndAndRestoresSnapshot(t *testing.T) {
-	store, err := session.NewFileStore(t.TempDir())
-	if err != nil {
-		t.Fatalf("NewFileStore returned error: %v", err)
-	}
-	firstModel := &scriptedLLM{
-		responses: []llm.Response{
-			{
-				Provider: "mock",
-				Model:    "mock-native",
-				Content:  "first final answer",
-				Usage: &llm.Usage{
-					InputTokens:  20_000,
-					OutputTokens: 20,
-					TotalTokens:  20_020,
-				},
-			},
-			{
-				Provider: "mock",
-				Model:    "mock-native",
-				Content:  "final summary",
-				Usage: &llm.Usage{
-					InputTokens:  90,
-					OutputTokens: 10,
-					TotalTokens:  100,
-				},
-			},
-		},
-	}
-	firstLoop, err := NewNativeLoop(Options{
-		LLM:           firstModel,
-		PromptBuilder: prompt.NewNativeBuilder(prompt.Options{}),
-		Session:       store,
-	})
-	if err != nil {
-		t.Fatalf("NewNativeLoop returned error: %v", err)
-	}
-	if _, err := firstLoop.Run(context.Background(), Task{Input: "first task", AgentName: DefaultAgentName}); err != nil {
-		t.Fatalf("first Run returned error: %v", err)
-	}
-
-	records, err := store.Load(context.Background())
-	if err != nil {
-		t.Fatalf("Load returned error: %v", err)
-	}
-	if snapshot := firstContextSnapshot(records); snapshot == nil || snapshot.ContextSnapshot == nil {
-		t.Fatalf("missing context snapshot after first run: %#v", records)
-	}
-
-	secondModel := &scriptedLLM{
-		responses: []llm.Response{{Provider: "mock", Model: "mock-native", Content: "second answer"}},
-	}
-	secondLoop, err := NewNativeLoop(Options{
-		LLM:           secondModel,
-		PromptBuilder: prompt.NewNativeBuilder(prompt.Options{}),
-		Session:       store,
-	})
-	if err != nil {
-		t.Fatalf("NewNativeLoop returned error: %v", err)
-	}
-	if _, err := secondLoop.Run(context.Background(), Task{Input: "second task", AgentName: DefaultAgentName}); err != nil {
-		t.Fatalf("second Run returned error: %v", err)
-	}
-	if len(secondModel.requests) != 1 {
-		t.Fatalf("second model requests = %d, want 1", len(secondModel.requests))
-	}
-	messages := secondModel.requests[0].Messages
-	if len(messages) != 3 {
-		t.Fatalf("restored messages = %d, want snapshot plus current user: %#v", len(messages), messages)
-	}
-	if !strings.Contains(messages[1].Content, "final summary") {
-		t.Fatalf("restored messages missing summary: %#v", messages)
-	}
-	if strings.Contains(messages[1].Content, "first task") {
-		t.Fatalf("restored summary should not include raw old prompt unless summary chose it: %#v", messages[1])
-	}
-	if messages[2].Role != llm.RoleUser || !strings.Contains(messages[2].Content, "second task") {
-		t.Fatalf("restored messages missing current task: %#v", messages)
-	}
-}
-
-func TestNativeLoopContinuesWhenCompressionFails(t *testing.T) {
-	model := &scriptedLLM{
-		responses: []llm.Response{
-			{
-				Provider: "mock",
-				Model:    "mock-native",
-				Content:  "answer survives compression failure",
-				Usage: &llm.Usage{
-					InputTokens:  20_000,
-					OutputTokens: 20,
-					TotalTokens:  20_020,
-				},
-			},
-		},
-	}
-	store, err := session.NewFileStore(t.TempDir())
-	if err != nil {
-		t.Fatalf("NewFileStore returned error: %v", err)
-	}
-	loop, err := NewNativeLoop(Options{
-		LLM:           model,
-		PromptBuilder: prompt.NewNativeBuilder(prompt.Options{}),
-		Compressor:    failingCompressor{err: errors.New("summary unavailable")},
-		Session:       store,
-	})
-	if err != nil {
-		t.Fatalf("NewNativeLoop returned error: %v", err)
-	}
-
-	result, err := loop.Run(context.Background(), Task{Input: "keep going", AgentName: DefaultAgentName})
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	if result.Content != "answer survives compression failure" {
-		t.Fatalf("Content = %q, want original answer", result.Content)
-	}
-	if len(loop.history) != 3 {
-		t.Fatalf("history = %d messages, want uncompressed system/user/assistant: %#v", len(loop.history), loop.history)
-	}
-	if strings.Contains(loop.history[1].Content, "Conversation summary") {
-		t.Fatalf("history was compressed despite compressor failure: %#v", loop.history)
-	}
-
-	records, err := store.Load(context.Background())
-	if err != nil {
-		t.Fatalf("Load returned error: %v", err)
-	}
-	if snapshot := firstContextSnapshot(records); snapshot != nil {
-		t.Fatalf("unexpected snapshot after compression failure: %#v", snapshot)
-	}
-	event := firstEvent(records, session.EventTypeContextCompression)
-	if event == nil {
-		t.Fatalf("missing compression failure event: %#v", records)
-	}
-	var payload struct {
-		Status string `json:"status"`
-		Reason string `json:"reason"`
-	}
-	if err := json.Unmarshal(event.Payload, &payload); err != nil {
-		t.Fatalf("parse compression payload: %v", err)
-	}
-	if payload.Status != "failed" || payload.Reason != "compressor_error" {
-		t.Fatalf("compression payload = %#v, want failed compressor_error", payload)
-	}
-}
-
 func countEventTypes(records []session.Record) map[string]int {
 	counts := make(map[string]int)
 	for _, record := range records {
@@ -594,17 +499,8 @@ func firstEvent(records []session.Record, eventType string) *session.Event {
 	return nil
 }
 
-func firstContextSnapshot(records []session.Record) *session.Record {
-	for i := range records {
-		if records[i].Kind == session.RecordKindContextSnapshot {
-			return &records[i]
-		}
-	}
-	return nil
-}
-
-func messagesFromRecords(records []session.Record) []llm.Message {
-	messages := make([]llm.Message, 0, len(records))
+func messagesFromRecords(records []session.Record) []llmClient.Message {
+	messages := make([]llmClient.Message, 0, len(records))
 	for _, record := range records {
 		if record.Kind == session.RecordKindMessage && record.Message != nil {
 			messages = append(messages, *record.Message)
@@ -623,24 +519,16 @@ func usageSummaryRecord(records []session.Record) *session.Record {
 }
 
 type scriptedLLM struct {
-	requests  []llm.Request
-	responses []llm.Response
+	requests  []llmClient.Request
+	responses []llmClient.Response
 }
 
-func (c *scriptedLLM) Complete(_ context.Context, req llm.Request) (llm.Response, error) {
+func (c *scriptedLLM) Complete(_ context.Context, req llmClient.Request) (llmClient.Response, error) {
 	c.requests = append(c.requests, req)
 	if len(c.responses) == 0 {
-		return llm.Response{}, nil
+		return llmClient.Response{}, nil
 	}
 	response := c.responses[0]
 	c.responses = c.responses[1:]
 	return response, nil
-}
-
-type failingCompressor struct {
-	err error
-}
-
-func (c failingCompressor) Compress(context.Context, CompressionInput) (CompressionResult, error) {
-	return CompressionResult{}, c.err
 }

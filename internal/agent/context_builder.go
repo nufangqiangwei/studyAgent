@@ -1,12 +1,13 @@
 package agent
 
 import (
+	"agent/internal/foundation/llmClient"
 	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
-	"agent/internal/llm"
 	"agent/internal/prompt"
 	"agent/internal/session"
 )
@@ -18,23 +19,40 @@ type ContextBuilder interface {
 type ContextInput struct {
 	Prompt         prompt.Output
 	SessionRecords []session.Record
-	History        []llm.Message
-	Tools          []llm.ToolDefinition
+	History        []llmClient.Message
+	Tools          []llmClient.ToolDefinition
 }
 
 type RunState struct {
-	Task      Task
-	TurnID    string
-	StepIndex int
+	RunID           string                     `json:"run_id"`
+	TaskID          string                     `json:"task_id,omitempty"`
+	TurnID          string                     `json:"turn_id"`
+	Task            Task                       `json:"task"`
+	Status          RunStatus                  `json:"status"`
+	CurrentStep     int                        `json:"current_step"`
+	StepIndex       int                        `json:"-"`
+	Messages        []llmClient.Message        `json:"messages,omitempty"`
+	ToolDefinitions []llmClient.ToolDefinition `json:"tool_definitions,omitempty"`
+	PendingTools    []PendingToolCall          `json:"pending_tools,omitempty"`
+	Steps           []Step                     `json:"steps,omitempty"`
+	FinalAnswer     string                     `json:"final_answer,omitempty"`
+	Summary         string                     `json:"summary,omitempty"`
+	Model           string                     `json:"model,omitempty"`
+	Temperature     float64                    `json:"temperature,omitempty"`
+	PromptDebugText string                     `json:"prompt_debug_text,omitempty"`
+	Usage           llmClient.Usage            `json:"usage,omitempty"`
+	LLMCalls        int                        `json:"llm_calls,omitempty"`
+	LastEventID     string                     `json:"last_event_id,omitempty"`
+	CreatedAt       time.Time                  `json:"created_at"`
+	UpdatedAt       time.Time                  `json:"updated_at"`
 }
 
 type LLMContext interface {
-	InitialMessages() []llm.Message
-	BuildRequest(state RunState) llm.Request
-	AddAssistantResponse(response llm.Response, toolCalls []llm.ToolCall) (llm.Message, bool)
-	AddToolResult(call llm.ToolCall, result ToolResult) llm.Message
-	History() []llm.Message
-	ReplaceHistory(messages []llm.Message)
+	InitialMessages() []llmClient.Message
+	BuildRequest(state RunState) llmClient.Request
+	AddAssistantResponse(response llmClient.Response, toolCalls []llmClient.ToolCall) (llmClient.Message, bool)
+	AddToolResult(call llmClient.ToolCall, result ToolResult) llmClient.Message
+	History() []llmClient.Message
 }
 
 type NativeContextBuilder struct{}
@@ -60,58 +78,57 @@ func (b *NativeContextBuilder) Build(_ context.Context, input ContextInput) (LLM
 
 type nativeLLMContext struct {
 	prompt          prompt.Output
-	tools           []llm.ToolDefinition
-	messages        []llm.Message
-	initialMessages []llm.Message
+	tools           []llmClient.ToolDefinition
+	messages        []llmClient.Message
+	initialMessages []llmClient.Message
 }
 
-func (c *nativeLLMContext) InitialMessages() []llm.Message {
+func (c *nativeLLMContext) InitialMessages() []llmClient.Message {
 	return cloneMessages(c.initialMessages)
 }
 
-func (c *nativeLLMContext) BuildRequest(state RunState) llm.Request {
-	return llm.Request{
+func (c *nativeLLMContext) BuildRequest(state RunState) llmClient.Request {
+	step := state.StepIndex
+	if step == 0 {
+		step = state.CurrentStep
+	}
+	return llmClient.Request{
 		Model:       c.prompt.Model,
 		Messages:    cloneMessages(c.messages),
 		Tools:       cloneToolDefinitions(c.tools),
 		Temperature: c.prompt.Temperature,
 		Metadata: map[string]string{
 			"loop": "native",
-			"step": fmt.Sprintf("%d", state.StepIndex),
+			"step": fmt.Sprintf("%d", step),
 		},
 	}
 }
 
-func (c *nativeLLMContext) AddAssistantResponse(response llm.Response, toolCalls []llm.ToolCall) (llm.Message, bool) {
+func (c *nativeLLMContext) AddAssistantResponse(response llmClient.Response, toolCalls []llmClient.ToolCall) (llmClient.Message, bool) {
 	msg, ok := assistantMessage(response, toolCalls)
 	if !ok {
-		return llm.Message{}, false
+		return llmClient.Message{}, false
 	}
 	c.messages = append(c.messages, msg)
 	return cloneMessage(msg), true
 }
 
-func (c *nativeLLMContext) AddToolResult(call llm.ToolCall, result ToolResult) llm.Message {
+func (c *nativeLLMContext) AddToolResult(call llmClient.ToolCall, result ToolResult) llmClient.Message {
 	msg := toolResultMessage(call, result)
 	c.messages = append(c.messages, msg)
 	return cloneMessage(msg)
 }
 
-func (c *nativeLLMContext) History() []llm.Message {
+func (c *nativeLLMContext) History() []llmClient.Message {
 	return cloneMessages(c.messages)
 }
 
-func (c *nativeLLMContext) ReplaceHistory(messages []llm.Message) {
-	c.messages = cloneMessages(messages)
-	c.initialMessages = nil
-}
-
-func initialMessages(history []llm.Message, promptMessages []llm.Message) ([]llm.Message, []llm.Message) {
+func initialMessages(history []llmClient.Message, promptMessages []llmClient.Message) ([]llmClient.Message, []llmClient.Message) {
 	messages := cloneMessages(history)
-	generated := []llm.Message{}
+	generated := []llmClient.Message{}
 	if len(messages) == 0 {
 		for _, msg := range promptMessages {
-			if msg.Role == llm.RoleSystem {
+			if msg.Role == llmClient.RoleSystem {
 				cloned := cloneMessage(msg)
 				messages = append(messages, cloned)
 				generated = append(generated, cloned)
@@ -120,7 +137,7 @@ func initialMessages(history []llm.Message, promptMessages []llm.Message) ([]llm
 	}
 
 	for _, msg := range promptMessages {
-		if msg.Role != llm.RoleSystem {
+		if msg.Role != llmClient.RoleSystem {
 			cloned := cloneMessage(msg)
 			messages = append(messages, cloned)
 			generated = append(generated, cloned)
@@ -129,25 +146,12 @@ func initialMessages(history []llm.Message, promptMessages []llm.Message) ([]llm
 	return messages, generated
 }
 
-func messagesFromSession(records []session.Record) []llm.Message {
+func messagesFromSession(records []session.Record) []llmClient.Message {
 	if len(records) == 0 {
 		return nil
 	}
-
-	start := 0
-	var messages []llm.Message
-	for i, record := range records {
-		if record.Kind != session.RecordKindContextSnapshot || record.ContextSnapshot == nil {
-			continue
-		}
-		start = i + 1
-		messages = cloneMessages(record.ContextSnapshot.Messages)
-	}
-
-	if messages == nil {
-		messages = make([]llm.Message, 0, len(records))
-	}
-	for _, record := range records[start:] {
+	messages := make([]llmClient.Message, 0, len(records))
+	for _, record := range records {
 		if record.Kind != "" && record.Kind != session.RecordKindMessage {
 			continue
 		}
@@ -159,56 +163,56 @@ func messagesFromSession(records []session.Record) []llm.Message {
 	return messages
 }
 
-func assistantMessage(response llm.Response, toolCalls []llm.ToolCall) (llm.Message, bool) {
+func assistantMessage(response llmClient.Response, toolCalls []llmClient.ToolCall) (llmClient.Message, bool) {
 	if strings.TrimSpace(response.Content) == "" && len(toolCalls) == 0 {
-		return llm.Message{}, false
+		return llmClient.Message{}, false
 	}
-	return llm.Message{
-		Role:      llm.RoleAssistant,
+	return llmClient.Message{
+		Role:      llmClient.RoleAssistant,
 		Content:   response.Content,
 		ToolCalls: cloneLLMToolCalls(toolCalls),
 		Usage:     cloneUsage(response.Usage),
 	}, true
 }
 
-func toolResultMessage(call llm.ToolCall, result ToolResult) llm.Message {
+func toolResultMessage(call llmClient.ToolCall, result ToolResult) llmClient.Message {
 	content := result.Content
 	if result.Error != "" {
 		content = "error: " + result.Error
 	}
-	return llm.Message{
-		Role:       llm.RoleTool,
+	return llmClient.Message{
+		Role:       llmClient.RoleTool,
 		Name:       call.Name,
 		Content:    content,
 		ToolCallID: call.ID,
 	}
 }
 
-func cloneMessages(messages []llm.Message) []llm.Message {
+func cloneMessages(messages []llmClient.Message) []llmClient.Message {
 	if len(messages) == 0 {
 		return nil
 	}
-	cloned := make([]llm.Message, 0, len(messages))
+	cloned := make([]llmClient.Message, 0, len(messages))
 	for _, message := range messages {
 		cloned = append(cloned, cloneMessage(message))
 	}
 	return cloned
 }
 
-func cloneMessage(message llm.Message) llm.Message {
+func cloneMessage(message llmClient.Message) llmClient.Message {
 	cloned := message
 	cloned.ToolCalls = cloneLLMToolCalls(message.ToolCalls)
 	cloned.Usage = cloneUsage(message.Usage)
 	return cloned
 }
 
-func cloneLLMToolCalls(calls []llm.ToolCall) []llm.ToolCall {
+func cloneLLMToolCalls(calls []llmClient.ToolCall) []llmClient.ToolCall {
 	if len(calls) == 0 {
 		return nil
 	}
-	cloned := make([]llm.ToolCall, 0, len(calls))
+	cloned := make([]llmClient.ToolCall, 0, len(calls))
 	for _, call := range calls {
-		cloned = append(cloned, llm.ToolCall{
+		cloned = append(cloned, llmClient.ToolCall{
 			ID:    call.ID,
 			Name:  call.Name,
 			Input: append(json.RawMessage(nil), call.Input...),
@@ -217,7 +221,7 @@ func cloneLLMToolCalls(calls []llm.ToolCall) []llm.ToolCall {
 	return cloned
 }
 
-func cloneUsage(usage *llm.Usage) *llm.Usage {
+func cloneUsage(usage *llmClient.Usage) *llmClient.Usage {
 	if usage == nil {
 		return nil
 	}
@@ -225,13 +229,13 @@ func cloneUsage(usage *llm.Usage) *llm.Usage {
 	return &cloned
 }
 
-func cloneToolDefinitions(defs []llm.ToolDefinition) []llm.ToolDefinition {
+func cloneToolDefinitions(defs []llmClient.ToolDefinition) []llmClient.ToolDefinition {
 	if len(defs) == 0 {
 		return nil
 	}
-	cloned := make([]llm.ToolDefinition, 0, len(defs))
+	cloned := make([]llmClient.ToolDefinition, 0, len(defs))
 	for _, def := range defs {
-		cloned = append(cloned, llm.ToolDefinition{
+		cloned = append(cloned, llmClient.ToolDefinition{
 			Name:        def.Name,
 			Description: def.Description,
 			InputSchema: append(json.RawMessage(nil), def.InputSchema...),

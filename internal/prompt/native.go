@@ -1,11 +1,10 @@
 package prompt
 
 import (
+	"agent/internal/foundation/llmClient"
 	"context"
 	"fmt"
 	"strings"
-
-	"agent/internal/llm"
 )
 
 type Options struct {
@@ -21,7 +20,7 @@ type Input struct {
 
 type Output struct {
 	Model       string
-	Messages    []llm.Message
+	Messages    []llmClient.Message
 	Temperature float64
 	DebugText   string
 }
@@ -69,9 +68,9 @@ Workspace:
 
 Respond with the next best action or final answer. Keep module boundaries and testability in mind.`, task, input.WorkDir)
 
-	messages := []llm.Message{
-		{Role: llm.RoleSystem, Content: b.systemPrompt},
-		{Role: llm.RoleUser, Content: userPrompt},
+	messages := []llmClient.Message{
+		{Role: llmClient.RoleSystem, Content: b.systemPrompt},
+		{Role: llmClient.RoleUser, Content: userPrompt},
 	}
 
 	return Output{
