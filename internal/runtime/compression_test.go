@@ -1,4 +1,4 @@
-package agent
+package runtime
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"agent/internal/llm"
+	"agent/internal/foundation/llmClient"
 )
 
 func TestContextWindowTokensUsesModelFamiliesAndFallback(t *testing.T) {
@@ -187,13 +187,13 @@ func TestContextWindowTokensUsesCacheBeforeFallback(t *testing.T) {
 func TestContextCompressionDecisionUsesUsageBeforeEstimate(t *testing.T) {
 	resetContextWindowTokenCacheForTest(t)
 
-	decision := contextCompressionDecision(llm.Request{
+	decision := contextCompressionDecision(llmClient.Request{
 		Model: "mock-native",
-		Messages: []llm.Message{
-			{Role: llm.RoleSystem, Content: "system"},
-			{Role: llm.RoleUser, Content: "small prompt"},
+		Messages: []llmClient.Message{
+			{Role: llmClient.RoleSystem, Content: "system"},
+			{Role: llmClient.RoleUser, Content: "small prompt"},
 		},
-	}, &llm.Usage{InputTokens: 16_000}, EstimatedContextTokenCounter{})
+	}, &llmClient.Usage{InputTokens: 16_000}, EstimatedContextTokenCounter{})
 
 	if !decision.ShouldCompress {
 		t.Fatalf("ShouldCompress = false, want true: %#v", decision)
@@ -206,11 +206,11 @@ func TestContextCompressionDecisionUsesUsageBeforeEstimate(t *testing.T) {
 func TestContextCompressionDecisionFallsBackToEstimate(t *testing.T) {
 	resetContextWindowTokenCacheForTest(t)
 
-	decision := contextCompressionDecision(llm.Request{
+	decision := contextCompressionDecision(llmClient.Request{
 		Model: "mock-native",
-		Messages: []llm.Message{
-			{Role: llm.RoleSystem, Content: "system"},
-			{Role: llm.RoleUser, Content: strings.Repeat("a", 64_000)},
+		Messages: []llmClient.Message{
+			{Role: llmClient.RoleSystem, Content: "system"},
+			{Role: llmClient.RoleUser, Content: strings.Repeat("a", 64_000)},
 		},
 	}, nil, EstimatedContextTokenCounter{})
 

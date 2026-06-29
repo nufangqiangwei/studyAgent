@@ -39,7 +39,7 @@ type Manage struct {
 }
 
 var (
-	currentRegistry *Manage // 运行时候只读对象，只有在init中可被写入
+	currentRegistry *Manage
 	toolsNames      []string
 )
 
@@ -61,6 +61,7 @@ func init() {
 			panic(fmt.Errorf("register default tool %q: %w", tool.Name(), err))
 		}
 	}
+	toolsNames = registeredToolNames(currentRegistry)
 }
 
 func WithPolicy(checker policy.Checker) ManageOption {
@@ -89,7 +90,16 @@ func NewDefaultManage(options ...ManageOption) (*Manage, error) {
 }
 
 func AllToolNames() []string {
-	return toolsNames
+	return append([]string(nil), toolsNames...)
+}
+
+func registeredToolNames(registry *Manage) []string {
+	tools := registry.List()
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		names = append(names, tool.Name())
+	}
+	return names
 }
 
 func AddTool(name string, manager *Manage) error {

@@ -23,10 +23,11 @@ const (
 )
 
 const (
-	RecordKindMessage      = "message"
-	RecordKindEvent        = "event"
-	RecordKindRunState     = "run_state"
-	RecordKindUsageSummary = "usage_summary"
+	RecordKindMessage         = "message"
+	RecordKindEvent           = "event"
+	RecordKindRunState        = "run_state"
+	RecordKindContextSnapshot = "context_snapshot"
+	RecordKindUsageSummary    = "usage_summary"
 )
 
 const (
@@ -52,22 +53,30 @@ type Loader interface {
 	Load(ctx context.Context) ([]Record, error)
 }
 
+type ContextSnapshot struct {
+	Messages             []llmClient.Message `json:"messages,omitempty"`
+	Summary              string              `json:"summary,omitempty"`
+	TriggerTokens        int                 `json:"trigger_tokens,omitempty"`
+	ContextWindowTokens  int                 `json:"context_window_tokens,omitempty"`
+	OriginalMessageCount int                 `json:"original_message_count,omitempty"`
+}
 type Record struct {
-	Kind         string             `json:"kind"`
-	Timestamp    time.Time          `json:"timestamp"`
-	SessionID    string             `json:"session_id"`
-	AgentID      string             `json:"agent_id"`
-	TurnID       string             `json:"turn_id,omitempty"`
-	AgentName    string             `json:"agent_name,omitempty"`
-	Task         string             `json:"task,omitempty"`
-	WorkDir      string             `json:"work_dir,omitempty"`
-	StepIndex    int                `json:"step_index,omitempty"`
-	Message      *llmClient.Message `json:"message,omitempty"`
-	Event        *Event             `json:"event,omitempty"`
-	RunState     json.RawMessage    `json:"run_state,omitempty"`
-	Usage        *llmClient.Usage   `json:"usage,omitempty"`
-	UsageSummary *llmClient.Usage   `json:"usage_summary,omitempty"`
-	LLMCalls     int                `json:"llm_calls,omitempty"`
+	Kind            string             `json:"kind"`
+	Timestamp       time.Time          `json:"timestamp"`
+	SessionID       string             `json:"session_id"`
+	AgentID         string             `json:"agent_id"`
+	TurnID          string             `json:"turn_id,omitempty"`
+	AgentName       string             `json:"agent_name,omitempty"`
+	Task            string             `json:"task,omitempty"`
+	WorkDir         string             `json:"work_dir,omitempty"`
+	StepIndex       int                `json:"step_index,omitempty"`
+	Message         *llmClient.Message `json:"message,omitempty"`
+	Event           *Event             `json:"event,omitempty"`
+	RunState        json.RawMessage    `json:"run_state,omitempty"`
+	ContextSnapshot *ContextSnapshot   `json:"context_snapshot,omitempty"`
+	Usage           *llmClient.Usage   `json:"usage,omitempty"`
+	UsageSummary    *llmClient.Usage   `json:"usage_summary,omitempty"`
+	LLMCalls        int                `json:"llm_calls,omitempty"`
 }
 
 type Event struct {
@@ -316,6 +325,7 @@ func (s *FileStore) Save(ctx context.Context, record Record) error {
 	record.Message = cloneMessagePtr(record.Message)
 	record.Event = cloneEventPtr(record.Event)
 	record.RunState = append(json.RawMessage(nil), record.RunState...)
+	record.ContextSnapshot = cloneContextSnapshot(record.ContextSnapshot)
 	record.Usage = cloneUsage(record.Usage)
 	record.UsageSummary = cloneUsage(record.UsageSummary)
 	if record.Event != nil {
@@ -581,6 +591,17 @@ func upsertAgentFile(entries []AgentFileEntry, next AgentFileEntry) []AgentFileE
 	return append(entries, next)
 }
 
+func cloneMessages(messages []llmClient.Message) []llmClient.Message {
+	if len(messages) == 0 {
+		return nil
+	}
+	cloned := make([]llmClient.Message, 0, len(messages))
+	for _, message := range messages {
+		cloned = append(cloned, cloneMessage(message))
+	}
+	return cloned
+}
+
 func cloneMessagePtr(message *llmClient.Message) *llmClient.Message {
 	if message == nil {
 		return nil
@@ -589,6 +610,22 @@ func cloneMessagePtr(message *llmClient.Message) *llmClient.Message {
 	cloned.ToolCalls = cloneLLMToolCalls(message.ToolCalls)
 	cloned.Usage = cloneUsage(message.Usage)
 	return &cloned
+}
+
+func cloneContextSnapshot(snapshot *ContextSnapshot) *ContextSnapshot {
+	if snapshot == nil {
+		return nil
+	}
+	cloned := *snapshot
+	cloned.Messages = cloneMessages(snapshot.Messages)
+	return &cloned
+}
+
+func cloneMessage(message llmClient.Message) llmClient.Message {
+	cloned := message
+	cloned.ToolCalls = cloneLLMToolCalls(message.ToolCalls)
+	cloned.Usage = cloneUsage(message.Usage)
+	return cloned
 }
 
 func cloneEventPtr(event *Event) *Event {

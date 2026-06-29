@@ -3,12 +3,16 @@ package agent
 import (
 	"agent/internal/capability/tool"
 	"agent/internal/foundation/policy"
+	"agent/internal/runtime"
 	"agent/internal/session"
 	"context"
 	"fmt"
 	systemIO "io"
 	"sort"
 )
+
+type LLMClient = runtime.LLMClient
+type Logger = runtime.Logger
 
 type CreatAgentOptions struct {
 	LLM      LLMClient

@@ -3,6 +3,7 @@ package agent
 import (
 	"agent/internal/capability/tool"
 	"agent/internal/prompt"
+	"agent/internal/runtime"
 	"context"
 	"fmt"
 )
@@ -10,7 +11,7 @@ import (
 const AnalyzeAgentName = "analyze"
 
 type AnalyzeAgent struct {
-	loop     *NativeLoop
+	loop     *runtime.NativeLoop
 	tools    []tool.Tool
 	workPath string
 }
@@ -22,7 +23,7 @@ func NewAnalyzeAgent(ctx context.Context, opts CreatAgentOptions) (Agent, error)
 	}
 	registeredTools := toolManage.List()
 
-	loop, err := NewNativeLoop(Options{
+	loop, err := runtime.NewNativeLoop(runtime.Options{
 		LLM: opts.LLM,
 		PromptBuilder: prompt.NewNativeBuilder(prompt.Options{
 			SystemPrompt: prompt.AnalyzeSystemPrompt,
@@ -60,7 +61,7 @@ func (a *AnalyzeAgent) Run(ctx context.Context, userInput string) error {
 	if a == nil || a.loop == nil {
 		return fmt.Errorf("analyze agent: not initialized")
 	}
-	userTask := Task{
+	userTask := runtime.Task{
 		Input:     userInput,
 		WorkDir:   a.workPath,
 		AgentName: a.Name(),

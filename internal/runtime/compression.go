@@ -1,4 +1,4 @@
-package agent
+package runtime
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"agent/internal/llm"
+	"agent/internal/foundation/llmClient"
 )
 
 const (
@@ -36,7 +36,7 @@ type SessionCompressor interface {
 }
 
 type ContextTokenCounter interface {
-	CountRequest(req llm.Request) int
+	CountRequest(req llmClient.Request) int
 }
 
 type ContextWindowLookupOptions struct {
@@ -61,15 +61,15 @@ type CompressionInput struct {
 	TurnID              string
 	StepIndex           int
 	Model               string
-	Messages            []llm.Message
+	Messages            []llmClient.Message
 	TriggerTokens       int
 	ContextWindowTokens int
 }
 
 type CompressionResult struct {
-	Messages []llm.Message
+	Messages []llmClient.Message
 	Summary  string
-	Usage    *llm.Usage
+	Usage    *llmClient.Usage
 }
 
 type EstimatedContextTokenCounter struct{}
@@ -84,18 +84,18 @@ type compressionDecision struct {
 }
 
 type contextCompressionEventPayload struct {
-	Status               string     `json:"status"`
-	Reason               string     `json:"reason,omitempty"`
-	Error                string     `json:"error,omitempty"`
-	EstimatedTokens      int        `json:"estimated_tokens,omitempty"`
-	UsageInputTokens     int        `json:"usage_input_tokens,omitempty"`
-	TriggerTokens        int        `json:"trigger_tokens,omitempty"`
-	ThresholdTokens      int        `json:"threshold_tokens,omitempty"`
-	ContextWindowTokens  int        `json:"context_window_tokens,omitempty"`
-	OriginalMessageCount int        `json:"original_message_count,omitempty"`
-	CompressedMessages   int        `json:"compressed_messages,omitempty"`
-	Summary              string     `json:"summary,omitempty"`
-	Usage                *llm.Usage `json:"usage,omitempty"`
+	Status               string           `json:"status"`
+	Reason               string           `json:"reason,omitempty"`
+	Error                string           `json:"error,omitempty"`
+	EstimatedTokens      int              `json:"estimated_tokens,omitempty"`
+	UsageInputTokens     int              `json:"usage_input_tokens,omitempty"`
+	TriggerTokens        int              `json:"trigger_tokens,omitempty"`
+	ThresholdTokens      int              `json:"threshold_tokens,omitempty"`
+	ContextWindowTokens  int              `json:"context_window_tokens,omitempty"`
+	OriginalMessageCount int              `json:"original_message_count,omitempty"`
+	CompressedMessages   int              `json:"compressed_messages,omitempty"`
+	Summary              string           `json:"summary,omitempty"`
+	Usage                *llmClient.Usage `json:"usage,omitempty"`
 }
 
 type LLMSessionCompressor struct {
@@ -114,15 +114,15 @@ func (c *LLMSessionCompressor) Compress(ctx context.Context, input CompressionIn
 		return CompressionResult{}, fmt.Errorf("context compression: messages are required")
 	}
 
-	response, err := c.llm.Complete(ctx, llm.Request{
+	response, err := c.llm.Complete(ctx, llmClient.Request{
 		Model: input.Model,
-		Messages: []llm.Message{
+		Messages: []llmClient.Message{
 			{
-				Role:    llm.RoleSystem,
+				Role:    llmClient.RoleSystem,
 				Content: contextCompressionSystemPrompt(),
 			},
 			{
-				Role:    llm.RoleUser,
+				Role:    llmClient.RoleUser,
 				Content: buildContextCompressionPrompt(input),
 			},
 		},
@@ -150,7 +150,7 @@ func (c *LLMSessionCompressor) Compress(ctx context.Context, input CompressionIn
 	}, nil
 }
 
-func (EstimatedContextTokenCounter) CountRequest(req llm.Request) int {
+func (EstimatedContextTokenCounter) CountRequest(req llmClient.Request) int {
 	tokens := 8
 	for _, msg := range req.Messages {
 		tokens += 4
@@ -180,7 +180,7 @@ func (EstimatedContextTokenCounter) CountRequest(req llm.Request) int {
 	return tokens
 }
 
-func contextCompressionDecision(req llm.Request, usage *llm.Usage, counter ContextTokenCounter) compressionDecision {
+func contextCompressionDecision(req llmClient.Request, usage *llmClient.Usage, counter ContextTokenCounter) compressionDecision {
 	if counter == nil {
 		counter = EstimatedContextTokenCounter{}
 	}
@@ -527,15 +527,15 @@ func estimateTextTokens(text string) int {
 	return (asciiRunes+3)/4 + nonASCIIRunes
 }
 
-func compressedHistoryMessages(messages []llm.Message, summary string) []llm.Message {
-	compressed := make([]llm.Message, 0, 2)
+func compressedHistoryMessages(messages []llmClient.Message, summary string) []llmClient.Message {
+	compressed := make([]llmClient.Message, 0, 2)
 	for _, msg := range messages {
-		if msg.Role == llm.RoleSystem {
+		if msg.Role == llmClient.RoleSystem {
 			compressed = append(compressed, cloneMessage(msg))
 		}
 	}
-	compressed = append(compressed, llm.Message{
-		Role:    llm.RoleUser,
+	compressed = append(compressed, llmClient.Message{
+		Role:    llmClient.RoleUser,
 		Content: "Conversation summary:\n" + strings.TrimSpace(summary),
 	})
 	return compressed
@@ -561,7 +561,7 @@ Transcript:
 %s`, input.Task.Input, input.Task.WorkDir, input.TriggerTokens, input.ContextWindowTokens, transcript)
 }
 
-func formatMessagesForCompression(messages []llm.Message) string {
+func formatMessagesForCompression(messages []llmClient.Message) string {
 	var builder strings.Builder
 	for i, msg := range messages {
 		fmt.Fprintf(&builder, "Message %d\nrole: %s\n", i+1, msg.Role)

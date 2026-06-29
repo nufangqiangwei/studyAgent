@@ -10,6 +10,7 @@ import (
 	"agent/internal/foundation/logging"
 	"agent/internal/foundation/policy"
 	"agent/internal/foundation/startup"
+	"agent/internal/runtime"
 	"context"
 	"fmt"
 	"io"
@@ -82,7 +83,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer, errOut
 		return err
 	}
 	cfg.Provider = resolvedProvider
-	if result, lookupErr := agent.ResolveAndCacheContextWindowTokens(ctx, agent.ContextWindowLookupOptions{
+	if result, lookupErr := runtime.ResolveAndCacheContextWindowTokens(ctx, runtime.ContextWindowLookupOptions{
 		Provider: cfg.Provider,
 		Model:    cfg.Model,
 		ModelURL: cfg.ModelURL,

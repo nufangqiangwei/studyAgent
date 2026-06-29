@@ -1,4 +1,4 @@
-package agent
+package runtime
 
 import (
 	"agent/internal/capability/builtin/askUser"
@@ -153,33 +153,33 @@ func TestNativeContextBuilderRestoresFromLatestContextSnapshot(t *testing.T) {
 	llmContext, err := builder.Build(context.Background(), ContextInput{
 		Prompt: prompt.Output{
 			Model: "mock-native",
-			Messages: []llm.Message{
-				{Role: llm.RoleSystem, Content: "new system prompt"},
-				{Role: llm.RoleUser, Content: "current task"},
+			Messages: []llmClient.Message{
+				{Role: llmClient.RoleSystem, Content: "new system prompt"},
+				{Role: llmClient.RoleUser, Content: "current task"},
 			},
 		},
 		SessionRecords: []session.Record{
 			{
 				Kind:    session.RecordKindMessage,
-				Message: &llm.Message{Role: llm.RoleSystem, Content: "old system prompt"},
+				Message: &llmClient.Message{Role: llmClient.RoleSystem, Content: "old system prompt"},
 			},
 			{
 				Kind:    session.RecordKindMessage,
-				Message: &llm.Message{Role: llm.RoleUser, Content: "old raw user task"},
+				Message: &llmClient.Message{Role: llmClient.RoleUser, Content: "old raw user task"},
 			},
 			{
 				Kind: session.RecordKindContextSnapshot,
 				ContextSnapshot: &session.ContextSnapshot{
-					Messages: []llm.Message{
-						{Role: llm.RoleSystem, Content: "snapshot system prompt"},
-						{Role: llm.RoleUser, Content: "Conversation summary:\ncompressed state"},
+					Messages: []llmClient.Message{
+						{Role: llmClient.RoleSystem, Content: "snapshot system prompt"},
+						{Role: llmClient.RoleUser, Content: "Conversation summary:\ncompressed state"},
 					},
 					Summary: "compressed state",
 				},
 			},
 			{
 				Kind:    session.RecordKindMessage,
-				Message: &llm.Message{Role: llm.RoleAssistant, Content: "post snapshot answer"},
+				Message: &llmClient.Message{Role: llmClient.RoleAssistant, Content: "post snapshot answer"},
 			},
 		},
 	})
@@ -201,7 +201,7 @@ func TestNativeContextBuilderRestoresFromLatestContextSnapshot(t *testing.T) {
 			t.Fatalf("request leaked pre-snapshot raw history: %#v", request.Messages)
 		}
 	}
-	if request.Messages[3].Role != llm.RoleUser || request.Messages[3].Content != "current task" {
+	if request.Messages[3].Role != llmClient.RoleUser || request.Messages[3].Content != "current task" {
 		t.Fatalf("request missing current task: %#v", request.Messages)
 	}
 }

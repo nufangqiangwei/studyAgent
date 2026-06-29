@@ -1,4 +1,4 @@
-package agent
+package runtime
 
 import (
 	"agent/internal/foundation/llmClient"
@@ -150,8 +150,20 @@ func messagesFromSession(records []session.Record) []llmClient.Message {
 	if len(records) == 0 {
 		return nil
 	}
-	messages := make([]llmClient.Message, 0, len(records))
-	for _, record := range records {
+
+	start := 0
+	messages := []llmClient.Message(nil)
+	for i, record := range records {
+		if record.Kind == session.RecordKindContextSnapshot && record.ContextSnapshot != nil {
+			messages = cloneMessages(record.ContextSnapshot.Messages)
+			start = i + 1
+		}
+	}
+	if messages == nil {
+		messages = make([]llmClient.Message, 0, len(records))
+	}
+
+	for _, record := range records[start:] {
 		if record.Kind != "" && record.Kind != session.RecordKindMessage {
 			continue
 		}
@@ -162,7 +174,6 @@ func messagesFromSession(records []session.Record) []llmClient.Message {
 	}
 	return messages
 }
-
 func assistantMessage(response llmClient.Response, toolCalls []llmClient.ToolCall) (llmClient.Message, bool) {
 	if strings.TrimSpace(response.Content) == "" && len(toolCalls) == 0 {
 		return llmClient.Message{}, false

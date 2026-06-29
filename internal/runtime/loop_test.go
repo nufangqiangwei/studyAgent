@@ -1,4 +1,4 @@
-package agent
+package runtime
 
 import (
 	"agent/internal/capability/builtin/askUser"
@@ -265,7 +265,7 @@ func TestNativeLoopSavesSessionTurns(t *testing.T) {
 	_, err = loop.Run(context.Background(), Task{
 		Input:     "save this conversation",
 		WorkDir:   "C:\\Code\\GO\\agent",
-		AgentName: DefaultAgentName,
+		AgentName: "default",
 	})
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
@@ -307,8 +307,8 @@ func TestNativeLoopSavesSessionTurns(t *testing.T) {
 		if record.SessionID != store.ID() || record.AgentID != store.AgentID() || record.TurnID == "" {
 			t.Fatalf("record identifiers missing: %#v", record)
 		}
-		if record.AgentName != DefaultAgentName {
-			t.Fatalf("record agent name = %q, want %q", record.AgentName, DefaultAgentName)
+		if record.AgentName != "default" {
+			t.Fatalf("record agent name = %q, want %q", record.AgentName, "default")
 		}
 		if record.Timestamp.IsZero() {
 			t.Fatalf("record timestamp missing: %#v", record)
@@ -417,7 +417,7 @@ func TestNativeLoopResumesWaitingToolStateFromSession(t *testing.T) {
 
 	started, err := loop.HandleEvent(context.Background(), NewRunStartedEvent(Task{
 		Input:     "build a feature",
-		AgentName: DefaultAgentName,
+		AgentName: "default",
 	}))
 	if err != nil {
 		t.Fatalf("HandleEvent RunStarted returned error: %v", err)

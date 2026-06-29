@@ -92,9 +92,9 @@ func TestFileStoreSaveContextSnapshot(t *testing.T) {
 		TurnID:    "turn-1",
 		StepIndex: 2,
 		ContextSnapshot: &ContextSnapshot{
-			Messages: []llm.Message{
-				{Role: llm.RoleSystem, Content: "system"},
-				{Role: llm.RoleUser, Content: "Conversation summary:\nsummary"},
+			Messages: []llmClient.Message{
+				{Role: llmClient.RoleSystem, Content: "system"},
+				{Role: llmClient.RoleUser, Content: "Conversation summary:\nsummary"},
 			},
 			Summary:              "summary",
 			TriggerTokens:        20_000,

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"agent/internal/capability/tool"
+	"agent/internal/runtime"
 	"context"
 	"fmt"
 
@@ -11,7 +12,7 @@ import (
 const DefaultAgentName = "default"
 
 type DefaultAgent struct {
-	loop     *NativeLoop
+	loop     *runtime.NativeLoop
 	tools    []tool.Tool
 	workPath string
 }
@@ -23,7 +24,7 @@ func NewDefaultAgent(ctx context.Context, opts CreatAgentOptions) (Agent, error)
 	}
 	registeredTools := toolManage.List()
 
-	loop, err := NewNativeLoop(Options{
+	loop, err := runtime.NewNativeLoop(runtime.Options{
 		LLM: opts.LLM,
 		PromptBuilder: prompt.NewNativeBuilder(prompt.Options{
 			Model: opts.Model,
@@ -60,7 +61,7 @@ func (a *DefaultAgent) Run(ctx context.Context, userInput string) error {
 	if a == nil || a.loop == nil {
 		return fmt.Errorf("default agent: not initialized")
 	}
-	userTask := Task{
+	userTask := runtime.Task{
 		Input:     userInput,
 		WorkDir:   a.workPath,
 		AgentName: a.Name(),
