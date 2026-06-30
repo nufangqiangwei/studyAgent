@@ -2,7 +2,6 @@ package app
 
 import (
 	"agent/internal/agent"
-	agentsession "agent/internal/session"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -61,7 +60,7 @@ func TestRunCommandUsesStartupWrapper(t *testing.T) {
 	}
 }
 
-func TestRunUsesOneAgentFileForStartupConversation(t *testing.T) {
+func TestRunCreatesSessionDirectoryWithoutRuntimeConversationRecords(t *testing.T) {
 	homeDir := configureTestHome(t)
 	workDir := t.TempDir()
 	var out bytes.Buffer
@@ -82,86 +81,35 @@ func TestRunUsesOneAgentFileForStartupConversation(t *testing.T) {
 	}
 
 	sessionDir := filepath.Join(sessionRoot, sessionEntries[0].Name())
-	manifestData, err := os.ReadFile(filepath.Join(sessionDir, "manifest.json"))
-	if err != nil {
-		t.Fatalf("read manifest: %v", err)
-	}
-	var manifest agentsession.Manifest
-	if err := json.Unmarshal(manifestData, &manifest); err != nil {
-		t.Fatalf("parse manifest: %v", err)
-	}
-	if manifest.Layout.AgentsDir != "agents" || len(manifest.Agents) != 1 {
-		t.Fatalf("manifest = %#v, want one agent file", manifest)
-	}
-
-	agentData, err := os.ReadFile(filepath.Join(sessionDir, filepath.FromSlash(manifest.Agents[0].Path)))
-	if err != nil {
-		t.Fatalf("read agent session file: %v", err)
-	}
-	records := parseSessionRecords(t, agentData)
-	if len(records) < 6 {
-		t.Fatalf("records = %d, want at least 6: %#v", len(records), records)
-	}
-
-	var firstUser, secondUser bool
-	usageSummaries := 0
-	for _, record := range records {
-		if record.Timestamp.IsZero() {
-			t.Fatalf("record timestamp missing: %#v", record)
-		}
-		if record.Kind == agentsession.RecordKindMessage && record.Message != nil && record.Message.Role == "user" {
-			if record.AgentName == agent.AnalyzeAgentName && strings.Contains(record.Message.Content, "first") {
-				firstUser = true
-			}
-			if record.AgentName == agent.DefaultAgentName && strings.Contains(record.Message.Content, "second") {
-				secondUser = true
-			}
-		}
-		if record.Kind == agentsession.RecordKindUsageSummary {
-			usageSummaries++
-		}
-	}
-	if !firstUser || !secondUser {
-		t.Fatalf("missing expected user message records: %#v", records)
-	}
-	if usageSummaries != 2 {
-		t.Fatalf("usage summaries = %d, want 2: %#v", usageSummaries, records)
+	if _, err := os.Stat(filepath.Join(sessionDir, "manifest.json")); !os.IsNotExist(err) {
+		t.Fatalf("manifest exists or stat failed unexpectedly: %v", err)
 	}
 }
 
-func TestRunBindsEnvToToolContext(t *testing.T) {
+func TestRunReturnsErrorForToolCallsUntilExternalRunnerExists(t *testing.T) {
 	homeDir := configureTestHome(t)
 	workDir := t.TempDir()
-	var seenToolResult bool
+	var sawToolResultMessage bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload struct {
 			Tools    []any `json:"tool"`
 			Messages []struct {
-				Role       string `json:"role"`
-				Content    string `json:"content"`
-				ToolCallID string `json:"tool_call_id"`
+				Role string `json:"role"`
 			} `json:"messages"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
-
-		w.Header().Set("Content-Type", "application/json")
 		if len(payload.Tools) == 0 {
-			t.Fatal("request missing tool")
+			t.Fatal("request missing tool definitions")
 		}
-		if len(payload.Messages) > 0 {
-			lastMessage := payload.Messages[len(payload.Messages)-1]
-			if lastMessage.Role == "tool" && lastMessage.ToolCallID == "call_ask_user_1" && lastMessage.Content == "web app" {
-				seenToolResult = true
-				_, _ = w.Write([]byte(`{
-  "model": "gpt-test",
-  "choices": [{"finish_reason": "stop", "message": {"content": "final answer"}}]
-}`))
-				return
+		for _, message := range payload.Messages {
+			if message.Role == "tool" {
+				sawToolResultMessage = true
 			}
 		}
 
+		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
   "model": "gpt-test",
   "choices": [{
@@ -190,20 +138,16 @@ func TestRunBindsEnvToToolContext(t *testing.T) {
 
 	var out bytes.Buffer
 	var errOut bytes.Buffer
-
-	err := Run(context.Background(), []string{"--workdir", workDir, "run", "build a feature"}, strings.NewReader("web app\n"), &out, &errOut)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
+	err := Run(context.Background(), []string{"--workdir", workDir, "run", "build a feature"}, strings.NewReader(""), &out, &errOut)
+	if err == nil || !strings.Contains(err.Error(), "model requested 1 tool call") {
+		t.Fatalf("Run error = %v, want unsupported tool-call error", err)
 	}
-	if !seenToolResult {
-		t.Fatal("model did not receive ask_user tool result")
+	if sawToolResultMessage {
+		t.Fatal("llm unexpectedly executed tool flow and sent a tool result message")
 	}
 	wantAgents := []string{agent.AnalyzeAgentName, agent.DefaultAgentName, agent.ToolsTesterAgentName}
 	if got := agent.RegisteredAgentNames(); !reflect.DeepEqual(got, wantAgents) {
 		t.Fatalf("registered agent names = %#v, want %#v", got, wantAgents)
-	}
-	if got := out.String(); !strings.Contains(got, "? Which target?") || !strings.Contains(got, "final answer") {
-		t.Fatalf("output missing tool prompt or final answer:\n%s", got)
 	}
 }
 
@@ -409,22 +353,4 @@ func writeDefaultConfig(t *testing.T, homeDir string, data []byte) {
 	if err := os.WriteFile(configPath, data, 0600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-}
-
-func parseSessionRecords(t *testing.T, data []byte) []agentsession.Record {
-	t.Helper()
-
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	records := make([]agentsession.Record, 0, len(lines))
-	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		var record agentsession.Record
-		if err := json.Unmarshal([]byte(line), &record); err != nil {
-			t.Fatalf("parse session jsonl: %v\n%s", err, line)
-		}
-		records = append(records, record)
-	}
-	return records
 }

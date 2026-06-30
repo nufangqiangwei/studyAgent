@@ -2,48 +2,25 @@ package agent
 
 import (
 	"agent/internal/capability/tool"
-	"agent/internal/runtime"
+	"agent/internal/prompt"
 	"context"
 	"fmt"
-
-	"agent/internal/prompt"
 )
 
 const DefaultAgentName = "default"
 
 type DefaultAgent struct {
-	loop     *runtime.NativeLoop
-	tools    []tool.Tool
-	workPath string
+	parts runtimeAgentParts
 }
 
 func NewDefaultAgent(ctx context.Context, opts CreatAgentOptions) (Agent, error) {
-	toolManage, err := tool.NewDefaultManage(tool.WithPolicy(opts.Policy))
-	if err != nil {
-		return nil, fmt.Errorf("default agent: select tools: %w", err)
-	}
-	registeredTools := toolManage.List()
-
-	loop, err := runtime.NewNativeLoop(runtime.Options{
-		LLM: opts.LLM,
-		PromptBuilder: prompt.NewNativeBuilder(prompt.Options{
-			Model: opts.Model,
-		}),
-		Tools:    toolManage,
-		Logger:   opts.Logger,
-		MaxSteps: opts.MaxSteps,
-		Out:      opts.Out,
-		Session:  opts.Session,
+	parts, err := newRuntimeAgentParts(ctx, opts, DefaultAgentName, prompt.Options{
+		Model: opts.Model,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("default agent: create native loop: %w", err)
+		return nil, err
 	}
-
-	return &DefaultAgent{
-		loop:     loop,
-		tools:    registeredTools,
-		workPath: opts.WorkDir,
-	}, nil
+	return &DefaultAgent{parts: parts}, nil
 }
 
 func (a *DefaultAgent) Name() string {
@@ -54,18 +31,12 @@ func (a *DefaultAgent) Tools() []tool.Tool {
 	if a == nil {
 		return nil
 	}
-	return append([]tool.Tool(nil), a.tools...)
+	return cloneTools(a.parts.tools)
 }
 
 func (a *DefaultAgent) Run(ctx context.Context, userInput string) error {
-	if a == nil || a.loop == nil {
+	if a == nil {
 		return fmt.Errorf("default agent: not initialized")
 	}
-	userTask := runtime.Task{
-		Input:     userInput,
-		WorkDir:   a.workPath,
-		AgentName: a.Name(),
-	}
-	_, err := a.loop.Run(ctx, userTask)
-	return err
+	return runRuntimeAgent(ctx, a.parts, userInput)
 }

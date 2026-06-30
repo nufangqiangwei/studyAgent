@@ -507,13 +507,43 @@ Any state required to continue the task must be represented in RunState, events,
 This allows ReAct execution to survive process exit, worker migration, delayed tool execution, and external approval flows.
 
 
+## 当前代码结构
+
+当前代码已从早期平铺包结构调整为分层目录。阅读和修改代码时，以实际包边界为准：
+
+```text
+main.go
+  -> internal/entrance/app
+
+internal/
+  agent/        agent 接口、工厂注册表和具体 agent 实现
+  llm/          LLM 调用运行时；原 internal/runtime 包已更名到这里
+  state/        可恢复运行状态、状态机、reducer、effect 和状态存储
+  event/        运行事件定义、事件注册表、dispatcher、hook 和事件上下文
+  prompt/       prompt 构建
+  session/      会话目录、文件存储和消息历史
+  content/      单次执行 Env、IO、跨模块小接口和 context 绑定
+  entrance/     app 装配、CLI 交互和启动命令适配
+  capability/   command/tool 抽象、注册表和内置能力
+  foundation/   config、llmClient、logging、policy、startup、workspace 等基础设施
+```
+
+需要特别注意：
+
+- `internal/llm` 是当前的 LLM 调用运行时包，承载模型调用编排、请求构建、tool call 归一化、上下文窗口查询和压缩相关逻辑；供应商 HTTP 客户端与请求适配在 `internal/foundation/llmClient`。
+- `internal/state` 是顶层运行状态包，不再位于 `internal/agent/state`；agent 不应私有化可恢复运行状态。
+- `internal/agent` 负责 agent 抽象、agent 注册和具体 agent 组合，不负责供应商 API 细节，也不直接拥有通用状态机实现。
+- `internal/entrance/app` 是当前应用装配入口；`main.go` 只把进程参数、标准 IO 和 context 交给它。
+
 ## 文档导航
 
+- [文档索引](docs/README.md)：`docs/` 目录内文档清单和维护原则。
 - [项目概览](docs/project-overview.md)：项目目标、用户场景和非目标。
 - [产品能力](docs/product-goals.md)：CLI agent 应具备的核心能力和学习拆解。
 - [架构设计](docs/architecture.md)：推荐分层、数据流和依赖方向。
 - [模块规划](docs/modules.md)：Go 包和模块职责边界。
 - [代码模块实现](docs/code-modules.md)：当前代码骨架、扩展入口和模块协作方式。
+- [重构架构指南](docs/refactor-architecture-guide.md)：事件驱动、可恢复运行时和后续分层重构参考。
 - [开发路线](docs/development-roadmap.md)：从最小可用版本到进阶能力的迭代路径。
 - [开发约定](docs/development-guide.md)：代码风格、接口设计、测试和解耦原则。
 
@@ -522,7 +552,8 @@ This allows ReAct execution to survive process exit, worker migration, delayed t
 1. 先读 [项目概览](docs/project-overview.md)，明确这个项目要做什么。
 2. 再读 [产品能力](docs/product-goals.md)，把目标产品拆成可学习的能力点。
 3. 然后读 [架构设计](docs/architecture.md)、[模块规划](docs/modules.md) 和 [代码模块实现](docs/code-modules.md)，确定 Go 代码组织方式。
-4. 最后按 [开发路线](docs/development-roadmap.md) 分阶段实现，并遵守 [开发约定](docs/development-guide.md)。
+4. 如果涉及事件驱动、可恢复运行、状态机或 runtime 拆分，再读 [重构架构指南](docs/refactor-architecture-guide.md)。
+5. 最后按 [开发路线](docs/development-roadmap.md) 分阶段实现，并遵守 [开发约定](docs/development-guide.md)。
 
 ## 本地辅助文档目录约定
 
@@ -536,7 +567,7 @@ This allows ReAct execution to survive process exit, worker migration, delayed t
 
 - `AGENTS.md`：项目导航地图。
 - `go.mod`：Go 模块定义。
-- `main.go`：当前程序启动入口，负责调用 `internal/app`。
+- `main.go`：当前程序启动入口，负责调用 `internal/entrance/app`。
 - `docs/`：项目文档。
 - `internal/`：当前 Go 模块骨架。
 

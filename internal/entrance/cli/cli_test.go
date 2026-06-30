@@ -160,7 +160,7 @@ func TestRunDoesNotExecuteSuggestedCommandWhenDeclined(t *testing.T) {
 	var out strings.Builder
 	env := content.Env{
 		IO: content.IO{
-			In:  strings.NewReader("/versoin\nn\n/exit\n"),
+			In:  strings.NewReader("/stats\nn\n/exit\n"),
 			Out: &out,
 		},
 	}
@@ -171,8 +171,8 @@ func TestRunDoesNotExecuteSuggestedCommandWhenDeclined(t *testing.T) {
 	}
 	got := out.String()
 	for _, want := range []string{
-		"unknown command \"/versoin\"",
-		"Did you mean \"/version\"?",
+		"Unknown command \"/stats\"",
+		"Did you mean \"/status\"?",
 		"Command not executed.",
 	} {
 		if !strings.Contains(got, want) {
@@ -180,7 +180,7 @@ func TestRunDoesNotExecuteSuggestedCommandWhenDeclined(t *testing.T) {
 		}
 	}
 	if strings.Contains(got, "agent dev") {
-		t.Fatalf("declined suggestion executed version command:\n%s", got)
+		t.Fatalf("declined suggestion executed status command:\n%s", got)
 	}
 }
 

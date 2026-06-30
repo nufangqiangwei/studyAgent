@@ -1,4 +1,4 @@
-package runtime
+package llm
 
 import (
 	"context"
@@ -57,7 +57,8 @@ type ContextWindowLookupResult struct {
 }
 
 type CompressionInput struct {
-	Task                Task
+	Task                string
+	WorkDir             string
 	TurnID              string
 	StepIndex           int
 	Model               string
@@ -558,7 +559,7 @@ Workspace:
 The current context has reached %d tokens out of a %d token window. Compress the transcript below into a concise but complete continuation summary.
 
 Transcript:
-%s`, input.Task.Input, input.Task.WorkDir, input.TriggerTokens, input.ContextWindowTokens, transcript)
+%s`, input.Task, input.WorkDir, input.TriggerTokens, input.ContextWindowTokens, transcript)
 }
 
 func formatMessagesForCompression(messages []llmClient.Message) string {

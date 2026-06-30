@@ -20,7 +20,7 @@ func TestRegistryCreatesDefinedEvents(t *testing.T) {
 		WithTime(occurredAt),
 		WithSource("unit-test"),
 		WithRunID("run-1"),
-		WithMetadataValue("scope", "runtime"),
+		WithMetadataValue("scope", "llm"),
 	)
 	if err != nil {
 		t.Fatalf("NewEvent returned error: %v", err)
@@ -29,7 +29,7 @@ func TestRegistryCreatesDefinedEvents(t *testing.T) {
 	if event.ID != "event-1" || event.Type != testEvent || !event.OccurredAt.Equal(occurredAt) {
 		t.Fatalf("event identity = %#v, want configured id/type/time", event)
 	}
-	if event.Source != "unit-test" || event.RunID != "run-1" || event.Metadata["scope"] != "runtime" {
+	if event.Source != "unit-test" || event.RunID != "run-1" || event.Metadata["scope"] != "llm" {
 		t.Fatalf("event metadata = %#v, want source/run/scope", event)
 	}
 	var payload map[string]string
@@ -168,11 +168,11 @@ func TestHookPredicateRunsOnlyWhenNeeded(t *testing.T) {
 	var calls int
 
 	registerTestHook(t, dispatcher, HookSpec{
-		Name:      "runtime-only",
+		Name:      "llm-only",
 		EventType: testEvent,
 		Level:     HookLevelNormal,
 		When: func(_ context.Context, event Event) bool {
-			return event.Metadata["scope"] == "runtime"
+			return event.Metadata["scope"] == "llm"
 		},
 		Handle: func(context.Context, Event) (HookResult, error) {
 			calls++
@@ -183,7 +183,7 @@ func TestHookPredicateRunsOnlyWhenNeeded(t *testing.T) {
 	if _, err := dispatcher.Emit(context.Background(), mustNewTestEvent(t, registry, testEvent)); err != nil {
 		t.Fatalf("first Emit returned error: %v", err)
 	}
-	if _, err := dispatcher.Emit(context.Background(), mustNewTestEvent(t, registry, testEvent, WithMetadataValue("scope", "runtime"))); err != nil {
+	if _, err := dispatcher.Emit(context.Background(), mustNewTestEvent(t, registry, testEvent, WithMetadataValue("scope", "llm"))); err != nil {
 		t.Fatalf("second Emit returned error: %v", err)
 	}
 

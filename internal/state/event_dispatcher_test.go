@@ -59,6 +59,6 @@ func TestCoreReducerConsumesRuntimeEventTypesDirectly(t *testing.T) {
 	event := mustRuntimeEvent(t, "run_1", runtimeevent.EventRunStarted, nil)
 
 	if !reducer.Match(context.Background(), st, event) {
-		t.Fatal("CoreRunReducer did not match runtime RunStarted event")
+		t.Fatal("CoreRunReducer did not match llm RunStarted event")
 	}
 }

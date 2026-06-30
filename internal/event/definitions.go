@@ -51,7 +51,7 @@ func BuiltinDefinitions() []Definition {
 		mustReach(EventScheduledResumeDue, "continues a run after a scheduled resume"),
 		mustReach(EventStepLimitReached, "marks a run as failed after reaching its step limit"),
 
-		canIntercept(EventStateChanged, "observes a runtime state transition"),
+		canIntercept(EventStateChanged, "observes a llm state transition"),
 		canIntercept(EventModelRequestCreated, "observes a model request before dispatch"),
 		canIntercept(EventToolCallRequested, "observes a requested tool call"),
 		canIntercept(EventToolCallDispatched, "observes a dispatched tool call"),
