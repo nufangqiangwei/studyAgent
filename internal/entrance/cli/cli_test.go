@@ -171,7 +171,7 @@ func TestRunDoesNotExecuteSuggestedCommandWhenDeclined(t *testing.T) {
 	}
 	got := out.String()
 	for _, want := range []string{
-		"Unknown command \"/versoin\"",
+		"unknown command \"/versoin\"",
 		"Did you mean \"/version\"?",
 		"Command not executed.",
 	} {
@@ -313,9 +313,7 @@ func TestRunCommandErrorContinues(t *testing.T) {
 }
 
 func defaultRegistry() *command2.Registry {
-	registry := command2.NewRegistry()
-	command2.RegisterDefaults(registry)
-	return registry
+	return command2.Manage
 }
 
 type recordingRunner struct {
