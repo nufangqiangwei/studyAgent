@@ -2,37 +2,40 @@ package state
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	runtimeevent "agent/internal/event"
 )
 
-func TestMachineDispatchStoresEventUpdatesStateAndExecutesEffect(t *testing.T) {
+func TestMachineAdvanceStoresEventUpdatesStateAndPersistsEffect(t *testing.T) {
 	ctx := context.Background()
 	states := NewMemoryStateStore()
 	events := NewMemoryEventStore()
+	effects := NewMemoryEffectStore()
 	registry := NewReducerRegistry()
 	registry.Register(CoreRunReducer{})
-	executor := &fakeExecutor{}
 
 	initial := NewRunState("run_1", 2)
 	if err := states.Save(ctx, initial); err != nil {
 		t.Fatalf("Save returned error: %v", err)
 	}
 
-	machine := NewMachine(states, events, registry, executor)
+	machine := NewMachine(states, events, effects, registry)
 	started := mustRuntimeEvent(t, "run_1", runtimeevent.EventRunStarted, nil)
-	if err := machine.Dispatch(ctx, started); err != nil {
-		t.Fatalf("Dispatch returned error: %v", err)
+	result, err := machine.Advance(ctx, started)
+	if err != nil {
+		t.Fatalf("Advance returned error: %v", err)
+	}
+	if result.RunID != "run_1" || len(result.Effects) != 1 || result.Effects[0].Type != EffectCallModel {
+		t.Fatalf("advance result = %#v, want one model.call effect", result)
 	}
 
 	storedState, err := states.Load(ctx, "run_1")
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
 	}
-	if storedState.Phase != PhaseRunning {
-		t.Fatalf("Phase = %q, want %q", storedState.Phase, PhaseRunning)
+	if storedState.Phase != PhaseWaiting || storedState.Waiting == nil || storedState.Waiting.Reason != "model_result" {
+		t.Fatalf("state = %#v, want waiting model_result", storedState)
 	}
 	if storedState.LastEventID != started.ID {
 		t.Fatalf("LastEventID = %q, want %q", storedState.LastEventID, started.ID)
@@ -46,28 +49,28 @@ func TestMachineDispatchStoresEventUpdatesStateAndExecutesEffect(t *testing.T) {
 		t.Fatalf("events = %#v, want started event", storedEvents)
 	}
 
-	if len(executor.effects) != 1 || executor.effects[0].Type != EffectCallModel {
-		t.Fatalf("effects = %#v, want one model.call effect", executor.effects)
+	storedEffects, err := effects.ListPending(ctx, "run_1")
+	if err != nil {
+		t.Fatalf("ListPending returned error: %v", err)
+	}
+	if len(storedEffects) != 1 || storedEffects[0].Effect.Type != EffectCallModel {
+		t.Fatalf("effects = %#v, want one model.call effect", storedEffects)
 	}
 }
 
-func TestMachineDispatchUsesExecutorEvents(t *testing.T) {
+func TestMachineDispatchOnlyAdvancesAndPersistsEffects(t *testing.T) {
 	ctx := context.Background()
 	states := NewMemoryStateStore()
 	events := NewMemoryEventStore()
+	effects := NewMemoryEffectStore()
 	registry := NewReducerRegistry()
 	registry.Register(CoreRunReducer{})
-	executor := &fakeExecutor{
-		nextEvents: []runtimeevent.Event{
-			mustRuntimeEvent(t, "run_1", runtimeevent.EventRunCompleted, nil),
-		},
-	}
 
 	if err := states.Save(ctx, NewRunState("run_1", 2)); err != nil {
 		t.Fatalf("Save returned error: %v", err)
 	}
 
-	machine := NewMachine(states, events, registry, executor)
+	machine := NewMachine(states, events, effects, registry)
 	if err := machine.Dispatch(ctx, mustRuntimeEvent(t, "run_1", runtimeevent.EventRunStarted, nil)); err != nil {
 		t.Fatalf("Dispatch returned error: %v", err)
 	}
@@ -76,58 +79,68 @@ func TestMachineDispatchUsesExecutorEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
 	}
-	if storedState.Phase != PhaseCompleted {
-		t.Fatalf("Phase = %q, want %q", storedState.Phase, PhaseCompleted)
+	if storedState.Phase != PhaseWaiting || storedState.IsTerminal() {
+		t.Fatalf("state = %#v, want non-terminal waiting", storedState)
 	}
 
 	storedEvents, err := events.List(ctx, "run_1")
 	if err != nil {
 		t.Fatalf("List returned error: %v", err)
 	}
-	if len(storedEvents) != 2 {
-		t.Fatalf("events = %d, want 2: %#v", len(storedEvents), storedEvents)
+	if len(storedEvents) != 1 {
+		t.Fatalf("events = %d, want only original event: %#v", len(storedEvents), storedEvents)
+	}
+	storedEffects, err := effects.ListPending(ctx, "run_1")
+	if err != nil {
+		t.Fatalf("ListPending returned error: %v", err)
+	}
+	if len(storedEffects) != 1 || storedEffects[0].Status != EffectStatusPending {
+		t.Fatalf("effects = %#v, want one pending effect", storedEffects)
 	}
 }
 
-func TestMachineDispatchRecordsEffectFailureEvent(t *testing.T) {
+func TestMachineAdvanceSkipsAlreadyStoredEvent(t *testing.T) {
 	ctx := context.Background()
 	states := NewMemoryStateStore()
 	events := NewMemoryEventStore()
+	effects := NewMemoryEffectStore()
 	registry := NewReducerRegistry()
 	registry.Register(CoreRunReducer{})
-	executor := &fakeExecutor{err: errors.New("executor failed")}
 
 	if err := states.Save(ctx, NewRunState("run_1", 2)); err != nil {
 		t.Fatalf("Save returned error: %v", err)
 	}
+	machine := NewMachine(states, events, effects, registry)
+	event := mustRuntimeEvent(t, "run_1", runtimeevent.EventRunStarted, nil)
 
-	machine := NewMachine(states, events, registry, executor)
-	if err := machine.Dispatch(ctx, mustRuntimeEvent(t, "run_1", runtimeevent.EventRunStarted, nil)); err != nil {
-		t.Fatalf("Dispatch returned error: %v", err)
+	first, err := machine.Advance(ctx, event)
+	if err != nil {
+		t.Fatalf("first Advance returned error: %v", err)
+	}
+	if len(first.Effects) != 1 || first.Effects[0].Type != EffectCallModel {
+		t.Fatalf("first effects = %#v, want model.call", first.Effects)
+	}
+
+	second, err := machine.Advance(ctx, event)
+	if err != nil {
+		t.Fatalf("second Advance returned error: %v", err)
+	}
+	if len(second.Effects) != 0 {
+		t.Fatalf("second effects = %#v, want none for duplicate event", second.Effects)
 	}
 
 	storedEvents, err := events.List(ctx, "run_1")
 	if err != nil {
 		t.Fatalf("List returned error: %v", err)
 	}
-	if len(storedEvents) != 2 {
-		t.Fatalf("events = %d, want 2: %#v", len(storedEvents), storedEvents)
+	if len(storedEvents) != 1 {
+		t.Fatalf("events = %d, want one stored event", len(storedEvents))
 	}
-	if storedEvents[1].Type != runtimeevent.EventEffectFailed {
-		t.Fatalf("second event type = %q, want %q", storedEvents[1].Type, runtimeevent.EventEffectFailed)
+	storedEffects, err := effects.ListPending(ctx, "run_1")
+	if err != nil {
+		t.Fatalf("ListPending returned error: %v", err)
 	}
-}
-
-type fakeExecutor struct {
-	effects    []Effect
-	nextEvents []runtimeevent.Event
-	err        error
-}
-
-func (f *fakeExecutor) Execute(ctx context.Context, effect Effect) ([]runtimeevent.Event, error) {
-	f.effects = append(f.effects, effect)
-	if f.err != nil {
-		return nil, f.err
+	if len(storedEffects) != 1 {
+		t.Fatalf("effects = %d, want one stored effect", len(storedEffects))
 	}
-	return append([]runtimeevent.Event(nil), f.nextEvents...), nil
 }

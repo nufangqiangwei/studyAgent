@@ -19,8 +19,8 @@ func TestCoreRunReducerTransitions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunStarted returned error: %v", err)
 	}
-	if started.Phase != PhaseRunning {
-		t.Fatalf("started phase = %q, want %q", started.Phase, PhaseRunning)
+	if started.Phase != PhaseWaiting || started.Waiting == nil || started.Waiting.Reason != "model_result" {
+		t.Fatalf("started state = %#v, want waiting model_result", started)
 	}
 	if len(effects) != 1 || effects[0].Type != EffectCallModel {
 		t.Fatalf("started effects = %#v, want model.call", effects)

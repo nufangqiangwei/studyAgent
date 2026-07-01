@@ -12,6 +12,6 @@ type StateStore interface {
 }
 
 type EventStore interface {
-	Append(ctx context.Context, event runtimeevent.Event) error
+	Append(ctx context.Context, event runtimeevent.Event) (bool, error)
 	List(ctx context.Context, runID string) ([]runtimeevent.Event, error)
 }

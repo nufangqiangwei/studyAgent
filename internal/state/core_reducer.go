@@ -32,7 +32,8 @@ func (r CoreRunReducer) Reduce(ctx context.Context, s RunState, event runtimeeve
 			return s, nil, fmt.Errorf("cannot start run from phase %q", s.Phase)
 		}
 
-		s.Phase = PhaseRunning
+		s.Phase = PhaseWaiting
+		s.Waiting = &WaitingState{Reason: "model_result"}
 		return s, []Effect{
 			NewEffect(s.RunID, EffectCallModel),
 		}, nil
@@ -92,6 +93,7 @@ func (r CoreRunReducer) Reduce(ctx context.Context, s RunState, event runtimeeve
 		}
 
 		s.Phase = PhaseFailed
+		s.Waiting = nil
 		s.Error = &ErrorState{
 			Code:    "step_limit_hit",
 			Message: "run stopped because max step limit was reached",

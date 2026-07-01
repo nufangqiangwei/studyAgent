@@ -11,16 +11,16 @@ func TestMachineConsumesRuntimeEventDispatcherEvents(t *testing.T) {
 	ctx := context.Background()
 	states := NewMemoryStateStore()
 	events := NewMemoryEventStore()
+	effects := NewMemoryEffectStore()
 	registry := NewReducerRegistry()
 	registry.Register(CoreRunReducer{})
-	executor := &fakeExecutor{}
 
 	initial := NewRunState("run_1", 2)
 	if err := states.Save(ctx, initial); err != nil {
 		t.Fatalf("Save returned error: %v", err)
 	}
 
-	machine := NewMachine(states, events, registry, executor)
+	machine := NewMachine(states, events, effects, registry)
 	dispatcher, err := runtimeevent.NewDispatcher(runtimeevent.DefaultRegistry(), machine)
 	if err != nil {
 		t.Fatalf("NewDispatcher returned error: %v", err)
@@ -42,14 +42,18 @@ func TestMachineConsumesRuntimeEventDispatcherEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
 	}
-	if storedState.Phase != PhaseRunning {
-		t.Fatalf("Phase = %q, want %q", storedState.Phase, PhaseRunning)
+	if storedState.Phase != PhaseWaiting || storedState.Waiting == nil || storedState.Waiting.Reason != "model_result" {
+		t.Fatalf("state = %#v, want waiting model_result", storedState)
 	}
 	if storedState.LastEventID != event.ID {
 		t.Fatalf("LastEventID = %q, want %q", storedState.LastEventID, event.ID)
 	}
-	if len(executor.effects) != 1 || executor.effects[0].Type != EffectCallModel {
-		t.Fatalf("effects = %#v, want one model.call effect", executor.effects)
+	storedEffects, err := effects.ListPending(ctx, "run_1")
+	if err != nil {
+		t.Fatalf("ListPending returned error: %v", err)
+	}
+	if len(storedEffects) != 1 || storedEffects[0].Effect.Type != EffectCallModel {
+		t.Fatalf("effects = %#v, want one model.call effect", storedEffects)
 	}
 }
 

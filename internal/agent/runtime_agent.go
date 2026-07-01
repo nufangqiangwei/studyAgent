@@ -1,26 +1,29 @@
 package agent
 
 import (
+	"agent/internal/agent/runner"
 	"agent/internal/capability/tool"
 	"agent/internal/foundation/llmClient"
 	"agent/internal/llm"
 	"agent/internal/prompt"
+	"agent/internal/state"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
-	"time"
 )
 
 type runtimeAgentParts struct {
-	runtime       *llm.Runtime
-	promptBuilder *prompt.NativeBuilder
-	tools         []tool.Tool
-	profile       llm.AgentProfile
-	workPath      string
-	out           io.Writer
+	runtime          *llm.Runtime
+	promptBuilder    *prompt.NativeBuilder
+	toolRegistry     *tool.Manage
+	tools            []tool.Tool
+	profile          llm.AgentProfile
+	workPath         string
+	out              io.Writer
+	maxSteps         int
+	runtimeStoreRoot string
 }
 
 func newRuntimeAgentParts(ctx context.Context, opts CreatAgentOptions, agentName string, promptOptions prompt.Options) (runtimeAgentParts, error) {
@@ -47,14 +50,17 @@ func newRuntimeAgentParts(ctx context.Context, opts CreatAgentOptions, agentName
 	return runtimeAgentParts{
 		runtime:       rt,
 		promptBuilder: builder,
+		toolRegistry:  toolManage,
 		tools:         registeredTools,
 		profile: llm.AgentProfile{
 			Name:  agentName,
 			Model: opts.Model,
 			Tools: toolDefinitions(registeredTools),
 		},
-		workPath: opts.WorkDir,
-		out:      opts.Out,
+		workPath:         opts.WorkDir,
+		out:              opts.Out,
+		maxSteps:         opts.MaxSteps,
+		runtimeStoreRoot: resolveRuntimeStoreRoot(opts.Session),
 	}, nil
 }
 
@@ -75,24 +81,58 @@ func runRuntimeAgent(ctx context.Context, parts runtimeAgentParts, userInput str
 	profile.Model = promptOutput.Model
 	profile.Temperature = promptOutput.Temperature
 
-	result, err := parts.runtime.CallModel(ctx, llm.ModelCallInput{
-		RunID:    newRunID(),
-		Step:     1,
+	runnerOpts := runner.Options{
+		LLM:          parts.runtime,
+		ToolRegistry: parts.toolRegistry,
+		MaxSteps:     parts.maxSteps,
+	}
+	if parts.runtimeStoreRoot != "" {
+		stores, err := state.NewFileStore(parts.runtimeStoreRoot)
+		if err != nil {
+			return fmt.Errorf("create runtime state store: %w", err)
+		}
+		runnerOpts.StateStore = stores.States
+		runnerOpts.EventStore = stores.Events
+		runnerOpts.EffectStore = stores.Effects
+		runnerOpts.EventInbox = stores.Inbox
+	}
+
+	reactRunner, err := runner.NewAgentRunner(runnerOpts)
+	if err != nil {
+		return err
+	}
+
+	result, err := reactRunner.Run(ctx, runner.Task{
+		Input:    userInput,
 		Agent:    profile,
 		Messages: promptOutput.Messages,
+		MaxSteps: parts.maxSteps,
 	})
 	if err != nil {
 		return err
 	}
-	if len(result.ToolCalls) > 0 {
-		return fmt.Errorf("agent %s: model requested %d tool call(s), but tool execution is handled by the external runner", profile.Name, len(result.ToolCalls))
-	}
-	if parts.out != nil && strings.TrimSpace(result.Response.Content) != "" {
-		if _, err := fmt.Fprintln(parts.out, result.Response.Content); err != nil {
+	if parts.out != nil && strings.TrimSpace(result.FinalAnswer) != "" {
+		if _, err := fmt.Fprintln(parts.out, result.FinalAnswer); err != nil {
 			return fmt.Errorf("write agent output: %w", err)
 		}
 	}
 	return nil
+}
+
+type sessionDirProvider interface {
+	SessionDir() string
+}
+
+func resolveRuntimeStoreRoot(recorder interface{}) string {
+	provider, ok := recorder.(sessionDirProvider)
+	if !ok {
+		return ""
+	}
+	sessionDir := strings.TrimSpace(provider.SessionDir())
+	if sessionDir == "" {
+		return ""
+	}
+	return filepath.Join(sessionDir, "runtime")
 }
 
 func toolDefinitions(tools []tool.Tool) []llmClient.ToolDefinition {
@@ -115,12 +155,4 @@ func cloneTools(tools []tool.Tool) []tool.Tool {
 		return nil
 	}
 	return append([]tool.Tool(nil), tools...)
-}
-
-func newRunID() string {
-	var raw [8]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return "run_" + time.Now().UTC().Format("20060102150405.000000000")
-	}
-	return "run_" + hex.EncodeToString(raw[:])
 }

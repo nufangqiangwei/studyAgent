@@ -5,9 +5,12 @@ import "encoding/json"
 type EffectType string
 
 const (
-	EffectNoop      EffectType = "noop"
-	EffectCallModel EffectType = "model.call"
-	EffectFinalize  EffectType = "run.finalize"
+	EffectNoop         EffectType = "noop"
+	EffectCallModel    EffectType = "model.call"
+	EffectDispatchTool EffectType = "tool.dispatch"
+	EffectCompleteRun  EffectType = "run.complete"
+	EffectFailRun      EffectType = "run.fail"
+	EffectFinalize     EffectType = "run.finalize"
 )
 
 type Effect struct {
@@ -23,4 +26,10 @@ func NewEffect(runID string, typ EffectType) Effect {
 		RunID: runID,
 		Type:  typ,
 	}
+}
+
+func (e Effect) Clone() Effect {
+	cloned := e
+	cloned.Payload = append(json.RawMessage(nil), e.Payload...)
+	return cloned
 }

@@ -86,9 +86,10 @@ func TestRunCreatesSessionDirectoryWithoutRuntimeConversationRecords(t *testing.
 	}
 }
 
-func TestRunReturnsErrorForToolCallsUntilExternalRunnerExists(t *testing.T) {
+func TestRunExecutesToolCallsThroughRunner(t *testing.T) {
 	homeDir := configureTestHome(t)
 	workDir := t.TempDir()
+	var requestCount int
 	var sawToolResultMessage bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload struct {
@@ -103,13 +104,23 @@ func TestRunReturnsErrorForToolCallsUntilExternalRunnerExists(t *testing.T) {
 		if len(payload.Tools) == 0 {
 			t.Fatal("request missing tool definitions")
 		}
+		requestCount++
+		hasToolResult := false
 		for _, message := range payload.Messages {
 			if message.Role == "tool" {
 				sawToolResultMessage = true
+				hasToolResult = true
 			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
+		if hasToolResult {
+			_, _ = w.Write([]byte(`{
+  "model": "gpt-test",
+  "choices": [{"finish_reason": "stop", "message": {"content": "tool flow complete"}}]
+}`))
+			return
+		}
 		_, _ = w.Write([]byte(`{
   "model": "gpt-test",
   "choices": [{
@@ -138,12 +149,18 @@ func TestRunReturnsErrorForToolCallsUntilExternalRunnerExists(t *testing.T) {
 
 	var out bytes.Buffer
 	var errOut bytes.Buffer
-	err := Run(context.Background(), []string{"--workdir", workDir, "run", "build a feature"}, strings.NewReader(""), &out, &errOut)
-	if err == nil || !strings.Contains(err.Error(), "model requested 1 tool call") {
-		t.Fatalf("Run error = %v, want unsupported tool-call error", err)
+	err := Run(context.Background(), []string{"--workdir", workDir, "run", "build a feature"}, strings.NewReader("backend\n"), &out, &errOut)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
 	}
-	if sawToolResultMessage {
-		t.Fatal("llm unexpectedly executed tool flow and sent a tool result message")
+	if requestCount != 2 {
+		t.Fatalf("requests = %d, want 2", requestCount)
+	}
+	if !sawToolResultMessage {
+		t.Fatal("llm did not receive tool result message")
+	}
+	if !strings.Contains(out.String(), "tool flow complete") {
+		t.Fatalf("output missing final answer:\n%s", out.String())
 	}
 	wantAgents := []string{agent.AnalyzeAgentName, agent.DefaultAgentName, agent.ToolsTesterAgentName}
 	if got := agent.RegisteredAgentNames(); !reflect.DeepEqual(got, wantAgents) {
