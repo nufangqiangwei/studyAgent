@@ -7,7 +7,9 @@ type EffectType string
 const (
 	EffectNoop         EffectType = "noop"
 	EffectCallModel    EffectType = "model.call"
+	EffectExecuteModel EffectType = "model.execute"
 	EffectDispatchTool EffectType = "tool.dispatch"
+	EffectExecuteTool  EffectType = "tool.execute"
 	EffectCompleteRun  EffectType = "run.complete"
 	EffectFailRun      EffectType = "run.fail"
 	EffectFinalize     EffectType = "run.finalize"

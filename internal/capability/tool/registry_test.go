@@ -7,6 +7,7 @@ import (
 	"agent/internal/foundation/policy"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -198,6 +199,37 @@ func TestManageAsksForPolicyConfirmation(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Policy confirmation required") {
 		t.Fatalf("confirmation prompt missing:\n%s", out.String())
+	}
+}
+
+func TestManageAsyncPolicyApprovalReturnsStructuredError(t *testing.T) {
+	tool := &recordingTool{name: "network", result: Result{Content: "sent"}}
+	registry := NewManage(WithPolicy(policy.New(policy.ModeModify)), WithAsyncPolicyApproval())
+	if err := registry.register(tool); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+
+	_, err := registry.Execute(context.Background(), "network", json.RawMessage(`{}`))
+	if err == nil {
+		t.Fatal("Execute returned nil error")
+	}
+	var approval *ApprovalRequiredError
+	if !errors.As(err, &approval) {
+		t.Fatalf("error = %T %[1]v, want ApprovalRequiredError", err)
+	}
+	if approval.Request.ToolName != "network" || approval.Result.Decision != policy.Ask {
+		t.Fatalf("approval = %#v, want network ask decision", approval)
+	}
+	if tool.called {
+		t.Fatal("tool executed before async approval")
+	}
+
+	result, err := registry.ExecuteApproved(context.Background(), "network", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("ExecuteApproved returned error: %v", err)
+	}
+	if result.Content != "sent" || !tool.called {
+		t.Fatalf("result = %#v called=%t, want approved execution", result, tool.called)
 	}
 }
 

@@ -18,6 +18,8 @@ const (
 	EventToolCallFailed               Type = "ToolCallFailed"
 	EventUserApprovalRequired         Type = "UserApprovalRequired"
 	EventUserApprovalReceived         Type = "UserApprovalReceived"
+	EventUserInputRequested           Type = "UserInputRequested"
+	EventUserInputReceived            Type = "UserInputReceived"
 	EventExternalCallbackReceived     Type = "ExternalCallbackReceived"
 	EventScheduledResumeDue           Type = "ScheduledResumeDue"
 	EventContextPersisted             Type = "ContextPersisted"
@@ -47,6 +49,7 @@ func BuiltinDefinitions() []Definition {
 		mustReach(EventToolCallCompleted, "continues a run after a tool result"),
 		mustReach(EventToolCallFailed, "continues a run after a tool failure"),
 		mustReach(EventUserApprovalReceived, "continues a run after user approval"),
+		mustReach(EventUserInputReceived, "continues a run after user input"),
 		mustReach(EventExternalCallbackReceived, "continues a run after an external callback"),
 		mustReach(EventScheduledResumeDue, "continues a run after a scheduled resume"),
 		mustReach(EventStepLimitReached, "marks a run as failed after reaching its step limit"),
@@ -56,6 +59,7 @@ func BuiltinDefinitions() []Definition {
 		canIntercept(EventToolCallRequested, "observes a requested tool call"),
 		canIntercept(EventToolCallDispatched, "observes a dispatched tool call"),
 		canIntercept(EventUserApprovalRequired, "observes a required user approval"),
+		canIntercept(EventUserInputRequested, "observes a required user input"),
 		canIntercept(EventContextPersisted, "observes persisted run context"),
 		canIntercept(EventContextCompressed, "observes context compression"),
 		canIntercept(EventEffectStarted, "observes an effect before execution"),

@@ -92,6 +92,20 @@ func TestCoreRunReducerFailureCancellationWaitingAndStepLimit(t *testing.T) {
 	if limitHit.Phase != PhaseFailed || limitHit.Error == nil || limitHit.Error.Code != "step_limit_hit" {
 		t.Fatalf("limit state = %#v, want failed step_limit_hit", limitHit)
 	}
+
+	waitingRun := NewRunState("run_1", 3)
+	waitingRun.Phase = PhaseWaiting
+	waitingRun.Waiting = &WaitingState{Reason: "model_result"}
+	recovered, effects, err := reducer.Reduce(ctx, waitingRun, mustRuntimeEvent(t, "run_1", runtimeevent.EventRunResumed, nil))
+	if err != nil {
+		t.Fatalf("RunResumed returned error: %v", err)
+	}
+	if recovered.Phase != PhaseWaiting || recovered.Waiting == nil || recovered.Waiting.Reason != "model_result" {
+		t.Fatalf("recovered state = %#v, want unchanged waiting state", recovered)
+	}
+	if len(effects) != 0 {
+		t.Fatalf("RunResumed effects = %#v, want none", effects)
+	}
 }
 
 func TestCoreRunReducerIllegalTransitions(t *testing.T) {

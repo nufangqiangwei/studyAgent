@@ -183,6 +183,41 @@ func (s *FileStateStore) Load(ctx context.Context, runID string) (RunState, erro
 	return out, err
 }
 
+func (s *FileStateStore) List(ctx context.Context) ([]RunState, error) {
+	if s == nil {
+		return nil, fmt.Errorf("state file store is nil")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var out []RunState
+	err := withFileStorePathLock(ctx, s.path, s.now, func() error {
+		records, err := readJSONLRecords[fileStateRecord](ctx, s.path)
+		if err != nil {
+			return err
+		}
+		latest := make(map[string]RunState, len(records))
+		order := make([]string, 0, len(records))
+		for _, record := range records {
+			st := record.State
+			if st.RunID == "" {
+				continue
+			}
+			if _, exists := latest[st.RunID]; !exists {
+				order = append(order, st.RunID)
+			}
+			latest[st.RunID] = cloneRunState(st)
+		}
+		out = make([]RunState, 0, len(order))
+		for _, runID := range order {
+			out = append(out, cloneRunState(latest[runID]))
+		}
+		return nil
+	})
+	return out, err
+}
+
 func (s *FileStateStore) Save(ctx context.Context, st RunState) error {
 	if s == nil {
 		return fmt.Errorf("state file store is nil")

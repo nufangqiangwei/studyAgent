@@ -13,6 +13,7 @@ type CoreRunReducer struct{}
 func (r CoreRunReducer) Match(ctx context.Context, s RunState, event runtimeevent.Event) bool {
 	switch event.Type {
 	case runtimeevent.EventRunStarted,
+		runtimeevent.EventRunResumed,
 		runtimeevent.EventRunCompleted,
 		runtimeevent.EventRunFailed,
 		runtimeevent.EventRunCancelled,
@@ -37,6 +38,12 @@ func (r CoreRunReducer) Reduce(ctx context.Context, s RunState, event runtimeeve
 		return s, []Effect{
 			NewEffect(s.RunID, EffectCallModel),
 		}, nil
+
+	case runtimeevent.EventRunResumed:
+		if s.IsTerminal() {
+			return s, nil, nil
+		}
+		return s, nil, nil
 
 	case runtimeevent.EventRunCompleted:
 		if s.IsTerminal() {

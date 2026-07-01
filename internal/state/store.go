@@ -8,6 +8,7 @@ import (
 
 type StateStore interface {
 	Load(ctx context.Context, runID string) (RunState, error)
+	List(ctx context.Context) ([]RunState, error)
 	Save(ctx context.Context, state RunState) error
 }
 

@@ -26,6 +26,18 @@ type PolicyRequester interface {
 
 type Result = builtin.Result
 
+type ApprovalRequiredError struct {
+	Request policy.Request
+	Result  policy.Result
+}
+
+func (e *ApprovalRequiredError) Error() string {
+	if e == nil {
+		return "policy approval required"
+	}
+	return fmt.Sprintf("policy approval required for tool %q: %s", e.Request.ToolName, e.Result.Reason)
+}
+
 type policyDecisionEventPayload struct {
 	Request           policy.Request `json:"request"`
 	Result            policy.Result  `json:"result"`
@@ -34,8 +46,9 @@ type policyDecisionEventPayload struct {
 }
 
 type Manage struct {
-	tools  map[string]Tool
-	policy policy.Checker
+	tools               map[string]Tool
+	policy              policy.Checker
+	asyncPolicyApproval bool
 }
 
 var (
@@ -69,6 +82,12 @@ func WithPolicy(checker policy.Checker) ManageOption {
 		if checker != nil {
 			manager.policy = checker
 		}
+	}
+}
+
+func WithAsyncPolicyApproval() ManageOption {
+	return func(manager *Manage) {
+		manager.asyncPolicyApproval = true
 	}
 }
 
@@ -149,8 +168,9 @@ func (r *Manage) Subset(names []string, options ...ManageOption) (*Manage, error
 		return nil, fmt.Errorf("select tools: nil Manage")
 	}
 	manager := &Manage{
-		tools:  make(map[string]Tool, len(names)),
-		policy: r.policy,
+		tools:               make(map[string]Tool, len(names)),
+		policy:              r.policy,
+		asyncPolicyApproval: r.asyncPolicyApproval,
 	}
 	if manager.policy == nil {
 		manager.policy = policy.Default()
@@ -191,6 +211,12 @@ func (r *Manage) Execute(ctx context.Context, name string, input json.RawMessage
 			return Result{}, err
 		}
 	case policy.Ask:
+		if r.asyncPolicyApproval {
+			if err := recordPolicyDecisionEvent(ctx, request, decision, nil, "approval required"); err != nil {
+				return Result{}, err
+			}
+			return Result{}, &ApprovalRequiredError{Request: request, Result: decision}
+		}
 		confirmed, err := confirmPolicyDecision(ctx, request, decision)
 		if err != nil {
 			if recordErr := recordPolicyDecisionEvent(ctx, request, decision, nil, err.Error()); recordErr != nil {
@@ -214,6 +240,17 @@ func (r *Manage) Execute(ctx context.Context, name string, input json.RawMessage
 			return Result{}, err
 		}
 		return Result{}, fmt.Errorf("policy returned unknown decision %q for tool %q", decision.Decision, name)
+	}
+	return tool.Execute(ctx, input)
+}
+
+func (r *Manage) ExecuteApproved(ctx context.Context, name string, input json.RawMessage) (Result, error) {
+	if r == nil {
+		return Result{}, fmt.Errorf("tool Manage is nil")
+	}
+	tool, ok := r.tools[name]
+	if !ok {
+		return Result{}, fmt.Errorf("unknown tool %q", name)
 	}
 	return tool.Execute(ctx, input)
 }

@@ -3,17 +3,23 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
 	"agent/internal/capability/tool"
 	runtimeevent "agent/internal/event"
+	"agent/internal/foundation/llmClient"
 	"agent/internal/llm"
 	"agent/internal/state"
 )
 
 type ToolRegistry interface {
 	Execute(ctx context.Context, name string, input json.RawMessage) (tool.Result, error)
+}
+
+type ApprovedToolRegistry interface {
+	ExecuteApproved(ctx context.Context, name string, input json.RawMessage) (tool.Result, error)
 }
 
 type EffectDispatcher interface {
@@ -49,15 +55,17 @@ type EffectWorker interface {
 }
 
 type EffectWorkerOptions struct {
-	StateStore state.StateStore
-	LLM        *llm.Runtime
-	Tools      ToolRegistry
+	StateStore             state.StateStore
+	LLM                    *llm.Runtime
+	Tools                  ToolRegistry
+	SuspendUserInteraction bool
 }
 
 type RuntimeEffectWorker struct {
-	states state.StateStore
-	llm    *llm.Runtime
-	tools  ToolRegistry
+	states                 state.StateStore
+	llm                    *llm.Runtime
+	tools                  ToolRegistry
+	suspendUserInteraction bool
 }
 
 func NewRuntimeEffectWorker(opts EffectWorkerOptions) (*RuntimeEffectWorker, error) {
@@ -68,9 +76,10 @@ func NewRuntimeEffectWorker(opts EffectWorkerOptions) (*RuntimeEffectWorker, err
 		return nil, fmt.Errorf("runner effect worker: llm runtime is required")
 	}
 	return &RuntimeEffectWorker{
-		states: opts.StateStore,
-		llm:    opts.LLM,
-		tools:  opts.Tools,
+		states:                 opts.StateStore,
+		llm:                    opts.LLM,
+		tools:                  opts.Tools,
+		suspendUserInteraction: opts.SuspendUserInteraction,
 	}, nil
 }
 
@@ -87,8 +96,12 @@ func (w *RuntimeEffectWorker) Execute(ctx context.Context, effect state.Effect) 
 		return nil, nil
 	case state.EffectCallModel:
 		return w.executeCallModel(ctx, effect)
+	case state.EffectExecuteModel:
+		return w.executeExecuteModel(ctx, effect)
 	case state.EffectDispatchTool:
 		return w.executeDispatchTool(ctx, effect)
+	case state.EffectExecuteTool:
+		return w.executeExecuteTool(ctx, effect)
 	case state.EffectCompleteRun:
 		return w.executeCompleteRun(effect)
 	case state.EffectFailRun:
@@ -134,13 +147,40 @@ func (w *RuntimeEffectWorker) executeCallModel(ctx context.Context, effect state
 		return nil, err
 	}
 
-	result, err := w.llm.CallModel(ctx, input)
+	return []runtimeevent.Event{requestEvent}, nil
+}
+
+func (w *RuntimeEffectWorker) executeExecuteModel(ctx context.Context, effect state.Effect) ([]runtimeevent.Event, error) {
+	runState, err := w.states.Load(ctx, effect.RunID)
+	if err != nil {
+		return nil, err
+	}
+	data, err := loadRunData(runState)
+	if err != nil {
+		return nil, err
+	}
+
+	var payload ModelRequestCreatedPayload
+	if err := json.Unmarshal(effect.Payload, &payload); err != nil {
+		return nil, fmt.Errorf("runner: decode execute model effect: %w", err)
+	}
+	if payload.Step <= 0 {
+		payload.Step = runState.Step + 1
+	}
+	input := llm.ModelCallInput{
+		RunID:    effect.RunID,
+		Step:     payload.Step,
+		Agent:    data.Agent,
+		Messages: cloneMessages(data.Messages),
+	}
+
+	result, err := w.llm.CompleteRequest(ctx, input, payload.Request)
 	if err != nil {
 		failedEvents, failedErr := w.modelFailedEvent(effect, err)
 		if failedErr != nil {
 			return nil, failedErr
 		}
-		return append([]runtimeevent.Event{requestEvent}, failedEvents...), nil
+		return failedEvents, nil
 	}
 
 	responseEvent, err := newRuntimeEvent(runtimeevent.EventModelResponseReceived, effect.RunID, ModelResponseReceivedPayload{
@@ -154,7 +194,7 @@ func (w *RuntimeEffectWorker) executeCallModel(ctx context.Context, effect state
 	if err != nil {
 		return nil, err
 	}
-	return []runtimeevent.Event{requestEvent, responseEvent}, nil
+	return []runtimeevent.Event{responseEvent}, nil
 }
 
 func (w *RuntimeEffectWorker) executeDispatchTool(ctx context.Context, effect state.Effect) ([]runtimeevent.Event, error) {
@@ -187,21 +227,53 @@ func (w *RuntimeEffectWorker) executeDispatchTool(ctx context.Context, effect st
 		return nil, err
 	}
 
+	return []runtimeevent.Event{requested, dispatched}, nil
+}
+
+func (w *RuntimeEffectWorker) executeExecuteTool(ctx context.Context, effect state.Effect) ([]runtimeevent.Event, error) {
+	var payload DispatchToolPayload
+	if err := json.Unmarshal(effect.Payload, &payload); err != nil {
+		return nil, fmt.Errorf("runner: decode execute tool effect: %w", err)
+	}
+	call := cloneToolCall(payload.ToolCall)
+	if strings.TrimSpace(call.ID) == "" {
+		return nil, fmt.Errorf("runner: tool call id is required")
+	}
+	if strings.TrimSpace(call.Name) == "" {
+		return nil, fmt.Errorf("runner: tool name is required")
+	}
+
+	if w.suspendUserInteraction && call.Name == "ask_user" {
+		requested, err := w.userInputRequestedEvent(effect, call)
+		if err != nil {
+			return nil, err
+		}
+		return []runtimeevent.Event{requested}, nil
+	}
+
 	if w.tools == nil {
 		failed, err := w.toolFailedEvent(effect, call.ID, call.Name, call.Input, fmt.Errorf("tool registry is required"))
 		if err != nil {
 			return nil, err
 		}
-		return []runtimeevent.Event{requested, dispatched, failed}, nil
+		return []runtimeevent.Event{failed}, nil
 	}
 
-	result, err := w.tools.Execute(ctx, call.Name, call.Input)
+	result, err := w.executeToolCall(ctx, payload, call)
 	if err != nil {
+		var approvalRequired *tool.ApprovalRequiredError
+		if errors.As(err, &approvalRequired) {
+			required, requiredErr := w.userApprovalRequiredEvent(effect, call, approvalRequired)
+			if requiredErr != nil {
+				return nil, requiredErr
+			}
+			return []runtimeevent.Event{required}, nil
+		}
 		failed, failedErr := w.toolFailedEvent(effect, call.ID, call.Name, call.Input, err)
 		if failedErr != nil {
 			return nil, failedErr
 		}
-		return []runtimeevent.Event{requested, dispatched, failed}, nil
+		return []runtimeevent.Event{failed}, nil
 	}
 
 	completed, err := newRuntimeEvent(runtimeevent.EventToolCallCompleted, effect.RunID, ToolCallEventPayload{
@@ -217,7 +289,54 @@ func (w *RuntimeEffectWorker) executeDispatchTool(ctx context.Context, effect st
 	if err != nil {
 		return nil, err
 	}
-	return []runtimeevent.Event{requested, dispatched, completed}, nil
+	return []runtimeevent.Event{completed}, nil
+}
+
+func (w *RuntimeEffectWorker) executeToolCall(ctx context.Context, payload DispatchToolPayload, call llmClient.ToolCall) (tool.Result, error) {
+	if payload.Approved {
+		if approved, ok := w.tools.(ApprovedToolRegistry); ok {
+			return approved.ExecuteApproved(ctx, call.Name, call.Input)
+		}
+	}
+	return w.tools.Execute(ctx, call.Name, call.Input)
+}
+
+func (w *RuntimeEffectWorker) userInputRequestedEvent(effect state.Effect, call llmClient.ToolCall) (runtimeevent.Event, error) {
+	var request struct {
+		Question string `json:"question"`
+		Prompt   string `json:"prompt"`
+		Default  string `json:"default"`
+	}
+	if err := json.Unmarshal(call.Input, &request); err != nil {
+		return runtimeevent.Event{}, fmt.Errorf("runner: decode ask_user input: %w", err)
+	}
+	question := strings.TrimSpace(request.Question)
+	if question == "" {
+		question = strings.TrimSpace(request.Prompt)
+	}
+	if question == "" {
+		return runtimeevent.Event{}, fmt.Errorf("runner: ask_user question is required")
+	}
+	return newRuntimeEvent(runtimeevent.EventUserInputRequested, effect.RunID, UserInputRequestedPayload{
+		ToolCallID: call.ID,
+		ToolName:   call.Name,
+		Arguments:  append(json.RawMessage(nil), call.Input...),
+		Question:   question,
+		Default:    strings.TrimSpace(request.Default),
+	}, effect.ID)
+}
+
+func (w *RuntimeEffectWorker) userApprovalRequiredEvent(effect state.Effect, call llmClient.ToolCall, approval *tool.ApprovalRequiredError) (runtimeevent.Event, error) {
+	if approval == nil {
+		return runtimeevent.Event{}, fmt.Errorf("runner: approval error is nil")
+	}
+	return newRuntimeEvent(runtimeevent.EventUserApprovalRequired, effect.RunID, UserApprovalRequiredPayload{
+		ToolCallID: call.ID,
+		ToolName:   call.Name,
+		Arguments:  append(json.RawMessage(nil), call.Input...),
+		Request:    approval.Request,
+		Decision:   approval.Result,
+	}, effect.ID)
 }
 
 func (w *RuntimeEffectWorker) executeCompleteRun(effect state.Effect) ([]runtimeevent.Event, error) {

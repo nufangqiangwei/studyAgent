@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -29,7 +30,25 @@ func (s *MemoryStateStore) Load(ctx context.Context, runID string) (RunState, er
 		return RunState{}, fmt.Errorf("state not found: %s", runID)
 	}
 
-	return st, nil
+	return cloneRunState(st), nil
+}
+
+func (s *MemoryStateStore) List(ctx context.Context) ([]RunState, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	runIDs := make([]string, 0, len(s.states))
+	for runID := range s.states {
+		runIDs = append(runIDs, runID)
+	}
+	sort.Strings(runIDs)
+
+	out := make([]RunState, 0, len(runIDs))
+	for _, runID := range runIDs {
+		out = append(out, cloneRunState(s.states[runID]))
+	}
+	return out, nil
 }
 
 func (s *MemoryStateStore) Save(ctx context.Context, st RunState) error {
@@ -40,7 +59,7 @@ func (s *MemoryStateStore) Save(ctx context.Context, st RunState) error {
 		return fmt.Errorf("run_id is required")
 	}
 
-	s.states[st.RunID] = st
+	s.states[st.RunID] = cloneRunState(st)
 	return nil
 }
 

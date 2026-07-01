@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	runtimeevent "agent/internal/event"
 	"agent/internal/foundation/llmClient"
+	"agent/internal/foundation/policy"
 	"agent/internal/llm"
 	"agent/internal/state"
 )
@@ -34,12 +36,50 @@ type RunResult struct {
 	Error       *state.ErrorState
 }
 
+type AdvanceStatus string
+
+const (
+	AdvanceStatusEventProcessed   AdvanceStatus = "event_processed"
+	AdvanceStatusEffectDispatched AdvanceStatus = "effect_dispatched"
+	AdvanceStatusWaitingForEffect AdvanceStatus = "waiting_for_effect"
+	AdvanceStatusSuspended        AdvanceStatus = "suspended"
+	AdvanceStatusTerminal         AdvanceStatus = "terminal"
+)
+
+type LoopAdvanceResult struct {
+	RunID  string               `json:"run_id"`
+	Status AdvanceStatus        `json:"status"`
+	State  state.RunState       `json:"state"`
+	Event  *runtimeevent.Event  `json:"event,omitempty"`
+	Effect *state.Effect        `json:"effect,omitempty"`
+	Events []runtimeevent.Event `json:"events,omitempty"`
+}
+
+type RecoverResult struct {
+	Runs []RecoverableRun `json:"runs"`
+}
+
+type RecoverableRun struct {
+	RunID          string         `json:"run_id"`
+	State          state.RunState `json:"state"`
+	PendingEvents  int            `json:"pending_events"`
+	PendingEffects int            `json:"pending_effects"`
+}
+
+type UserInteraction interface {
+	ReceiveInput(ctx context.Context, request UserInputRequestedPayload) (UserInputReceivedPayload, error)
+	ReceiveApproval(ctx context.Context, request UserApprovalRequiredPayload) (UserApprovalReceivedPayload, error)
+}
+
 type toolCallStatus string
 
 const (
-	toolCallPending   toolCallStatus = "pending"
-	toolCallCompleted toolCallStatus = "completed"
-	toolCallFailed    toolCallStatus = "failed"
+	toolCallPending         toolCallStatus = "pending"
+	toolCallDispatched      toolCallStatus = "dispatched"
+	toolCallWaitingApproval toolCallStatus = "waiting_approval"
+	toolCallWaitingInput    toolCallStatus = "waiting_input"
+	toolCallCompleted       toolCallStatus = "completed"
+	toolCallFailed          toolCallStatus = "failed"
 )
 
 type pendingToolCall struct {
@@ -82,6 +122,7 @@ type ModelRequestCreatedPayload struct {
 
 type DispatchToolPayload struct {
 	ToolCall llmClient.ToolCall `json:"tool_call"`
+	Approved bool               `json:"approved,omitempty"`
 }
 
 type ToolCallEventPayload struct {
@@ -90,6 +131,36 @@ type ToolCallEventPayload struct {
 	Arguments  json.RawMessage `json:"arguments,omitempty"`
 	Result     llm.ToolResult  `json:"result,omitempty"`
 	Error      string          `json:"error,omitempty"`
+}
+
+type UserInputRequestedPayload struct {
+	ToolCallID string          `json:"tool_call_id"`
+	ToolName   string          `json:"tool_name"`
+	Arguments  json.RawMessage `json:"arguments,omitempty"`
+	Question   string          `json:"question"`
+	Default    string          `json:"default,omitempty"`
+}
+
+type UserInputReceivedPayload struct {
+	ToolCallID  string `json:"tool_call_id"`
+	ToolName    string `json:"tool_name,omitempty"`
+	Answer      string `json:"answer"`
+	UsedDefault bool   `json:"used_default,omitempty"`
+}
+
+type UserApprovalRequiredPayload struct {
+	ToolCallID string          `json:"tool_call_id"`
+	ToolName   string          `json:"tool_name"`
+	Arguments  json.RawMessage `json:"arguments,omitempty"`
+	Request    policy.Request  `json:"request"`
+	Decision   policy.Result   `json:"decision"`
+}
+
+type UserApprovalReceivedPayload struct {
+	ToolCallID string `json:"tool_call_id"`
+	ToolName   string `json:"tool_name,omitempty"`
+	Approved   bool   `json:"approved"`
+	Reason     string `json:"reason,omitempty"`
 }
 
 type CompleteRunPayload struct {

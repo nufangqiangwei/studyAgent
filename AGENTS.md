@@ -538,6 +538,7 @@ internal/
 ## 文档导航
 
 - [文档索引](docs/README.md)：`docs/` 目录内文档清单和维护原则。
+- [项目最新现状](docs/current-status.md)：截至 2026-07-01 的当前实现快照，说明项目如何从 `tmp/` 历史材料演进到现在的事件驱动 runner。
 - [项目概览](docs/project-overview.md)：项目目标、用户场景和非目标。
 - [产品能力](docs/product-goals.md)：CLI agent 应具备的核心能力和学习拆解。
 - [架构设计](docs/architecture.md)：推荐分层、数据流和依赖方向。
@@ -549,11 +550,12 @@ internal/
 
 ## 推荐阅读顺序
 
-1. 先读 [项目概览](docs/project-overview.md)，明确这个项目要做什么。
-2. 再读 [产品能力](docs/product-goals.md)，把目标产品拆成可学习的能力点。
-3. 然后读 [架构设计](docs/architecture.md)、[模块规划](docs/modules.md) 和 [代码模块实现](docs/code-modules.md)，确定 Go 代码组织方式。
-4. 如果涉及事件驱动、可恢复运行、状态机或 runtime 拆分，再读 [重构架构指南](docs/refactor-architecture-guide.md)。
-5. 最后按 [开发路线](docs/development-roadmap.md) 分阶段实现，并遵守 [开发约定](docs/development-guide.md)。
+1. 先读 [项目最新现状](docs/current-status.md)，确认当前代码已经演进到哪个阶段，以及哪些旧文档描述已经过时。
+2. 再读 [项目概览](docs/project-overview.md)，明确这个项目要做什么。
+3. 再读 [产品能力](docs/product-goals.md)，把目标产品拆成可学习的能力点。
+4. 然后读 [架构设计](docs/architecture.md)、[模块规划](docs/modules.md) 和 [代码模块实现](docs/code-modules.md)，确定 Go 代码组织方式；若与最新现状冲突，以最新现状和代码为准。
+5. 如果涉及事件驱动、可恢复运行、状态机或 runtime 拆分，再读 [重构架构指南](docs/refactor-architecture-guide.md)。
+6. 最后按 [开发路线](docs/development-roadmap.md) 分阶段实现，并遵守 [开发约定](docs/development-guide.md)。
 
 ## 本地辅助文档目录约定
 

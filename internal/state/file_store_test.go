@@ -58,6 +58,48 @@ func TestFileStorePersistsMachineWritesAcrossOpen(t *testing.T) {
 	}
 }
 
+func TestFileStateStoreListReturnsLatestStatePerRunAcrossOpen(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	stores, err := NewFileStore(root)
+	if err != nil {
+		t.Fatalf("NewFileStore returned error: %v", err)
+	}
+
+	run1 := NewRunState("run_1", 2)
+	run2 := NewRunState("run_2", 3)
+	run2.Phase = PhaseWaiting
+	run2.Waiting = &WaitingState{Reason: "model_result"}
+	if err := stores.States.Save(ctx, run1); err != nil {
+		t.Fatalf("Save run1 returned error: %v", err)
+	}
+	if err := stores.States.Save(ctx, run2); err != nil {
+		t.Fatalf("Save run2 returned error: %v", err)
+	}
+	run1.Phase = PhaseCompleted
+	if err := stores.States.Save(ctx, run1); err != nil {
+		t.Fatalf("Save updated run1 returned error: %v", err)
+	}
+
+	reopened, err := NewFileStore(root)
+	if err != nil {
+		t.Fatalf("reopen NewFileStore returned error: %v", err)
+	}
+	listed, err := reopened.States.List(ctx)
+	if err != nil {
+		t.Fatalf("List returned error: %v", err)
+	}
+	if len(listed) != 2 {
+		t.Fatalf("states = %#v, want two latest states", listed)
+	}
+	if listed[0].RunID != "run_1" || listed[0].Phase != PhaseCompleted {
+		t.Fatalf("first state = %#v, want latest completed run_1", listed[0])
+	}
+	if listed[1].RunID != "run_2" || listed[1].Phase != PhaseWaiting {
+		t.Fatalf("second state = %#v, want waiting run_2", listed[1])
+	}
+}
+
 func TestFileEventStoreSkipsTruncatedTailAndContinuesAppending(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

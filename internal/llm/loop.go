@@ -107,13 +107,20 @@ func (r *Runtime) CallModel(ctx context.Context, input ModelCallInput) (ModelCal
 	if r == nil {
 		return ModelCallResult{}, fmt.Errorf("llm: llm is nil")
 	}
-	if r.llm == nil {
-		return ModelCallResult{}, fmt.Errorf("llm: llm client is required")
-	}
 
 	request, err := r.BuildRequest(ctx, input)
 	if err != nil {
 		return ModelCallResult{}, err
+	}
+	return r.CompleteRequest(ctx, input, request)
+}
+
+func (r *Runtime) CompleteRequest(ctx context.Context, input ModelCallInput, request llmClient.Request) (ModelCallResult, error) {
+	if r == nil {
+		return ModelCallResult{}, fmt.Errorf("llm: llm is nil")
+	}
+	if r.llm == nil {
+		return ModelCallResult{}, fmt.Errorf("llm: llm client is required")
 	}
 	if r.logger != nil {
 		r.logger.Debugf("llm calling model agent=%s model=%s run_id=%s step=%d", input.Agent.Name, request.Model, input.RunID, input.Step)
