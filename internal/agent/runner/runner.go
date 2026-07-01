@@ -3,11 +3,15 @@ package runner
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	runtimeevent "agent/internal/event"
 	"agent/internal/llm"
 	"agent/internal/state"
 )
+
+const defaultLeaseDuration = 5 * time.Minute
 
 type Options struct {
 	Dispatcher       *runtimeevent.Dispatcher
@@ -23,6 +27,8 @@ type Options struct {
 	Reducers         *state.ReducerRegistry
 	MaxSteps         int
 	Source           string
+	WorkerOwner      string
+	LeaseDuration    time.Duration
 }
 
 type AgentRunner struct {
@@ -38,6 +44,8 @@ type AgentRunner struct {
 	events           state.EventStore
 	maxSteps         int
 	source           string
+	workerOwner      string
+	leaseDuration    time.Duration
 }
 
 func NewAgentRunner(opts Options) (*AgentRunner, error) {
@@ -100,6 +108,14 @@ func NewAgentRunner(opts Options) (*AgentRunner, error) {
 	if source == "" {
 		source = "agent.runner"
 	}
+	workerOwner := strings.TrimSpace(opts.WorkerOwner)
+	if workerOwner == "" {
+		workerOwner = state.NewID("worker")
+	}
+	leaseDuration := opts.LeaseDuration
+	if leaseDuration <= 0 {
+		leaseDuration = defaultLeaseDuration
+	}
 
 	runner := &AgentRunner{
 		machine:          machine,
@@ -113,6 +129,8 @@ func NewAgentRunner(opts Options) (*AgentRunner, error) {
 		events:           events,
 		maxSteps:         maxSteps,
 		source:           source,
+		workerOwner:      workerOwner,
+		leaseDuration:    leaseDuration,
 	}
 
 	adapter := runnerStateMachine{runner: runner}
@@ -171,7 +189,7 @@ func (r *AgentRunner) Run(ctx context.Context, task Task) (RunResult, error) {
 			return result, nil
 		}
 
-		stored, ok, err := r.effectStore.Claim(ctx, string(runID))
+		stored, ok, err := r.effectStore.Claim(ctx, string(runID), r.workerOwner, r.leaseDuration)
 		if err != nil {
 			return result, err
 		}
@@ -181,7 +199,10 @@ func (r *AgentRunner) Run(ctx context.Context, task Task) (RunResult, error) {
 
 		nextEvents, err := r.effectWorker.Execute(ctx, stored.Effect)
 		if err != nil {
-			_ = r.effectStore.MarkFailed(ctx, stored.Effect.ID, err)
+			_ = r.effectStore.MarkFailed(ctx, stored.Effect.ID, r.workerOwner, err)
+			return result, err
+		}
+		if _, err := r.effectStore.RenewLease(ctx, stored.Effect.ID, r.workerOwner, r.leaseDuration); err != nil {
 			return result, err
 		}
 		for _, nextEvent := range nextEvents {
@@ -189,11 +210,11 @@ func (r *AgentRunner) Run(ctx context.Context, task Task) (RunResult, error) {
 				nextEvent.RunID = string(runID)
 			}
 			if err := r.HandleEvent(ctx, nextEvent); err != nil {
-				_ = r.effectStore.MarkFailed(ctx, stored.Effect.ID, err)
+				_ = r.effectStore.MarkFailed(ctx, stored.Effect.ID, r.workerOwner, err)
 				return result, err
 			}
 		}
-		if err := r.effectStore.MarkCompleted(ctx, stored.Effect.ID); err != nil {
+		if err := r.effectStore.MarkCompleted(ctx, stored.Effect.ID, r.workerOwner); err != nil {
 			return result, err
 		}
 	}
@@ -256,15 +277,18 @@ func (r *AgentRunner) ProcessNextEvent(ctx context.Context, runID RunID) (bool, 
 	if r.dispatcher == nil {
 		return false, fmt.Errorf("agent runner dispatcher is required")
 	}
-	stored, ok, err := r.eventInbox.Claim(ctx, string(runID))
+	stored, ok, err := r.eventInbox.Claim(ctx, string(runID), r.workerOwner, r.leaseDuration)
 	if err != nil || !ok {
 		return ok, err
 	}
-	if _, err := r.dispatcher.Emit(ctx, stored.Event); err != nil {
-		_ = r.eventInbox.MarkFailed(ctx, stored.Event.ID, err)
+	if _, err := r.eventInbox.RenewLease(ctx, stored.Event.ID, r.workerOwner, r.leaseDuration); err != nil {
 		return true, err
 	}
-	if err := r.eventInbox.MarkProcessed(ctx, stored.Event.ID); err != nil {
+	if _, err := r.dispatcher.Emit(ctx, stored.Event); err != nil {
+		_ = r.eventInbox.MarkFailed(ctx, stored.Event.ID, r.workerOwner, err)
+		return true, err
+	}
+	if err := r.eventInbox.MarkProcessed(ctx, stored.Event.ID, r.workerOwner); err != nil {
 		return true, err
 	}
 	return true, nil

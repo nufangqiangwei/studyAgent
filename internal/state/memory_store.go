@@ -94,12 +94,14 @@ type MemoryEffectStore struct {
 	effects map[string]StoredEffect
 	byRun   map[string][]string
 	order   []string
+	now     func() time.Time
 }
 
 func NewMemoryEffectStore() *MemoryEffectStore {
 	return &MemoryEffectStore{
 		effects: make(map[string]StoredEffect),
 		byRun:   make(map[string][]string),
+		now:     time.Now,
 	}
 }
 
@@ -112,7 +114,7 @@ func (s *MemoryEffectStore) Append(ctx context.Context, effect Effect) (StoredEf
 		return existing.Clone(), nil
 	}
 
-	stored, err := normalizeStoredEffect(effect, time.Now().UTC())
+	stored, err := normalizeStoredEffect(effect, currentStoreTime(s.now))
 	if err != nil {
 		return StoredEffect{}, err
 	}
@@ -140,21 +142,25 @@ func (s *MemoryEffectStore) ListPending(ctx context.Context, runID string) ([]St
 	return out, nil
 }
 
-func (s *MemoryEffectStore) Claim(ctx context.Context, runID string) (StoredEffect, bool, error) {
+func (s *MemoryEffectStore) Claim(ctx context.Context, runID string, owner string, leaseDuration time.Duration) (StoredEffect, bool, error) {
 	_ = ctx
+	owner, err := normalizeLease(owner, leaseDuration)
+	if err != nil {
+		return StoredEffect{}, false, err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	now := currentStoreTime(s.now)
 	ids := s.effectIDs(runID)
 	for _, id := range ids {
 		stored, ok := s.effects[id]
-		if !ok || !stored.Status.PendingWork() {
+		if !ok || !stored.EffectClaimable(now) {
 			continue
 		}
-		if stored.Status == EffectStatusPending {
-			markEffectDispatched(&stored, time.Now().UTC())
-			s.effects[id] = stored.Clone()
-		}
+		markEffectClaimed(&stored, owner, leaseDuration, now)
+		s.effects[id] = stored.Clone()
 		return stored.Clone(), true, nil
 	}
 	return StoredEffect{}, false, nil
@@ -172,12 +178,12 @@ func (s *MemoryEffectStore) MarkDispatched(ctx context.Context, effectID string)
 	if stored.Status == EffectStatusCompleted || stored.Status == EffectStatusFailed {
 		return nil
 	}
-	markEffectDispatched(&stored, time.Now().UTC())
+	markEffectDispatched(&stored, currentStoreTime(s.now))
 	s.effects[effectID] = stored.Clone()
 	return nil
 }
 
-func (s *MemoryEffectStore) MarkCompleted(ctx context.Context, effectID string) error {
+func (s *MemoryEffectStore) MarkCompleted(ctx context.Context, effectID string, owner string) error {
 	_ = ctx
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -186,7 +192,16 @@ func (s *MemoryEffectStore) MarkCompleted(ctx context.Context, effectID string) 
 	if !ok {
 		return fmt.Errorf("effect not found: %s", effectID)
 	}
-	now := time.Now().UTC()
+	if stored.Status == EffectStatusCompleted {
+		return validateTaskOwner(stored.Owner, owner)
+	}
+	if stored.Status == EffectStatusFailed {
+		return validateTaskOwner(stored.Owner, owner)
+	}
+	now := currentStoreTime(s.now)
+	if err := validateLeaseOwner(stored.Owner, stored.LeaseDeadline, owner, now); err != nil {
+		return err
+	}
 	stored.Status = EffectStatusCompleted
 	stored.Error = ""
 	stored.UpdatedAt = now
@@ -195,7 +210,7 @@ func (s *MemoryEffectStore) MarkCompleted(ctx context.Context, effectID string) 
 	return nil
 }
 
-func (s *MemoryEffectStore) MarkFailed(ctx context.Context, effectID string, cause error) error {
+func (s *MemoryEffectStore) MarkFailed(ctx context.Context, effectID string, owner string, cause error) error {
 	_ = ctx
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -204,8 +219,18 @@ func (s *MemoryEffectStore) MarkFailed(ctx context.Context, effectID string, cau
 	if !ok {
 		return fmt.Errorf("effect not found: %s", effectID)
 	}
-	now := time.Now().UTC()
+	if stored.Status == EffectStatusCompleted {
+		return validateTaskOwner(stored.Owner, owner)
+	}
+	if stored.Status == EffectStatusFailed {
+		return validateTaskOwner(stored.Owner, owner)
+	}
+	now := currentStoreTime(s.now)
+	if err := validateLeaseOwner(stored.Owner, stored.LeaseDeadline, owner, now); err != nil {
+		return err
+	}
 	stored.Status = EffectStatusFailed
+	stored.Error = ""
 	if cause != nil {
 		stored.Error = cause.Error()
 	}
@@ -213,6 +238,31 @@ func (s *MemoryEffectStore) MarkFailed(ctx context.Context, effectID string, cau
 	stored.FailedAt = &now
 	s.effects[effectID] = stored.Clone()
 	return nil
+}
+
+func (s *MemoryEffectStore) RenewLease(ctx context.Context, effectID string, owner string, leaseDuration time.Duration) (StoredEffect, error) {
+	_ = ctx
+	owner, err := normalizeLease(owner, leaseDuration)
+	if err != nil {
+		return StoredEffect{}, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	stored, ok := s.effects[effectID]
+	if !ok {
+		return StoredEffect{}, fmt.Errorf("effect not found: %s", effectID)
+	}
+	now := currentStoreTime(s.now)
+	if err := validateLeaseOwner(stored.Owner, stored.LeaseDeadline, owner, now); err != nil {
+		return StoredEffect{}, err
+	}
+	deadline := leaseDeadline(now, leaseDuration)
+	stored.LeaseDeadline = &deadline
+	stored.UpdatedAt = now
+	s.effects[effectID] = stored.Clone()
+	return stored.Clone(), nil
 }
 
 func (s *MemoryEffectStore) effectIDs(runID string) []string {
@@ -226,10 +276,32 @@ func (s EffectStatus) PendingWork() bool {
 	return s == EffectStatusPending || s == EffectStatusDispatched
 }
 
+func (e StoredEffect) EffectClaimable(now time.Time) bool {
+	if e.Status == EffectStatusPending {
+		return true
+	}
+	if e.Status != EffectStatusDispatched {
+		return false
+	}
+	if e.Owner == "" {
+		return true
+	}
+	return !leaseActive(e.LeaseDeadline, now)
+}
+
 func markEffectDispatched(stored *StoredEffect, now time.Time) {
 	stored.Status = EffectStatusDispatched
 	stored.UpdatedAt = now
 	if stored.DispatchedAt == nil {
 		stored.DispatchedAt = &now
 	}
+}
+
+func markEffectClaimed(stored *StoredEffect, owner string, leaseDuration time.Duration, now time.Time) {
+	markEffectDispatched(stored, now)
+	deadline := leaseDeadline(now, leaseDuration)
+	stored.Owner = owner
+	stored.LeaseDeadline = &deadline
+	stored.ClaimCount++
+	stored.Error = ""
 }

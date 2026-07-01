@@ -17,6 +17,10 @@ import (
 )
 
 const fileStoreSchemaVersion = 1
+const (
+	defaultFileStoreLockRetry = 20 * time.Millisecond
+	defaultFileStoreStaleAge  = 10 * time.Minute
+)
 
 var _ StateStore = (*FileStateStore)(nil)
 var _ EventStore = (*FileEventStore)(nil)
@@ -161,17 +165,22 @@ func (s *FileStateStore) Load(ctx context.Context, runID string) (RunState, erro
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	records, err := readJSONLRecords[fileStateRecord](ctx, s.path)
-	if err != nil {
-		return RunState{}, err
-	}
-	for i := len(records) - 1; i >= 0; i-- {
-		st := records[i].State
-		if st.RunID == runID {
-			return cloneRunState(st), nil
+	var out RunState
+	err := withFileStorePathLock(ctx, s.path, s.now, func() error {
+		records, err := readJSONLRecords[fileStateRecord](ctx, s.path)
+		if err != nil {
+			return err
 		}
-	}
-	return RunState{}, fmt.Errorf("state not found: %s", runID)
+		for i := len(records) - 1; i >= 0; i-- {
+			st := records[i].State
+			if st.RunID == runID {
+				out = cloneRunState(st)
+				return nil
+			}
+		}
+		return fmt.Errorf("state not found: %s", runID)
+	})
+	return out, err
 }
 
 func (s *FileStateStore) Save(ctx context.Context, st RunState) error {
@@ -185,10 +194,12 @@ func (s *FileStateStore) Save(ctx context.Context, st RunState) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return appendJSONLRecord(ctx, s.path, fileStateRecord{
-		SchemaVersion: fileStoreSchemaVersion,
-		WrittenAt:     currentFileStoreTime(s.now),
-		State:         cloneRunState(st),
+	return withFileStorePathLock(ctx, s.path, s.now, func() error {
+		return appendJSONLRecord(ctx, s.path, fileStateRecord{
+			SchemaVersion: fileStoreSchemaVersion,
+			WrittenAt:     currentStoreTime(s.now),
+			State:         cloneRunState(st),
+		})
 	})
 }
 
@@ -206,21 +217,26 @@ func (s *FileEventStore) Append(ctx context.Context, event runtimeevent.Event) (
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	records, err := readJSONLRecords[fileEventRecord](ctx, s.path)
-	if err != nil {
-		return false, err
-	}
-	for _, record := range records {
-		if record.Event.ID == event.ID {
-			return false, nil
+	appended := false
+	err := withFileStorePathLock(ctx, s.path, s.now, func() error {
+		records, err := readJSONLRecords[fileEventRecord](ctx, s.path)
+		if err != nil {
+			return err
 		}
-	}
+		for _, record := range records {
+			if record.Event.ID == event.ID {
+				return nil
+			}
+		}
 
-	return true, appendJSONLRecord(ctx, s.path, fileEventRecord{
-		SchemaVersion: fileStoreSchemaVersion,
-		WrittenAt:     currentFileStoreTime(s.now),
-		Event:         event.Clone(),
+		appended = true
+		return appendJSONLRecord(ctx, s.path, fileEventRecord{
+			SchemaVersion: fileStoreSchemaVersion,
+			WrittenAt:     currentStoreTime(s.now),
+			Event:         event.Clone(),
+		})
 	})
+	return appended, err
 }
 
 func (s *FileEventStore) List(ctx context.Context, runID string) ([]runtimeevent.Event, error) {
@@ -231,18 +247,22 @@ func (s *FileEventStore) List(ctx context.Context, runID string) ([]runtimeevent
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	records, err := readJSONLRecords[fileEventRecord](ctx, s.path)
-	if err != nil {
-		return nil, err
-	}
-	events := make([]runtimeevent.Event, 0, len(records))
-	for _, record := range records {
-		if runID != "" && record.Event.RunID != runID {
-			continue
+	var events []runtimeevent.Event
+	err := withFileStorePathLock(ctx, s.path, s.now, func() error {
+		records, err := readJSONLRecords[fileEventRecord](ctx, s.path)
+		if err != nil {
+			return err
 		}
-		events = append(events, record.Event.Clone())
-	}
-	return events, nil
+		events = make([]runtimeevent.Event, 0, len(records))
+		for _, record := range records {
+			if runID != "" && record.Event.RunID != runID {
+				continue
+			}
+			events = append(events, record.Event.Clone())
+		}
+		return nil
+	})
+	return events, err
 }
 
 func (s *FileEffectStore) Append(ctx context.Context, effect Effect) (StoredEffect, error) {
@@ -253,22 +273,28 @@ func (s *FileEffectStore) Append(ctx context.Context, effect Effect) (StoredEffe
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	effects, _, err := s.loadLocked(ctx)
-	if err != nil {
-		return StoredEffect{}, err
-	}
-	if existing, ok := effects[effect.ID]; ok {
-		return existing.Clone(), nil
-	}
+	var out StoredEffect
+	err := withFileStorePathLock(ctx, s.path, s.now, func() error {
+		effects, _, err := s.loadLocked(ctx)
+		if err != nil {
+			return err
+		}
+		if existing, ok := effects[effect.ID]; ok {
+			out = existing.Clone()
+			return nil
+		}
 
-	stored, err := normalizeStoredEffect(effect, currentFileStoreTime(s.now))
-	if err != nil {
-		return StoredEffect{}, err
-	}
-	if err := s.appendLocked(ctx, stored); err != nil {
-		return StoredEffect{}, err
-	}
-	return stored.Clone(), nil
+		stored, err := normalizeStoredEffect(effect, currentStoreTime(s.now))
+		if err != nil {
+			return err
+		}
+		if err := s.appendLocked(ctx, stored); err != nil {
+			return err
+		}
+		out = stored.Clone()
+		return nil
+	})
+	return out, err
 }
 
 func (s *FileEffectStore) ListPending(ctx context.Context, runID string) ([]StoredEffect, error) {
@@ -279,53 +305,70 @@ func (s *FileEffectStore) ListPending(ctx context.Context, runID string) ([]Stor
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	effects, order, err := s.loadLocked(ctx)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]StoredEffect, 0, len(order))
-	for _, id := range order {
-		stored, ok := effects[id]
-		if !ok || !stored.Status.PendingWork() {
-			continue
+	var out []StoredEffect
+	err := withFileStorePathLock(ctx, s.path, s.now, func() error {
+		effects, order, err := s.loadLocked(ctx)
+		if err != nil {
+			return err
 		}
-		if runID != "" && stored.Effect.RunID != runID {
-			continue
+		out = make([]StoredEffect, 0, len(order))
+		for _, id := range order {
+			stored, ok := effects[id]
+			if !ok || !stored.Status.PendingWork() {
+				continue
+			}
+			if runID != "" && stored.Effect.RunID != runID {
+				continue
+			}
+			out = append(out, stored.Clone())
 		}
-		out = append(out, stored.Clone())
-	}
-	return out, nil
+		return nil
+	})
+	return out, err
 }
 
-func (s *FileEffectStore) Claim(ctx context.Context, runID string) (StoredEffect, bool, error) {
+func (s *FileEffectStore) Claim(ctx context.Context, runID string, owner string, leaseDuration time.Duration) (StoredEffect, bool, error) {
 	if s == nil {
 		return StoredEffect{}, false, fmt.Errorf("effect file store is nil")
+	}
+	owner, err := normalizeLease(owner, leaseDuration)
+	if err != nil {
+		return StoredEffect{}, false, err
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	effects, order, err := s.loadLocked(ctx)
-	if err != nil {
-		return StoredEffect{}, false, err
-	}
-	for _, id := range order {
-		stored, ok := effects[id]
-		if !ok || !stored.Status.PendingWork() {
-			continue
+	var out StoredEffect
+	claimed := false
+	err = withFileStorePathLock(ctx, s.path, s.now, func() error {
+		effects, order, err := s.loadLocked(ctx)
+		if err != nil {
+			return err
 		}
-		if runID != "" && stored.Effect.RunID != runID {
-			continue
-		}
-		if stored.Status == EffectStatusPending {
-			markEffectDispatched(&stored, currentFileStoreTime(s.now))
-			if err := s.appendLocked(ctx, stored); err != nil {
-				return StoredEffect{}, false, err
+		for _, id := range order {
+			stored, ok := effects[id]
+			if !ok || !stored.Status.PendingWork() {
+				continue
 			}
+			if runID != "" && stored.Effect.RunID != runID {
+				continue
+			}
+			now := currentStoreTime(s.now)
+			if !stored.EffectClaimable(now) {
+				continue
+			}
+			markEffectClaimed(&stored, owner, leaseDuration, now)
+			if err := s.appendLocked(ctx, stored); err != nil {
+				return err
+			}
+			out = stored.Clone()
+			claimed = true
+			return nil
 		}
-		return stored.Clone(), true, nil
-	}
-	return StoredEffect{}, false, nil
+		return nil
+	})
+	return out, claimed, err
 }
 
 func (s *FileEffectStore) MarkDispatched(ctx context.Context, effectID string) error {
@@ -336,58 +379,116 @@ func (s *FileEffectStore) MarkDispatched(ctx context.Context, effectID string) e
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	stored, err := s.loadOneLocked(ctx, effectID)
-	if err != nil {
-		return err
+	return withFileStorePathLock(ctx, s.path, s.now, func() error {
+		stored, err := s.loadOneLocked(ctx, effectID)
+		if err != nil {
+			return err
+		}
+		if stored.Status == EffectStatusCompleted || stored.Status == EffectStatusFailed {
+			return nil
+		}
+		markEffectDispatched(&stored, currentStoreTime(s.now))
+		return s.appendLocked(ctx, stored)
+	})
+}
+
+func (s *FileEffectStore) MarkCompleted(ctx context.Context, effectID string, owner string) error {
+	if s == nil {
+		return fmt.Errorf("effect file store is nil")
 	}
-	if stored.Status == EffectStatusCompleted || stored.Status == EffectStatusFailed {
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return withFileStorePathLock(ctx, s.path, s.now, func() error {
+		stored, err := s.loadOneLocked(ctx, effectID)
+		if err != nil {
+			return err
+		}
+		if stored.Status == EffectStatusCompleted {
+			return validateTaskOwner(stored.Owner, owner)
+		}
+		if stored.Status == EffectStatusFailed {
+			return validateTaskOwner(stored.Owner, owner)
+		}
+		now := currentStoreTime(s.now)
+		if err := validateLeaseOwner(stored.Owner, stored.LeaseDeadline, owner, now); err != nil {
+			return err
+		}
+		stored.Status = EffectStatusCompleted
+		stored.Error = ""
+		stored.UpdatedAt = now
+		stored.CompletedAt = &now
+		return s.appendLocked(ctx, stored)
+	})
+}
+
+func (s *FileEffectStore) MarkFailed(ctx context.Context, effectID string, owner string, cause error) error {
+	if s == nil {
+		return fmt.Errorf("effect file store is nil")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return withFileStorePathLock(ctx, s.path, s.now, func() error {
+		stored, err := s.loadOneLocked(ctx, effectID)
+		if err != nil {
+			return err
+		}
+		if stored.Status == EffectStatusCompleted {
+			return validateTaskOwner(stored.Owner, owner)
+		}
+		if stored.Status == EffectStatusFailed {
+			return validateTaskOwner(stored.Owner, owner)
+		}
+		now := currentStoreTime(s.now)
+		if err := validateLeaseOwner(stored.Owner, stored.LeaseDeadline, owner, now); err != nil {
+			return err
+		}
+		stored.Status = EffectStatusFailed
+		stored.Error = ""
+		if cause != nil {
+			stored.Error = cause.Error()
+		}
+		stored.UpdatedAt = now
+		stored.FailedAt = &now
+		return s.appendLocked(ctx, stored)
+	})
+}
+
+func (s *FileEffectStore) RenewLease(ctx context.Context, effectID string, owner string, leaseDuration time.Duration) (StoredEffect, error) {
+	if s == nil {
+		return StoredEffect{}, fmt.Errorf("effect file store is nil")
+	}
+	owner, err := normalizeLease(owner, leaseDuration)
+	if err != nil {
+		return StoredEffect{}, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var out StoredEffect
+	err = withFileStorePathLock(ctx, s.path, s.now, func() error {
+		stored, err := s.loadOneLocked(ctx, effectID)
+		if err != nil {
+			return err
+		}
+		now := currentStoreTime(s.now)
+		if err := validateLeaseOwner(stored.Owner, stored.LeaseDeadline, owner, now); err != nil {
+			return err
+		}
+		deadline := leaseDeadline(now, leaseDuration)
+		stored.LeaseDeadline = &deadline
+		stored.UpdatedAt = now
+		if err := s.appendLocked(ctx, stored); err != nil {
+			return err
+		}
+		out = stored.Clone()
 		return nil
-	}
-	markEffectDispatched(&stored, currentFileStoreTime(s.now))
-	return s.appendLocked(ctx, stored)
-}
-
-func (s *FileEffectStore) MarkCompleted(ctx context.Context, effectID string) error {
-	if s == nil {
-		return fmt.Errorf("effect file store is nil")
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	stored, err := s.loadOneLocked(ctx, effectID)
-	if err != nil {
-		return err
-	}
-	now := currentFileStoreTime(s.now)
-	stored.Status = EffectStatusCompleted
-	stored.Error = ""
-	stored.UpdatedAt = now
-	stored.CompletedAt = &now
-	return s.appendLocked(ctx, stored)
-}
-
-func (s *FileEffectStore) MarkFailed(ctx context.Context, effectID string, cause error) error {
-	if s == nil {
-		return fmt.Errorf("effect file store is nil")
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	stored, err := s.loadOneLocked(ctx, effectID)
-	if err != nil {
-		return err
-	}
-	now := currentFileStoreTime(s.now)
-	stored.Status = EffectStatusFailed
-	stored.Error = ""
-	if cause != nil {
-		stored.Error = cause.Error()
-	}
-	stored.UpdatedAt = now
-	stored.FailedAt = &now
-	return s.appendLocked(ctx, stored)
+	})
+	return out, err
 }
 
 func (s *FileEffectStore) loadOneLocked(ctx context.Context, effectID string) (StoredEffect, error) {
@@ -426,7 +527,7 @@ func (s *FileEffectStore) loadLocked(ctx context.Context) (map[string]StoredEffe
 func (s *FileEffectStore) appendLocked(ctx context.Context, stored StoredEffect) error {
 	return appendJSONLRecord(ctx, s.path, fileEffectRecord{
 		SchemaVersion: fileStoreSchemaVersion,
-		WrittenAt:     currentFileStoreTime(s.now),
+		WrittenAt:     currentStoreTime(s.now),
 		Effect:        stored.Clone(),
 	})
 }
@@ -439,22 +540,30 @@ func (s *FileEventInbox) Append(ctx context.Context, event runtimeevent.Event) (
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	events, _, err := s.loadLocked(ctx)
-	if err != nil {
-		return StoredEvent{}, false, err
-	}
-	if existing, ok := events[event.ID]; ok {
-		return existing.Clone(), false, nil
-	}
+	var out StoredEvent
+	appended := false
+	err := withFileStorePathLock(ctx, s.path, s.now, func() error {
+		events, _, err := s.loadLocked(ctx)
+		if err != nil {
+			return err
+		}
+		if existing, ok := events[event.ID]; ok {
+			out = existing.Clone()
+			return nil
+		}
 
-	stored, err := normalizeStoredEvent(event, currentFileStoreTime(s.now))
-	if err != nil {
-		return StoredEvent{}, false, err
-	}
-	if err := s.appendLocked(ctx, stored); err != nil {
-		return StoredEvent{}, false, err
-	}
-	return stored.Clone(), true, nil
+		stored, err := normalizeStoredEvent(event, currentStoreTime(s.now))
+		if err != nil {
+			return err
+		}
+		if err := s.appendLocked(ctx, stored); err != nil {
+			return err
+		}
+		out = stored.Clone()
+		appended = true
+		return nil
+	})
+	return out, appended, err
 }
 
 func (s *FileEventInbox) ListPending(ctx context.Context, runID string) ([]StoredEvent, error) {
@@ -465,56 +574,73 @@ func (s *FileEventInbox) ListPending(ctx context.Context, runID string) ([]Store
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	events, order, err := s.loadLocked(ctx)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]StoredEvent, 0, len(order))
-	for _, id := range order {
-		stored, ok := events[id]
-		if !ok || !stored.Status.Claimable() {
-			continue
+	var out []StoredEvent
+	err := withFileStorePathLock(ctx, s.path, s.now, func() error {
+		events, order, err := s.loadLocked(ctx)
+		if err != nil {
+			return err
 		}
-		if runID != "" && stored.Event.RunID != runID {
-			continue
+		out = make([]StoredEvent, 0, len(order))
+		for _, id := range order {
+			stored, ok := events[id]
+			if !ok || !stored.Status.Claimable() {
+				continue
+			}
+			if runID != "" && stored.Event.RunID != runID {
+				continue
+			}
+			out = append(out, stored.Clone())
 		}
-		out = append(out, stored.Clone())
-	}
-	return out, nil
+		return nil
+	})
+	return out, err
 }
 
-func (s *FileEventInbox) Claim(ctx context.Context, runID string) (StoredEvent, bool, error) {
+func (s *FileEventInbox) Claim(ctx context.Context, runID string, owner string, leaseDuration time.Duration) (StoredEvent, bool, error) {
 	if s == nil {
 		return StoredEvent{}, false, fmt.Errorf("event inbox file store is nil")
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	events, order, err := s.loadLocked(ctx)
+	owner, err := normalizeLease(owner, leaseDuration)
 	if err != nil {
 		return StoredEvent{}, false, err
 	}
-	for _, id := range order {
-		stored, ok := events[id]
-		if !ok || !stored.Status.Claimable() {
-			continue
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var out StoredEvent
+	claimed := false
+	err = withFileStorePathLock(ctx, s.path, s.now, func() error {
+		events, order, err := s.loadLocked(ctx)
+		if err != nil {
+			return err
 		}
-		if runID != "" && stored.Event.RunID != runID {
-			continue
-		}
-		if stored.Status == EventInboxStatusPending {
-			markEventClaimed(&stored, currentFileStoreTime(s.now))
-			if err := s.appendLocked(ctx, stored); err != nil {
-				return StoredEvent{}, false, err
+		for _, id := range order {
+			stored, ok := events[id]
+			if !ok || !stored.Status.Claimable() {
+				continue
 			}
+			if runID != "" && stored.Event.RunID != runID {
+				continue
+			}
+			now := currentStoreTime(s.now)
+			if !stored.EventClaimable(now) {
+				continue
+			}
+			markEventClaimed(&stored, owner, leaseDuration, now)
+			if err := s.appendLocked(ctx, stored); err != nil {
+				return err
+			}
+			out = stored.Clone()
+			claimed = true
+			return nil
 		}
-		return stored.Clone(), true, nil
-	}
-	return StoredEvent{}, false, nil
+		return nil
+	})
+	return out, claimed, err
 }
 
-func (s *FileEventInbox) MarkProcessed(ctx context.Context, eventID string) error {
+func (s *FileEventInbox) MarkProcessed(ctx context.Context, eventID string, owner string) error {
 	if s == nil {
 		return fmt.Errorf("event inbox file store is nil")
 	}
@@ -522,19 +648,30 @@ func (s *FileEventInbox) MarkProcessed(ctx context.Context, eventID string) erro
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	stored, err := s.loadOneLocked(ctx, eventID)
-	if err != nil {
-		return err
-	}
-	now := currentFileStoreTime(s.now)
-	stored.Status = EventInboxStatusProcessed
-	stored.Error = ""
-	stored.UpdatedAt = now
-	stored.ProcessedAt = &now
-	return s.appendLocked(ctx, stored)
+	return withFileStorePathLock(ctx, s.path, s.now, func() error {
+		stored, err := s.loadOneLocked(ctx, eventID)
+		if err != nil {
+			return err
+		}
+		if stored.Status == EventInboxStatusProcessed {
+			return validateTaskOwner(stored.Owner, owner)
+		}
+		if stored.Status == EventInboxStatusFailed {
+			return validateTaskOwner(stored.Owner, owner)
+		}
+		now := currentStoreTime(s.now)
+		if err := validateLeaseOwner(stored.Owner, stored.LeaseDeadline, owner, now); err != nil {
+			return err
+		}
+		stored.Status = EventInboxStatusProcessed
+		stored.Error = ""
+		stored.UpdatedAt = now
+		stored.ProcessedAt = &now
+		return s.appendLocked(ctx, stored)
+	})
 }
 
-func (s *FileEventInbox) MarkFailed(ctx context.Context, eventID string, cause error) error {
+func (s *FileEventInbox) MarkFailed(ctx context.Context, eventID string, owner string, cause error) error {
 	if s == nil {
 		return fmt.Errorf("event inbox file store is nil")
 	}
@@ -542,19 +679,64 @@ func (s *FileEventInbox) MarkFailed(ctx context.Context, eventID string, cause e
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	stored, err := s.loadOneLocked(ctx, eventID)
+	return withFileStorePathLock(ctx, s.path, s.now, func() error {
+		stored, err := s.loadOneLocked(ctx, eventID)
+		if err != nil {
+			return err
+		}
+		if stored.Status == EventInboxStatusProcessed {
+			return validateTaskOwner(stored.Owner, owner)
+		}
+		if stored.Status == EventInboxStatusFailed {
+			return validateTaskOwner(stored.Owner, owner)
+		}
+		now := currentStoreTime(s.now)
+		if err := validateLeaseOwner(stored.Owner, stored.LeaseDeadline, owner, now); err != nil {
+			return err
+		}
+		stored.Status = EventInboxStatusFailed
+		stored.Error = ""
+		if cause != nil {
+			stored.Error = cause.Error()
+		}
+		stored.UpdatedAt = now
+		stored.FailedAt = &now
+		return s.appendLocked(ctx, stored)
+	})
+}
+
+func (s *FileEventInbox) RenewLease(ctx context.Context, eventID string, owner string, leaseDuration time.Duration) (StoredEvent, error) {
+	if s == nil {
+		return StoredEvent{}, fmt.Errorf("event inbox file store is nil")
+	}
+	owner, err := normalizeLease(owner, leaseDuration)
 	if err != nil {
-		return err
+		return StoredEvent{}, err
 	}
-	now := currentFileStoreTime(s.now)
-	stored.Status = EventInboxStatusFailed
-	stored.Error = ""
-	if cause != nil {
-		stored.Error = cause.Error()
-	}
-	stored.UpdatedAt = now
-	stored.FailedAt = &now
-	return s.appendLocked(ctx, stored)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var out StoredEvent
+	err = withFileStorePathLock(ctx, s.path, s.now, func() error {
+		stored, err := s.loadOneLocked(ctx, eventID)
+		if err != nil {
+			return err
+		}
+		now := currentStoreTime(s.now)
+		if err := validateLeaseOwner(stored.Owner, stored.LeaseDeadline, owner, now); err != nil {
+			return err
+		}
+		deadline := leaseDeadline(now, leaseDuration)
+		stored.LeaseDeadline = &deadline
+		stored.UpdatedAt = now
+		if err := s.appendLocked(ctx, stored); err != nil {
+			return err
+		}
+		out = stored.Clone()
+		return nil
+	})
+	return out, err
 }
 
 func (s *FileEventInbox) loadOneLocked(ctx context.Context, eventID string) (StoredEvent, error) {
@@ -593,16 +775,69 @@ func (s *FileEventInbox) loadLocked(ctx context.Context) (map[string]StoredEvent
 func (s *FileEventInbox) appendLocked(ctx context.Context, stored StoredEvent) error {
 	return appendJSONLRecord(ctx, s.path, fileInboxRecord{
 		SchemaVersion: fileStoreSchemaVersion,
-		WrittenAt:     currentFileStoreTime(s.now),
+		WrittenAt:     currentStoreTime(s.now),
 		Event:         stored.Clone(),
 	})
 }
 
-func currentFileStoreTime(now func() time.Time) time.Time {
-	if now != nil {
-		return now().UTC()
+func withFileStorePathLock(ctx context.Context, path string, now func() time.Time, fn func() error) error {
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	return time.Now().UTC()
+	lockPath := path + ".lock"
+	for {
+		lockFile, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		if err == nil {
+			_, writeErr := fmt.Fprintf(lockFile, "pid=%d\ncreated_at=%s\n", os.Getpid(), time.Now().UTC().Format(time.RFC3339Nano))
+			closeErr := lockFile.Close()
+			if writeErr != nil {
+				_ = os.Remove(lockPath)
+				return fmt.Errorf("write state store lock %s: %w", lockPath, writeErr)
+			}
+			if closeErr != nil {
+				_ = os.Remove(lockPath)
+				return fmt.Errorf("close state store lock %s: %w", lockPath, closeErr)
+			}
+			defer os.Remove(lockPath)
+			return fn()
+		}
+		if !fileStoreLockBusy(err, lockPath) {
+			return fmt.Errorf("acquire state store lock %s: %w", lockPath, err)
+		}
+		if removeStaleFileStoreLock(lockPath) {
+			continue
+		}
+
+		timer := time.NewTimer(defaultFileStoreLockRetry)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("acquire state store lock %s: %w", lockPath, ctx.Err())
+		case <-timer.C:
+		}
+	}
+}
+
+func fileStoreLockBusy(err error, lockPath string) bool {
+	if os.IsExist(err) {
+		return true
+	}
+	if !os.IsPermission(err) {
+		return false
+	}
+	_, statErr := os.Stat(lockPath)
+	return statErr == nil
+}
+
+func removeStaleFileStoreLock(lockPath string) bool {
+	info, err := os.Stat(lockPath)
+	if err != nil {
+		return os.IsNotExist(err)
+	}
+	if time.Now().UTC().Sub(info.ModTime()) < defaultFileStoreStaleAge {
+		return false
+	}
+	return os.Remove(lockPath) == nil
 }
 
 func appendJSONLRecord(ctx context.Context, path string, record any) error {

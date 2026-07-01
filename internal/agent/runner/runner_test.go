@@ -3,8 +3,10 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"agent/internal/capability/tool"
 	runtimeevent "agent/internal/event"
@@ -74,9 +76,7 @@ func TestAgentRunnerHandleModelResponseOnlyEnqueuesUntilProcessed(t *testing.T) 
 		Agent: llm.AgentProfile{Name: "default", Model: "mock-native"},
 	})
 	modelEffect := findPendingEffect(t, runner, runID, state.EffectCallModel)
-	if err := runner.effectStore.MarkCompleted(ctx, modelEffect.Effect.ID); err != nil {
-		t.Fatalf("MarkCompleted returned error: %v", err)
-	}
+	completeEffect(t, runner, runID, modelEffect.Effect.ID)
 
 	response := llmClient.Response{
 		Provider: "mock",
@@ -138,9 +138,7 @@ func TestAgentRunnerHandleToolResultOnlyAdvancesWhenProcessed(t *testing.T) {
 		Agent: llm.AgentProfile{Name: "default", Model: "mock-native"},
 	})
 	modelEffect := findPendingEffect(t, runner, runID, state.EffectCallModel)
-	if err := runner.effectStore.MarkCompleted(ctx, modelEffect.Effect.ID); err != nil {
-		t.Fatalf("MarkCompleted model effect returned error: %v", err)
-	}
+	completeEffect(t, runner, runID, modelEffect.Effect.ID)
 
 	response := llmClient.Response{
 		Provider: "mock",
@@ -157,9 +155,7 @@ func TestAgentRunnerHandleToolResultOnlyAdvancesWhenProcessed(t *testing.T) {
 	}
 	processNextEvent(t, runner, runID)
 	toolEffect := findPendingEffect(t, runner, runID, state.EffectDispatchTool)
-	if err := runner.effectStore.MarkCompleted(ctx, toolEffect.Effect.ID); err != nil {
-		t.Fatalf("MarkCompleted tool effect returned error: %v", err)
-	}
+	completeEffect(t, runner, runID, toolEffect.Effect.ID)
 
 	toolDone, err := newRuntimeEvent(runtimeevent.EventToolCallCompleted, string(runID), ToolCallEventPayload{
 		ToolCallID: "call_lookup_1",
@@ -307,6 +303,51 @@ func TestAgentRunnerHandlesRepeatedToolCallIDs(t *testing.T) {
 	}
 }
 
+func TestAgentRunnerDoesNotPublishEffectEventsAfterLeaseExpiry(t *testing.T) {
+	worker := EffectWorkerFunc(func(ctx context.Context, effect state.Effect) ([]runtimeevent.Event, error) {
+		time.Sleep(10 * time.Millisecond)
+		event, err := newRuntimeEvent(runtimeevent.EventRunCompleted, effect.RunID, CompleteRunPayload{FinalAnswer: "stale"}, effect.ID)
+		if err != nil {
+			return nil, err
+		}
+		return []runtimeevent.Event{event}, nil
+	})
+	runner, err := NewAgentRunner(Options{
+		EffectWorker:  worker,
+		WorkerOwner:   "worker_a",
+		LeaseDuration: time.Millisecond,
+		MaxSteps:      5,
+	})
+	if err != nil {
+		t.Fatalf("NewAgentRunner returned error: %v", err)
+	}
+
+	result, err := runner.Run(context.Background(), Task{
+		Input: "build",
+		Agent: llm.AgentProfile{Name: "default", Model: "mock-native"},
+	})
+	if !errors.Is(err, state.ErrLeaseExpired) {
+		t.Fatalf("Run error = %v, want ErrLeaseExpired", err)
+	}
+
+	latest, resultErr := runner.Result(context.Background(), RunID(result.RunID))
+	if resultErr != nil {
+		t.Fatalf("Result returned error: %v", resultErr)
+	}
+	assertEventTypes(t, latest.Events, runtimeevent.EventRunStarted)
+	if latest.Status != state.PhaseWaiting || latest.FinalAnswer != "" {
+		t.Fatalf("latest result = %#v, want waiting without stale final answer", latest)
+	}
+
+	claimed, ok, err := runner.effectStore.Claim(context.Background(), result.RunID, "worker_b", time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("worker_b Claim ok=%v err=%v, want reclaimable expired effect", ok, err)
+	}
+	if claimed.Owner != "worker_b" || claimed.ClaimCount != 2 {
+		t.Fatalf("claimed = %#v, want worker_b second claim", claimed)
+	}
+}
+
 type scriptedLLM struct {
 	requests  []llmClient.Request
 	responses []llmClient.Response
@@ -325,6 +366,12 @@ func (c *scriptedLLM) Complete(_ context.Context, req llmClient.Request) (llmCli
 type recordingTools struct {
 	calls  []recordedToolCall
 	result tool.Result
+}
+
+type EffectWorkerFunc func(ctx context.Context, effect state.Effect) ([]runtimeevent.Event, error)
+
+func (f EffectWorkerFunc) Execute(ctx context.Context, effect state.Effect) ([]runtimeevent.Event, error) {
+	return f(ctx, effect)
 }
 
 type recordedToolCall struct {
@@ -373,6 +420,24 @@ func processNextEvent(t *testing.T, runner *AgentRunner, runID RunID) {
 	}
 	if !processed {
 		t.Fatalf("ProcessNextEvent processed false, want true")
+	}
+}
+
+func completeEffect(t *testing.T, runner *AgentRunner, runID RunID, effectID string) {
+	t.Helper()
+	ctx := context.Background()
+	claimed, ok, err := runner.effectStore.Claim(ctx, string(runID), runner.workerOwner, runner.leaseDuration)
+	if err != nil {
+		t.Fatalf("Claim effect returned error: %v", err)
+	}
+	if !ok {
+		t.Fatalf("Claim effect returned ok=false, want %s", effectID)
+	}
+	if claimed.Effect.ID != effectID {
+		t.Fatalf("claimed effect id = %q, want %q", claimed.Effect.ID, effectID)
+	}
+	if err := runner.effectStore.MarkCompleted(ctx, effectID, runner.workerOwner); err != nil {
+		t.Fatalf("MarkCompleted effect returned error: %v", err)
 	}
 }
 

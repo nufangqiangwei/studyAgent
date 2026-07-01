@@ -18,27 +18,32 @@ const (
 )
 
 type StoredEvent struct {
-	Event       runtimeevent.Event `json:"event"`
-	Status      EventInboxStatus   `json:"status"`
-	Error       string             `json:"error,omitempty"`
-	CreatedAt   time.Time          `json:"created_at"`
-	UpdatedAt   time.Time          `json:"updated_at"`
-	ClaimedAt   *time.Time         `json:"claimed_at,omitempty"`
-	ProcessedAt *time.Time         `json:"processed_at,omitempty"`
-	FailedAt    *time.Time         `json:"failed_at,omitempty"`
+	Event         runtimeevent.Event `json:"event"`
+	Status        EventInboxStatus   `json:"status"`
+	Owner         string             `json:"owner,omitempty"`
+	LeaseDeadline *time.Time         `json:"lease_deadline,omitempty"`
+	ClaimCount    int                `json:"claim_count,omitempty"`
+	Error         string             `json:"error,omitempty"`
+	CreatedAt     time.Time          `json:"created_at"`
+	UpdatedAt     time.Time          `json:"updated_at"`
+	ClaimedAt     *time.Time         `json:"claimed_at,omitempty"`
+	ProcessedAt   *time.Time         `json:"processed_at,omitempty"`
+	FailedAt      *time.Time         `json:"failed_at,omitempty"`
 }
 
 type EventInboxStore interface {
 	Append(ctx context.Context, event runtimeevent.Event) (StoredEvent, bool, error)
 	ListPending(ctx context.Context, runID string) ([]StoredEvent, error)
-	Claim(ctx context.Context, runID string) (StoredEvent, bool, error)
-	MarkProcessed(ctx context.Context, eventID string) error
-	MarkFailed(ctx context.Context, eventID string, cause error) error
+	Claim(ctx context.Context, runID string, owner string, leaseDuration time.Duration) (StoredEvent, bool, error)
+	MarkProcessed(ctx context.Context, eventID string, owner string) error
+	MarkFailed(ctx context.Context, eventID string, owner string, cause error) error
+	RenewLease(ctx context.Context, eventID string, owner string, leaseDuration time.Duration) (StoredEvent, error)
 }
 
 func (e StoredEvent) Clone() StoredEvent {
 	cloned := e
 	cloned.Event = e.Event.Clone()
+	cloned.LeaseDeadline = cloneTimePtr(e.LeaseDeadline)
 	cloned.ClaimedAt = cloneTimePtr(e.ClaimedAt)
 	cloned.ProcessedAt = cloneTimePtr(e.ProcessedAt)
 	cloned.FailedAt = cloneTimePtr(e.FailedAt)
