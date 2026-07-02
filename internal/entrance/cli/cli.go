@@ -104,12 +104,6 @@ func executeBuiltinCommand(ctx context.Context, env content.Env, name string, ar
 	switch name {
 	case "exit", "quit":
 		return errExit, true
-	case "run":
-		task := strings.TrimSpace(arg)
-		if task == "" {
-			return fmt.Errorf("run requires a task"), true
-		}
-		return executeAgentTask(ctx, env, task), true
 	default:
 		return nil, false
 	}
@@ -131,6 +125,9 @@ func executeDefault(ctx context.Context, env content.Env, registry *command.Regi
 	name := strings.ToLower(strings.TrimSpace(line))
 	if isAgentName(env.Agent, name) {
 		return registry.Execute(ctx, "set-agent", env, []string{name})
+	}
+	if registry != nil {
+		return registry.Execute(ctx, "run", env, []string{line})
 	}
 	return executeAgentTask(ctx, env, line)
 }

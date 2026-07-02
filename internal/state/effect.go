@@ -9,6 +9,7 @@ const (
 	EffectCallModel    EffectType = "model.call"
 	EffectExecuteModel EffectType = "model.execute"
 	EffectDispatchTool EffectType = "tool.dispatch"
+	EffectConfirmTool  EffectType = "tool.confirm_dispatch"
 	EffectExecuteTool  EffectType = "tool.execute"
 	EffectCompleteRun  EffectType = "run.complete"
 	EffectFailRun      EffectType = "run.fail"

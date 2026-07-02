@@ -21,6 +21,7 @@ type RunID string
 type Task struct {
 	RunID    string
 	Input    string
+	WorkDir  string
 	Agent    llm.AgentProfile
 	Messages []llmClient.Message
 	MaxSteps int
@@ -31,6 +32,7 @@ type RunResult struct {
 	Status      state.RunPhase
 	FinalAnswer string
 	StepsUsed   int
+	WorkDir     string
 	State       state.RunState
 	Events      []runtimeevent.Event
 	Error       *state.ErrorState
@@ -39,6 +41,7 @@ type RunResult struct {
 type AdvanceStatus string
 
 const (
+	AdvanceStatusEventEnqueued    AdvanceStatus = "event_enqueued"
 	AdvanceStatusEventProcessed   AdvanceStatus = "event_processed"
 	AdvanceStatusEffectDispatched AdvanceStatus = "effect_dispatched"
 	AdvanceStatusWaitingForEffect AdvanceStatus = "waiting_for_effect"
@@ -59,6 +62,23 @@ type RecoverResult struct {
 	Runs []RecoverableRun `json:"runs"`
 }
 
+type WorkResult struct {
+	Ran     bool              `json:"ran"`
+	Advance LoopAdvanceResult `json:"advance,omitempty"`
+}
+
+type PendingWorkKind string
+
+const (
+	PendingWorkEvent  PendingWorkKind = "event"
+	PendingWorkEffect PendingWorkKind = "effect"
+)
+
+type PendingWork struct {
+	RunID string          `json:"run_id"`
+	Kind  PendingWorkKind `json:"kind"`
+}
+
 type RecoverableRun struct {
 	RunID          string         `json:"run_id"`
 	State          state.RunState `json:"state"`
@@ -75,6 +95,7 @@ type toolCallStatus string
 
 const (
 	toolCallPending         toolCallStatus = "pending"
+	toolCallRequested       toolCallStatus = "requested"
 	toolCallDispatched      toolCallStatus = "dispatched"
 	toolCallWaitingApproval toolCallStatus = "waiting_approval"
 	toolCallWaitingInput    toolCallStatus = "waiting_input"
@@ -94,6 +115,7 @@ type pendingToolCall struct {
 
 type runData struct {
 	Task         string              `json:"task,omitempty"`
+	WorkDir      string              `json:"work_dir,omitempty"`
 	Agent        llm.AgentProfile    `json:"agent"`
 	Messages     []llmClient.Message `json:"messages,omitempty"`
 	PendingTools []pendingToolCall   `json:"pending_tools,omitempty"`
@@ -131,6 +153,13 @@ type ToolCallEventPayload struct {
 	Arguments  json.RawMessage `json:"arguments,omitempty"`
 	Result     llm.ToolResult  `json:"result,omitempty"`
 	Error      string          `json:"error,omitempty"`
+}
+
+type EffectLifecyclePayload struct {
+	EffectID   string `json:"effect_id"`
+	EffectType string `json:"effect_type"`
+	Status     string `json:"status"`
+	Error      string `json:"error,omitempty"`
 }
 
 type UserInputRequestedPayload struct {
@@ -177,6 +206,7 @@ func newInitialState(task Task, defaultMaxSteps int) (state.RunState, error) {
 	runState := state.NewRunState(task.RunID, task.MaxSteps)
 	data := runData{
 		Task:     strings.TrimSpace(task.Input),
+		WorkDir:  strings.TrimSpace(task.WorkDir),
 		Agent:    cloneAgentProfile(task.Agent),
 		Messages: cloneMessages(task.Messages),
 	}

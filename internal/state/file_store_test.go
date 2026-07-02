@@ -46,8 +46,10 @@ func TestFileStorePersistsMachineWritesAcrossOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List returned error: %v", err)
 	}
-	if len(storedEvents) != 1 || storedEvents[0].ID != started.ID {
-		t.Fatalf("events = %#v, want started event", storedEvents)
+	if !hasEvent(storedEvents, started.ID, runtimeevent.EventRunStarted) ||
+		!hasEventType(storedEvents, runtimeevent.EventStateChanged) ||
+		!hasEventType(storedEvents, runtimeevent.EventContextPersisted) {
+		t.Fatalf("events = %#v, want started and observability events", storedEvents)
 	}
 	storedEffects, err := reopened.Effects.ListPending(ctx, "run_1")
 	if err != nil {

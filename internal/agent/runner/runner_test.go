@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -243,6 +244,7 @@ func TestAgentRunnerDispatchNextEffectCanResumeFromEnqueuedEvents(t *testing.T) 
 	if len(dispatched.Events) != 1 || dispatched.Events[0].Type != runtimeevent.EventModelRequestCreated {
 		t.Fatalf("dispatched events = %#v, want model request event", dispatched.Events)
 	}
+	assertEffectLifecycleEvents(t, first, runID, state.EffectCallModel, runtimeevent.EventEffectStarted, runtimeevent.EventEffectSucceeded)
 
 	result, err := first.Result(ctx, runID)
 	if err != nil {
@@ -309,6 +311,121 @@ func TestAgentRunnerDispatchNextEffectCanResumeFromEnqueuedEvents(t *testing.T) 
 	}
 }
 
+func TestAgentRunnerWorkProcessesOnePendingUnit(t *testing.T) {
+	ctx := context.Background()
+	model := &scriptedLLM{responses: []llmClient.Response{{Provider: "mock", Model: "mock-native", Content: "done"}}}
+	runner := mustRunner(t, mustRuntime(t, model), &recordingTools{})
+	runID, err := runner.Start(ctx, Task{
+		Input: "one tick",
+		Agent: llm.AgentProfile{Name: "default", Model: "mock-native"},
+	})
+	if err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	first, err := runner.Work(ctx)
+	if err != nil {
+		t.Fatalf("first Work returned error: %v", err)
+	}
+	if !first.Ran || first.Advance.Event == nil || first.Advance.Event.Type != runtimeevent.EventRunStarted {
+		t.Fatalf("first work = %#v, want one RunStarted event", first)
+	}
+	if len(model.requests) != 0 {
+		t.Fatalf("model requests = %d, want none after event-only tick", len(model.requests))
+	}
+
+	second, err := runner.Work(ctx)
+	if err != nil {
+		t.Fatalf("second Work returned error: %v", err)
+	}
+	if !second.Ran || second.Advance.Effect == nil || second.Advance.Effect.Type != state.EffectCallModel {
+		t.Fatalf("second work = %#v, want one model.call effect", second)
+	}
+	if len(model.requests) != 0 {
+		t.Fatalf("model requests = %d, want none before model.execute tick", len(model.requests))
+	}
+
+	third, err := runner.Work(ctx)
+	if err != nil {
+		t.Fatalf("third Work returned error: %v", err)
+	}
+	if !third.Ran || third.Advance.Event == nil || third.Advance.Event.Type != runtimeevent.EventModelRequestCreated {
+		t.Fatalf("third work = %#v, want one ModelRequestCreated event", third)
+	}
+	if third.Advance.RunID != string(runID) {
+		t.Fatalf("third run id = %q, want %s", third.Advance.RunID, runID)
+	}
+}
+
+func TestAgentRunnerWorkSkipsActiveLeasedEffect(t *testing.T) {
+	ctx := context.Background()
+	model := &scriptedLLM{responses: []llmClient.Response{{Provider: "mock", Model: "mock-native", Content: "done"}}}
+	runner := mustRunnerWithOptions(t, Options{
+		LLM:           mustRuntime(t, model),
+		ToolRegistry:  &recordingTools{},
+		WorkerOwner:   "worker_a",
+		LeaseDuration: time.Hour,
+	})
+	run1 := startAndProcessRunStarted(t, runner, Task{
+		Input: "first",
+		Agent: llm.AgentProfile{Name: "default", Model: "mock-native"},
+	})
+	run2 := startAndProcessRunStarted(t, runner, Task{
+		Input: "second",
+		Agent: llm.AgentProfile{Name: "default", Model: "mock-native"},
+	})
+	effect1 := findPendingEffect(t, runner, run1, state.EffectCallModel)
+	if _, ok, err := runner.effectStore.Claim(ctx, string(run1), "worker_b", time.Hour); err != nil || !ok {
+		t.Fatalf("worker_b Claim ok=%v err=%v, want active lease", ok, err)
+	}
+
+	work, err := runner.Work(ctx)
+	if err != nil {
+		t.Fatalf("Work returned error: %v", err)
+	}
+	if !work.Ran || work.Advance.RunID != string(run2) || work.Advance.Effect == nil || work.Advance.Effect.Type != state.EffectCallModel {
+		t.Fatalf("work = %#v, want run2 model.call effect", work)
+	}
+	claimedAgain, ok, err := runner.effectStore.Claim(ctx, string(run1), "worker_a", time.Hour)
+	if err != nil {
+		t.Fatalf("second Claim run1 returned error: %v", err)
+	}
+	if ok {
+		t.Fatalf("run1 effect %s was claimable despite active lease: %#v", effect1.Effect.ID, claimedAgain)
+	}
+}
+
+func TestAgentRunnerRecordsEffectFailureLifecycleEvent(t *testing.T) {
+	ctx := context.Background()
+	states := state.NewMemoryStateStore()
+	events := state.NewMemoryEventStore()
+	effects := state.NewMemoryEffectStore()
+	inbox := state.NewMemoryEventInbox()
+	worker := EffectWorkerFunc(func(ctx context.Context, effect state.Effect) ([]runtimeevent.Event, error) {
+		return nil, fmt.Errorf("boom")
+	})
+	runner := mustRunnerWithOptions(t, Options{
+		StateStore:   states,
+		EventStore:   events,
+		EffectStore:  effects,
+		EventInbox:   inbox,
+		EffectWorker: worker,
+	})
+	runID, err := runner.Start(ctx, Task{
+		Input: "fail effect",
+		Agent: llm.AgentProfile{Name: "default", Model: "mock-native"},
+	})
+	if err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	processNextEvent(t, runner, runID)
+
+	if _, err := runner.DispatchNextEffect(ctx, runID); err == nil {
+		t.Fatal("DispatchNextEffect returned nil error, want failure")
+	}
+	assertEffectLifecycleEvents(t, runner, runID, state.EffectCallModel, runtimeevent.EventEffectStarted, runtimeevent.EventEffectFailed)
+}
+
 func TestAgentRunnerToolDispatchSuspendsBeforeToolExecution(t *testing.T) {
 	ctx := context.Background()
 	model := &scriptedLLM{}
@@ -347,10 +464,8 @@ func TestAgentRunnerToolDispatchSuspendsBeforeToolExecution(t *testing.T) {
 	if len(tools.calls) != 0 {
 		t.Fatalf("tool calls = %d, want 0 before ToolCallDispatched is processed", len(tools.calls))
 	}
-	if len(dispatched.Events) != 2 ||
-		dispatched.Events[0].Type != runtimeevent.EventToolCallRequested ||
-		dispatched.Events[1].Type != runtimeevent.EventToolCallDispatched {
-		t.Fatalf("tool dispatch events = %#v, want requested and dispatched", dispatched.Events)
+	if len(dispatched.Events) != 1 || dispatched.Events[0].Type != runtimeevent.EventToolCallRequested {
+		t.Fatalf("tool dispatch events = %#v, want ToolCallRequested", dispatched.Events)
 	}
 
 	advanced, err := runner.Advance(ctx, runID)
@@ -362,6 +477,21 @@ func TestAgentRunnerToolDispatchSuspendsBeforeToolExecution(t *testing.T) {
 	}
 	if len(pendingEffectsOfType(t, runner, runID, state.EffectExecuteTool)) != 0 {
 		t.Fatal("execute tool effect exists before ToolCallDispatched is processed")
+	}
+
+	toolConfirmEffect := findPendingEffect(t, runner, runID, state.EffectConfirmTool)
+	confirmed, err := runner.DispatchNextEffect(ctx, runID)
+	if err != nil {
+		t.Fatalf("DispatchNextEffect tool confirm returned error: %v", err)
+	}
+	if confirmed.Status != AdvanceStatusEffectDispatched || confirmed.Effect == nil || confirmed.Effect.ID != toolConfirmEffect.Effect.ID {
+		t.Fatalf("confirm result = %#v, want tool confirm effect", confirmed)
+	}
+	if len(confirmed.Events) != 1 || confirmed.Events[0].Type != runtimeevent.EventToolCallDispatched {
+		t.Fatalf("tool confirm events = %#v, want ToolCallDispatched", confirmed.Events)
+	}
+	if len(tools.calls) != 0 {
+		t.Fatalf("tool calls = %d, want 0 before ToolCallDispatched is processed", len(tools.calls))
 	}
 
 	advanced, err = runner.Advance(ctx, runID)
@@ -433,6 +563,9 @@ func TestAgentRunnerAskUserSuspendsUntilUserInputReceived(t *testing.T) {
 		t.Fatalf("Dispatch tool.dispatch returned error: %v", err)
 	}
 	processNextEvent(t, runner, runID)
+	if _, err := runner.DispatchNextEffect(ctx, runID); err != nil {
+		t.Fatalf("Dispatch tool.confirm_dispatch returned error: %v", err)
+	}
 	processNextEvent(t, runner, runID)
 	if _, err := runner.DispatchNextEffect(ctx, runID); err != nil {
 		t.Fatalf("Dispatch tool.execute returned error: %v", err)
@@ -516,6 +649,9 @@ func TestAgentRunnerPolicyApprovalSuspendsAndExecutesAfterApproval(t *testing.T)
 		t.Fatalf("Dispatch tool.dispatch returned error: %v", err)
 	}
 	processNextEvent(t, runner, runID)
+	if _, err := runner.DispatchNextEffect(ctx, runID); err != nil {
+		t.Fatalf("Dispatch tool.confirm_dispatch returned error: %v", err)
+	}
 	processNextEvent(t, runner, runID)
 	if _, err := runner.DispatchNextEffect(ctx, runID); err != nil {
 		t.Fatalf("Dispatch tool.execute returned error: %v", err)
@@ -677,6 +813,128 @@ func TestAgentRunnerRecoverDiscoversNonTerminalRunsAndContinues(t *testing.T) {
 		runtimeevent.EventModelResponseReceived,
 		runtimeevent.EventRunCompleted,
 	)
+}
+
+func TestAgentRunnerRecoverEnqueuesOneResumeEventAtATime(t *testing.T) {
+	ctx := context.Background()
+	states := state.NewMemoryStateStore()
+	events := state.NewMemoryEventStore()
+	effects := state.NewMemoryEffectStore()
+	inbox := state.NewMemoryEventInbox()
+	model := &scriptedLLM{}
+	first := mustRunnerWithStores(t, mustRuntime(t, model), &recordingTools{}, states, events, effects, inbox)
+
+	run1 := startAndProcessRunStarted(t, first, Task{
+		Input: "first recoverable",
+		Agent: llm.AgentProfile{Name: "default", Model: "mock-native"},
+	})
+	run2 := startAndProcessRunStarted(t, first, Task{
+		Input: "second recoverable",
+		Agent: llm.AgentProfile{Name: "default", Model: "mock-native"},
+	})
+
+	second := mustRunnerWithStores(t, mustRuntime(t, model), &recordingTools{}, states, events, effects, inbox)
+	recovered, err := second.Recover(ctx)
+	if err != nil {
+		t.Fatalf("first Recover returned error: %v", err)
+	}
+	if len(recovered.Runs) != 1 {
+		t.Fatalf("first recovered = %#v, want one run", recovered)
+	}
+	firstRecovered := recovered.Runs[0].RunID
+	if firstRecovered != string(run1) && firstRecovered != string(run2) {
+		t.Fatalf("first recovered run = %q, want run1 or run2", firstRecovered)
+	}
+	pendingEvents := listPendingEvents(t, second, "")
+	if len(pendingEvents) != 1 || pendingEvents[0].Event.RunID != firstRecovered || pendingEvents[0].Event.Type != runtimeevent.EventRunResumed {
+		t.Fatalf("pending events after first recover = %#v, want one RunResumed for %s", pendingEvents, firstRecovered)
+	}
+
+	recovered, err = second.Recover(ctx)
+	if err != nil {
+		t.Fatalf("second Recover returned error: %v", err)
+	}
+	if len(recovered.Runs) != 1 {
+		t.Fatalf("second recovered = %#v, want one run", recovered)
+	}
+	secondRecovered := recovered.Runs[0].RunID
+	if secondRecovered != string(run1) && secondRecovered != string(run2) {
+		t.Fatalf("second recovered run = %q, want run1 or run2", secondRecovered)
+	}
+	if secondRecovered == firstRecovered {
+		t.Fatalf("second recovered run = %q, want the other run", secondRecovered)
+	}
+	pendingEvents = listPendingEvents(t, second, "")
+	if len(pendingEvents) != 2 {
+		t.Fatalf("pending events after second recover = %#v, want two resume events", pendingEvents)
+	}
+	resumedByRun := map[string]int{}
+	for _, event := range pendingEvents {
+		if event.Event.Type == runtimeevent.EventRunResumed {
+			resumedByRun[event.Event.RunID]++
+		}
+	}
+	if resumedByRun[string(run1)] != 1 || resumedByRun[string(run2)] != 1 {
+		t.Fatalf("resume events by run = %#v, want one per run", resumedByRun)
+	}
+}
+
+func TestAgentRunnerRecoverCanResumeAgainAfterCheckpointChanges(t *testing.T) {
+	ctx := context.Background()
+	states := state.NewMemoryStateStore()
+	events := state.NewMemoryEventStore()
+	effects := state.NewMemoryEffectStore()
+	inbox := state.NewMemoryEventInbox()
+	model := &scriptedLLM{}
+	first := mustRunnerWithStores(t, mustRuntime(t, model), &recordingTools{}, states, events, effects, inbox)
+
+	runID := startAndProcessRunStarted(t, first, Task{
+		Input: "recover after checkpoint",
+		Agent: llm.AgentProfile{Name: "default", Model: "mock-native"},
+	})
+
+	second := mustRunnerWithStores(t, mustRuntime(t, model), &recordingTools{}, states, events, effects, inbox)
+	if recovered, err := second.Recover(ctx); err != nil || len(recovered.Runs) != 1 {
+		t.Fatalf("Recover returned %#v, %v; want one run", recovered, err)
+	}
+	firstResume := listPendingEvents(t, second, runID)[0].Event.ID
+	advanced, err := second.Advance(ctx, runID)
+	if err != nil {
+		t.Fatalf("Advance RunResumed returned error: %v", err)
+	}
+	if advanced.Event == nil || advanced.Event.ID != firstResume {
+		t.Fatalf("advanced = %#v, want first resume event %s", advanced, firstResume)
+	}
+	if recovered, err := second.Recover(ctx); err != nil || len(recovered.Runs) != 1 || recovered.Runs[0].PendingEvents != 0 {
+		t.Fatalf("Recover before checkpoint change returned %#v, %v; want no new pending resume event", recovered, err)
+	}
+
+	dispatched, err := second.DispatchNextEffect(ctx, runID)
+	if err != nil {
+		t.Fatalf("Dispatch model call returned error: %v", err)
+	}
+	if dispatched.Effect == nil || dispatched.Effect.Type != state.EffectCallModel {
+		t.Fatalf("dispatch = %#v, want model.call", dispatched)
+	}
+	advanced, err = second.Advance(ctx, runID)
+	if err != nil {
+		t.Fatalf("Advance ModelRequestCreated returned error: %v", err)
+	}
+	if advanced.Event == nil || advanced.Event.Type != runtimeevent.EventModelRequestCreated {
+		t.Fatalf("advanced = %#v, want ModelRequestCreated", advanced)
+	}
+
+	recovered, err := second.Recover(ctx)
+	if err != nil {
+		t.Fatalf("Recover after checkpoint change returned error: %v", err)
+	}
+	if len(recovered.Runs) != 1 || recovered.Runs[0].PendingEvents != 1 {
+		t.Fatalf("recovered = %#v, want one new resume event", recovered)
+	}
+	secondResume := listPendingEvents(t, second, runID)[0].Event.ID
+	if secondResume == firstResume {
+		t.Fatalf("second resume id = %q, want different from first checkpoint id", secondResume)
+	}
 }
 
 func TestAgentRunnerCompletesWithoutTools(t *testing.T) {
@@ -1043,13 +1301,62 @@ func hasToolResultMessage(messages []llmClient.Message, toolCallID string, conte
 
 func assertEventTypes(t *testing.T, events []runtimeevent.Event, want ...runtimeevent.Type) {
 	t.Helper()
-	if len(events) != len(want) {
-		t.Fatalf("events = %d, want %d: %#v", len(events), len(want), events)
+	filtered := make([]runtimeevent.Event, 0, len(events))
+	for _, event := range events {
+		if isObservableRuntimeEvent(event.Type) {
+			continue
+		}
+		filtered = append(filtered, event)
 	}
-	for i, event := range events {
+	if len(filtered) != len(want) {
+		t.Fatalf("events = %d, want %d: %#v", len(filtered), len(want), filtered)
+	}
+	for i, event := range filtered {
 		if event.Type != want[i] {
 			t.Fatalf("event[%d] = %q, want %q", i, event.Type, want[i])
 		}
+	}
+}
+
+func assertEffectLifecycleEvents(t *testing.T, runner *AgentRunner, runID RunID, effectType state.EffectType, want ...runtimeevent.Type) {
+	t.Helper()
+	result, err := runner.Result(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("Result returned error: %v", err)
+	}
+	got := make([]runtimeevent.Type, 0, len(want))
+	for _, event := range result.Events {
+		if event.Type != runtimeevent.EventEffectStarted && event.Type != runtimeevent.EventEffectSucceeded && event.Type != runtimeevent.EventEffectFailed {
+			continue
+		}
+		var payload EffectLifecyclePayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("decode effect lifecycle payload: %v", err)
+		}
+		if payload.EffectType == string(effectType) {
+			got = append(got, event.Type)
+		}
+	}
+	if len(got) != len(want) {
+		t.Fatalf("effect lifecycle events = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("effect lifecycle event[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func isObservableRuntimeEvent(eventType runtimeevent.Type) bool {
+	switch eventType {
+	case runtimeevent.EventEffectStarted,
+		runtimeevent.EventEffectSucceeded,
+		runtimeevent.EventEffectFailed,
+		runtimeevent.EventStateChanged,
+		runtimeevent.EventContextPersisted:
+		return true
+	default:
+		return false
 	}
 }
 

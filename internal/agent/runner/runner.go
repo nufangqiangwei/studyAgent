@@ -278,47 +278,246 @@ func (r *AgentRunner) Recover(ctx context.Context) (RecoverResult, error) {
 		return RecoverResult{}, err
 	}
 
-	recovered := make([]RecoverableRun, 0, len(runStates))
 	for _, runState := range runStates {
 		if runState.RunID == "" || runState.IsTerminal() {
 			continue
 		}
-		if err := r.enqueueRunResumed(ctx, runState); err != nil {
+
+		pendingResume, err := r.hasPendingRunResumed(ctx, runState)
+		if err != nil {
 			return RecoverResult{}, err
+		}
+		if pendingResume || isRunResumedEventID(runState.LastEventID) {
+			continue
 		}
 
-		pendingEvents, err := r.pendingEventCount(ctx, runState.RunID)
+		if _, err := r.enqueueRunResumed(ctx, runState); err != nil {
+			return RecoverResult{}, err
+		}
+		recovered, err := r.recoverableRun(ctx, runState)
 		if err != nil {
 			return RecoverResult{}, err
 		}
-		pendingEffects, err := r.pendingEffectCount(ctx, runState.RunID)
-		if err != nil {
-			return RecoverResult{}, err
-		}
-		recovered = append(recovered, RecoverableRun{
-			RunID:          runState.RunID,
-			State:          runState,
-			PendingEvents:  pendingEvents,
-			PendingEffects: pendingEffects,
-		})
+		return RecoverResult{Runs: []RecoverableRun{recovered}}, nil
 	}
 
-	return RecoverResult{Runs: recovered}, nil
+	for _, runState := range runStates {
+		if runState.RunID == "" || runState.IsTerminal() {
+			continue
+		}
+		pendingResume, err := r.hasPendingRunResumed(ctx, runState)
+		if err != nil {
+			return RecoverResult{}, err
+		}
+		if !pendingResume && !isRunResumedEventID(runState.LastEventID) {
+			continue
+		}
+		recovered, err := r.recoverableRun(ctx, runState)
+		if err != nil {
+			return RecoverResult{}, err
+		}
+		return RecoverResult{Runs: []RecoverableRun{recovered}}, nil
+	}
+
+	return RecoverResult{}, nil
+}
+
+func (r *AgentRunner) NextPendingWork(ctx context.Context) (PendingWork, bool, error) {
+	if r == nil {
+		return PendingWork{}, false, fmt.Errorf("agent runner is nil")
+	}
+	if r.eventInbox == nil {
+		return PendingWork{}, false, fmt.Errorf("agent runner event inbox is required")
+	}
+	if r.effectStore == nil {
+		return PendingWork{}, false, fmt.Errorf("agent runner effect store is required")
+	}
+
+	events, err := r.eventInbox.ListPending(ctx, "")
+	if err != nil {
+		return PendingWork{}, false, err
+	}
+	now := time.Now().UTC()
+	for _, event := range events {
+		if strings.TrimSpace(event.Event.RunID) == "" {
+			continue
+		}
+		if !event.EventClaimable(now) {
+			continue
+		}
+		return PendingWork{RunID: event.Event.RunID, Kind: PendingWorkEvent}, true, nil
+	}
+
+	effects, err := r.effectStore.ListPending(ctx, "")
+	if err != nil {
+		return PendingWork{}, false, err
+	}
+	for _, effect := range effects {
+		if strings.TrimSpace(effect.Effect.RunID) == "" {
+			continue
+		}
+		if !effect.EffectClaimable(now) {
+			continue
+		}
+		return PendingWork{RunID: effect.Effect.RunID, Kind: PendingWorkEffect}, true, nil
+	}
+	return PendingWork{}, false, nil
+}
+
+func (r *AgentRunner) Work(ctx context.Context) (WorkResult, error) {
+	work, ok, err := r.NextPendingWork(ctx)
+	if err != nil || !ok {
+		return WorkResult{}, err
+	}
+	switch work.Kind {
+	case PendingWorkEvent:
+		advanced, err := r.Advance(ctx, RunID(work.RunID))
+		if err != nil {
+			return WorkResult{}, err
+		}
+		return WorkResult{Ran: advanced.Status == AdvanceStatusEventProcessed, Advance: advanced}, nil
+	case PendingWorkEffect:
+		dispatched, err := r.DispatchNextEffect(ctx, RunID(work.RunID))
+		if err != nil {
+			return WorkResult{}, err
+		}
+		return WorkResult{Ran: dispatched.Status == AdvanceStatusEffectDispatched, Advance: dispatched}, nil
+	default:
+		return WorkResult{}, fmt.Errorf("runner: unsupported pending work kind %q", work.Kind)
+	}
 }
 
 func (r *AgentRunner) HandleEvent(ctx context.Context, event runtimeevent.Event) error {
+	_, err := r.enqueueEvent(ctx, event)
+	return err
+}
+
+func (r *AgentRunner) enqueueEvent(ctx context.Context, event runtimeevent.Event) (bool, error) {
 	if r == nil {
-		return fmt.Errorf("agent runner is nil")
+		return false, fmt.Errorf("agent runner is nil")
 	}
 	if r.eventInbox == nil {
-		return fmt.Errorf("agent runner event inbox is required")
+		return false, fmt.Errorf("agent runner event inbox is required")
 	}
 	completed, err := completeEvent(event)
 	if err != nil {
-		return err
+		return false, err
 	}
-	_, _, err = r.eventInbox.Append(ctx, completed)
-	return err
+	_, appended, err := r.eventInbox.Append(ctx, completed)
+	return appended, err
+}
+
+func (r *AgentRunner) SubmitUserInput(ctx context.Context, runID RunID, answer string) (LoopAdvanceResult, error) {
+	if r == nil {
+		return LoopAdvanceResult{}, fmt.Errorf("agent runner is nil")
+	}
+	result, err := r.Result(ctx, runID)
+	if err != nil {
+		return LoopAdvanceResult{}, err
+	}
+	target := ""
+	if result.State.Waiting != nil {
+		if result.State.Waiting.Reason != "user_input" {
+			return LoopAdvanceResult{}, fmt.Errorf("runner: run %s is not waiting for user input", runID)
+		}
+		target = result.State.Waiting.Target
+	}
+	requestEvent, ok, err := r.latestRunEvent(ctx, runID, runtimeevent.EventUserInputRequested, target)
+	if err != nil {
+		return LoopAdvanceResult{}, err
+	}
+	if !ok {
+		return LoopAdvanceResult{}, fmt.Errorf("runner: user input request not found for run %s", runID)
+	}
+	var request UserInputRequestedPayload
+	if err := json.Unmarshal(requestEvent.Payload, &request); err != nil {
+		return LoopAdvanceResult{}, fmt.Errorf("runner: decode user input request: %w", err)
+	}
+	received := UserInputReceivedPayload{
+		ToolCallID: request.ToolCallID,
+		ToolName:   request.ToolName,
+		Answer:     answer,
+	}
+	if strings.TrimSpace(received.Answer) == "" && request.Default != "" {
+		received.Answer = request.Default
+		received.UsedDefault = true
+	}
+	event, err := r.dispatcher.NewEvent(runtimeevent.EventUserInputReceived, received,
+		runtimeevent.WithRunID(string(runID)),
+		runtimeevent.WithSource(r.source),
+		runtimeevent.WithCausationID(requestEvent.ID),
+	)
+	if err != nil {
+		return LoopAdvanceResult{}, err
+	}
+	if err := r.HandleEvent(ctx, event); err != nil {
+		return LoopAdvanceResult{}, err
+	}
+	latest, err := r.Result(ctx, runID)
+	if err != nil {
+		return LoopAdvanceResult{}, err
+	}
+	return LoopAdvanceResult{
+		RunID:  string(runID),
+		Status: AdvanceStatusEventEnqueued,
+		State:  latest.State,
+		Event:  &event,
+	}, nil
+}
+
+func (r *AgentRunner) SubmitUserApproval(ctx context.Context, runID RunID, approved bool, reason string) (LoopAdvanceResult, error) {
+	if r == nil {
+		return LoopAdvanceResult{}, fmt.Errorf("agent runner is nil")
+	}
+	result, err := r.Result(ctx, runID)
+	if err != nil {
+		return LoopAdvanceResult{}, err
+	}
+	target := ""
+	if result.State.Waiting != nil {
+		if result.State.Waiting.Reason != "user_approval" {
+			return LoopAdvanceResult{}, fmt.Errorf("runner: run %s is not waiting for user approval", runID)
+		}
+		target = result.State.Waiting.Target
+	}
+	requestEvent, ok, err := r.latestRunEvent(ctx, runID, runtimeevent.EventUserApprovalRequired, target)
+	if err != nil {
+		return LoopAdvanceResult{}, err
+	}
+	if !ok {
+		return LoopAdvanceResult{}, fmt.Errorf("runner: user approval request not found for run %s", runID)
+	}
+	var request UserApprovalRequiredPayload
+	if err := json.Unmarshal(requestEvent.Payload, &request); err != nil {
+		return LoopAdvanceResult{}, fmt.Errorf("runner: decode user approval request: %w", err)
+	}
+	received := UserApprovalReceivedPayload{
+		ToolCallID: request.ToolCallID,
+		ToolName:   request.ToolName,
+		Approved:   approved,
+		Reason:     reason,
+	}
+	event, err := r.dispatcher.NewEvent(runtimeevent.EventUserApprovalReceived, received,
+		runtimeevent.WithRunID(string(runID)),
+		runtimeevent.WithSource(r.source),
+		runtimeevent.WithCausationID(requestEvent.ID),
+	)
+	if err != nil {
+		return LoopAdvanceResult{}, err
+	}
+	if err := r.HandleEvent(ctx, event); err != nil {
+		return LoopAdvanceResult{}, err
+	}
+	latest, err := r.Result(ctx, runID)
+	if err != nil {
+		return LoopAdvanceResult{}, err
+	}
+	return LoopAdvanceResult{
+		RunID:  string(runID),
+		Status: AdvanceStatusEventEnqueued,
+		State:  latest.State,
+		Event:  &event,
+	}, nil
 }
 
 func (r *AgentRunner) Advance(ctx context.Context, runID RunID) (LoopAdvanceResult, error) {
@@ -433,8 +632,20 @@ func (r *AgentRunner) DispatchNextEffect(ctx context.Context, runID RunID) (Loop
 		}, nil
 	}
 
+	if err := r.recordEffectLifecycle(ctx, runtimeevent.EventEffectStarted, stored.Effect, "started", ""); err != nil {
+		_ = r.effectStore.MarkFailed(ctx, stored.Effect.ID, r.workerOwner, err)
+		return LoopAdvanceResult{}, err
+	}
+
 	nextEvents, err := r.effectWorker.Execute(ctx, stored.Effect)
 	if err != nil {
+		_ = r.recordEffectLifecycle(ctx, runtimeevent.EventEffectFailed, stored.Effect, "failed", err.Error())
+		_ = r.effectStore.MarkFailed(ctx, stored.Effect.ID, r.workerOwner, err)
+		return LoopAdvanceResult{}, err
+	}
+	if len(nextEvents) > 1 {
+		err := fmt.Errorf("runner: effect %s produced %d events; effects must produce at most one event for resumable execution", stored.Effect.ID, len(nextEvents))
+		_ = r.recordEffectLifecycle(ctx, runtimeevent.EventEffectFailed, stored.Effect, "failed", err.Error())
 		_ = r.effectStore.MarkFailed(ctx, stored.Effect.ID, r.workerOwner, err)
 		return LoopAdvanceResult{}, err
 	}
@@ -451,6 +662,9 @@ func (r *AgentRunner) DispatchNextEffect(ctx context.Context, runID RunID) (Loop
 		}
 	}
 	if err := r.effectStore.MarkCompleted(ctx, stored.Effect.ID, r.workerOwner); err != nil {
+		return LoopAdvanceResult{}, err
+	}
+	if err := r.recordEffectLifecycle(ctx, runtimeevent.EventEffectSucceeded, stored.Effect, "succeeded", ""); err != nil {
 		return LoopAdvanceResult{}, err
 	}
 
@@ -496,10 +710,44 @@ func (r *AgentRunner) Result(ctx context.Context, runID RunID) (RunResult, error
 		Status:      runState.Phase,
 		FinalAnswer: data.FinalAnswer,
 		StepsUsed:   runState.Step,
+		WorkDir:     data.WorkDir,
 		State:       runState,
 		Events:      storedEvents,
 		Error:       runState.Error,
 	}, nil
+}
+
+func (r *AgentRunner) PendingCounts(ctx context.Context, runID RunID) (int, int, error) {
+	pendingEvents, err := r.pendingEventCount(ctx, string(runID))
+	if err != nil {
+		return 0, 0, err
+	}
+	pendingEffects, err := r.pendingEffectCount(ctx, string(runID))
+	if err != nil {
+		return 0, 0, err
+	}
+	return pendingEvents, pendingEffects, nil
+}
+
+func (r *AgentRunner) recordEffectLifecycle(ctx context.Context, eventType runtimeevent.Type, effect state.Effect, status string, message string) error {
+	if r == nil || r.events == nil || r.dispatcher == nil {
+		return nil
+	}
+	event, err := r.dispatcher.NewEvent(eventType, EffectLifecyclePayload{
+		EffectID:   effect.ID,
+		EffectType: string(effect.Type),
+		Status:     status,
+		Error:      message,
+	},
+		runtimeevent.WithRunID(effect.RunID),
+		runtimeevent.WithSource(r.source),
+		runtimeevent.WithCausationID(effect.ID),
+	)
+	if err != nil {
+		return err
+	}
+	_, err = r.events.Append(ctx, event)
+	return err
 }
 
 func (r *AgentRunner) dispatchEffects(ctx context.Context, effects []state.Effect) error {
@@ -645,26 +893,60 @@ func eventToolCallID(event runtimeevent.Event) string {
 	return payload.ToolCallID
 }
 
-func (r *AgentRunner) enqueueRunResumed(ctx context.Context, runState state.RunState) error {
+func (r *AgentRunner) enqueueRunResumed(ctx context.Context, runState state.RunState) (bool, error) {
 	if r == nil {
-		return fmt.Errorf("agent runner is nil")
+		return false, fmt.Errorf("agent runner is nil")
 	}
 	if r.dispatcher == nil {
-		return fmt.Errorf("agent runner dispatcher is required")
+		return false, fmt.Errorf("agent runner dispatcher is required")
 	}
 	event, err := r.dispatcher.NewEvent(runtimeevent.EventRunResumed, map[string]string{
 		"last_event_id": runState.LastEventID,
 		"phase":         string(runState.Phase),
 	},
-		runtimeevent.WithID(runResumedEventID(runState.RunID)),
+		runtimeevent.WithID(runResumedEventID(runState.RunID, runState.LastEventID)),
 		runtimeevent.WithRunID(runState.RunID),
 		runtimeevent.WithSource(r.source),
 		runtimeevent.WithCausationID(runState.LastEventID),
 	)
 	if err != nil {
-		return err
+		return false, err
 	}
-	return r.HandleEvent(ctx, event)
+	return r.enqueueEvent(ctx, event)
+}
+
+func (r *AgentRunner) recoverableRun(ctx context.Context, runState state.RunState) (RecoverableRun, error) {
+	pendingEvents, err := r.pendingEventCount(ctx, runState.RunID)
+	if err != nil {
+		return RecoverableRun{}, err
+	}
+	pendingEffects, err := r.pendingEffectCount(ctx, runState.RunID)
+	if err != nil {
+		return RecoverableRun{}, err
+	}
+	return RecoverableRun{
+		RunID:          runState.RunID,
+		State:          runState,
+		PendingEvents:  pendingEvents,
+		PendingEffects: pendingEffects,
+	}, nil
+}
+
+func (r *AgentRunner) hasPendingRunResumed(ctx context.Context, runState state.RunState) (bool, error) {
+	if r == nil || r.eventInbox == nil {
+		return false, nil
+	}
+	events, err := r.eventInbox.ListPending(ctx, runState.RunID)
+	if err != nil {
+		return false, err
+	}
+	resumeID := runResumedEventID(runState.RunID, runState.LastEventID)
+	for _, event := range events {
+		if event.Event.ID == resumeID && event.Event.Type == runtimeevent.EventRunResumed {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (r *AgentRunner) pendingEventCount(ctx context.Context, runID string) (int, error) {
@@ -689,8 +971,24 @@ func (r *AgentRunner) pendingEffectCount(ctx context.Context, runID string) (int
 	return len(effects), nil
 }
 
-func runResumedEventID(runID string) string {
-	return "resume_" + strings.ReplaceAll(runID, "-", "_")
+func runResumedEventID(runID string, lastEventID string) string {
+	if strings.TrimSpace(lastEventID) == "" {
+		lastEventID = "none"
+	}
+	return "resume_" + eventIDPart(runID) + "_" + eventIDPart(lastEventID)
+}
+
+func isRunResumedEventID(eventID string) bool {
+	return strings.HasPrefix(eventID, "resume_")
+}
+
+func eventIDPart(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "none"
+	}
+	replacer := strings.NewReplacer("-", "_", ".", "_", ":", "_", "/", "_", "\\", "_", " ", "_")
+	return replacer.Replace(value)
 }
 
 type runnerStateMachine struct {

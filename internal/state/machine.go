@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"time"
 
 	runtimeevent "agent/internal/event"
@@ -12,6 +13,22 @@ type AdvanceResult struct {
 	RunID   string   `json:"run_id"`
 	State   RunState `json:"state"`
 	Effects []Effect `json:"effects,omitempty"`
+}
+
+type StateChangedPayload struct {
+	PreviousPhase   RunPhase      `json:"previous_phase"`
+	NextPhase       RunPhase      `json:"next_phase"`
+	PreviousStep    int           `json:"previous_step"`
+	NextStep        int           `json:"next_step"`
+	PreviousWaiting *WaitingState `json:"previous_waiting,omitempty"`
+	NextWaiting     *WaitingState `json:"next_waiting,omitempty"`
+	PreviousError   *ErrorState   `json:"previous_error,omitempty"`
+	NextError       *ErrorState   `json:"next_error,omitempty"`
+}
+
+type ContextPersistedPayload struct {
+	LastEventID      string `json:"last_event_id"`
+	EffectsPersisted int    `json:"effects_persisted"`
 }
 
 type Machine struct {
@@ -107,10 +124,66 @@ func (m *Machine) Advance(ctx context.Context, event runtimeevent.Event) (*Advan
 	if err := m.states.Save(ctx, next); err != nil {
 		return nil, err
 	}
+	if stateChanged(current, next) {
+		if err := m.recordObservableEvent(ctx, runtimeevent.EventStateChanged, event, StateChangedPayload{
+			PreviousPhase:   current.Phase,
+			NextPhase:       next.Phase,
+			PreviousStep:    current.Step,
+			NextStep:        next.Step,
+			PreviousWaiting: cloneWaitingState(current.Waiting),
+			NextWaiting:     cloneWaitingState(next.Waiting),
+			PreviousError:   cloneErrorState(current.Error),
+			NextError:       cloneErrorState(next.Error),
+		}); err != nil {
+			return nil, err
+		}
+	}
+	if err := m.recordObservableEvent(ctx, runtimeevent.EventContextPersisted, event, ContextPersistedPayload{
+		LastEventID:      next.LastEventID,
+		EffectsPersisted: len(persistedEffects),
+	}); err != nil {
+		return nil, err
+	}
 
 	return &AdvanceResult{
 		RunID:   event.RunID,
 		State:   next,
 		Effects: persistedEffects,
 	}, nil
+}
+
+func (m *Machine) recordObservableEvent(ctx context.Context, eventType runtimeevent.Type, cause runtimeevent.Event, payload any) error {
+	event, err := runtimeevent.New(eventType, payload,
+		runtimeevent.WithRunID(cause.RunID),
+		runtimeevent.WithSource("state.machine"),
+		runtimeevent.WithCausationID(cause.ID),
+	)
+	if err != nil {
+		return err
+	}
+	_, err = m.events.Append(ctx, event)
+	return err
+}
+
+func stateChanged(previous RunState, next RunState) bool {
+	return previous.Phase != next.Phase ||
+		previous.Step != next.Step ||
+		!reflect.DeepEqual(previous.Waiting, next.Waiting) ||
+		!reflect.DeepEqual(previous.Error, next.Error)
+}
+
+func cloneWaitingState(waiting *WaitingState) *WaitingState {
+	if waiting == nil {
+		return nil
+	}
+	cloned := *waiting
+	return &cloned
+}
+
+func cloneErrorState(errorState *ErrorState) *ErrorState {
+	if errorState == nil {
+		return nil
+	}
+	cloned := *errorState
+	return &cloned
 }

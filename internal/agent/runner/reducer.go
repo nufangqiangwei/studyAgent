@@ -22,6 +22,7 @@ func (r ReActReducer) Match(ctx context.Context, runState state.RunState, event 
 	case runtimeevent.EventModelRequestCreated,
 		runtimeevent.EventModelResponseReceived,
 		runtimeevent.EventModelResponseFailed,
+		runtimeevent.EventToolCallRequested,
 		runtimeevent.EventToolCallDispatched,
 		runtimeevent.EventToolCallCompleted,
 		runtimeevent.EventToolCallFailed,
@@ -48,6 +49,8 @@ func (r ReActReducer) Reduce(ctx context.Context, runState state.RunState, event
 		return reduceModelResponseReceived(runState, event)
 	case runtimeevent.EventModelResponseFailed:
 		return reduceModelResponseFailed(runState, event)
+	case runtimeevent.EventToolCallRequested:
+		return reduceToolCallRequested(runState, event)
 	case runtimeevent.EventToolCallDispatched:
 		return reduceToolCallDispatched(runState, event)
 	case runtimeevent.EventToolCallCompleted:
@@ -175,6 +178,53 @@ func reduceModelResponseFailed(runState state.RunState, event runtimeevent.Event
 	return runState, []state.Effect{effect}, nil
 }
 
+func reduceToolCallRequested(runState state.RunState, event runtimeevent.Event) (state.RunState, []state.Effect, error) {
+	data, err := loadRunData(runState)
+	if err != nil {
+		return runState, nil, err
+	}
+
+	var payload ToolCallEventPayload
+	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		return runState, nil, fmt.Errorf("runner: decode tool request event: %w", err)
+	}
+	if strings.TrimSpace(payload.ToolCallID) == "" {
+		return runState, nil, fmt.Errorf("runner: tool request missing tool_call_id")
+	}
+
+	index := findPendingTool(data.PendingTools, payload.ToolCallID)
+	if index < 0 {
+		return runState, nil, fmt.Errorf("runner: pending tool call %q not found", payload.ToolCallID)
+	}
+	switch data.PendingTools[index].Status {
+	case toolCallRequested:
+		return runState, nil, nil
+	case toolCallPending:
+	default:
+		return runState, nil, nil
+	}
+
+	now := time.Now().UTC()
+	data.PendingTools[index].Status = toolCallRequested
+	data.PendingTools[index].UpdatedAt = now
+	runState.Phase = state.PhaseWaiting
+	runState.Waiting = &state.WaitingState{Reason: "tool_dispatch", Target: payload.ToolCallID}
+	if err := storeRunData(&runState, data); err != nil {
+		return runState, nil, err
+	}
+
+	call := llmClient.ToolCall{
+		ID:    data.PendingTools[index].ToolCallID,
+		Name:  data.PendingTools[index].ToolName,
+		Input: append(json.RawMessage(nil), data.PendingTools[index].Arguments...),
+	}
+	effect, err := newEffectWithPayload(runState.RunID, state.EffectConfirmTool, DispatchToolPayload{ToolCall: call})
+	if err != nil {
+		return runState, nil, err
+	}
+	return runState, []state.Effect{effect}, nil
+}
+
 func reduceToolCallDispatched(runState state.RunState, event runtimeevent.Event) (state.RunState, []state.Effect, error) {
 	data, err := loadRunData(runState)
 	if err != nil {
@@ -196,7 +246,7 @@ func reduceToolCallDispatched(runState state.RunState, event runtimeevent.Event)
 	if data.PendingTools[index].Status == toolCallDispatched {
 		return runState, nil, nil
 	}
-	if data.PendingTools[index].Status != toolCallPending {
+	if data.PendingTools[index].Status != toolCallPending && data.PendingTools[index].Status != toolCallRequested {
 		return runState, nil, nil
 	}
 
@@ -391,6 +441,7 @@ func reduceToolResult(runState state.RunState, toolCallID string, result llm.Too
 		return runState, nil, fmt.Errorf("runner: pending tool call %q not found", toolCallID)
 	}
 	if data.PendingTools[index].Status != toolCallPending &&
+		data.PendingTools[index].Status != toolCallRequested &&
 		data.PendingTools[index].Status != toolCallDispatched &&
 		data.PendingTools[index].Status != toolCallWaitingApproval &&
 		data.PendingTools[index].Status != toolCallWaitingInput {
@@ -443,7 +494,7 @@ func findPendingTool(calls []pendingToolCall, toolCallID string) int {
 		if calls[i].ToolCallID != toolCallID {
 			continue
 		}
-		if calls[i].Status == toolCallPending || calls[i].Status == toolCallDispatched || calls[i].Status == toolCallWaitingApproval || calls[i].Status == toolCallWaitingInput {
+		if calls[i].Status == toolCallPending || calls[i].Status == toolCallRequested || calls[i].Status == toolCallDispatched || calls[i].Status == toolCallWaitingApproval || calls[i].Status == toolCallWaitingInput {
 			return i
 		}
 		if fallback < 0 {
@@ -455,7 +506,7 @@ func findPendingTool(calls []pendingToolCall, toolCallID string) int {
 
 func hasPendingTool(calls []pendingToolCall) bool {
 	for _, call := range calls {
-		if call.Status == toolCallPending || call.Status == toolCallDispatched || call.Status == toolCallWaitingApproval || call.Status == toolCallWaitingInput {
+		if call.Status == toolCallPending || call.Status == toolCallRequested || call.Status == toolCallDispatched || call.Status == toolCallWaitingApproval || call.Status == toolCallWaitingInput {
 			return true
 		}
 	}

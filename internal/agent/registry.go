@@ -15,15 +15,16 @@ type LLMClient = llm.LLMClient
 type Logger = llm.Logger
 
 type CreatAgentOptions struct {
-	LLM      LLMClient
-	Model    string
-	Logger   Logger
-	MaxSteps int
-	WorkDir  string
-	In       systemIO.Reader
-	Out      systemIO.Writer
-	Session  session.Recorder
-	Policy   policy.Checker
+	LLM              LLMClient
+	Model            string
+	Logger           Logger
+	MaxSteps         int
+	WorkDir          string
+	In               systemIO.Reader
+	Out              systemIO.Writer
+	Session          session.Recorder
+	RuntimeStoreRoot string
+	Policy           policy.Checker
 }
 
 type Agent interface {

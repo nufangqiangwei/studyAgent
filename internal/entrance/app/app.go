@@ -60,6 +60,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer, errOut
 	if err != nil {
 		return fmt.Errorf("create session: %w", err)
 	}
+	runtimeStoreRoot := filepath.Join(filepath.Dir(sessionDir), "runtime")
 
 	var debugRecorder provider2.BodyDebugRecorder
 	if cfg.Debug {
@@ -95,15 +96,16 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer, errOut
 	}
 
 	agentSelector, err := newAgentSelector(ctx, agent.Catalog, agent.AnalyzeAgentName, agent.CreatAgentOptions{
-		LLM:      modelClient,
-		Model:    cfg.Model,
-		Logger:   logger,
-		MaxSteps: 20,
-		WorkDir:  workDir,
-		In:       in,
-		Out:      out,
-		Session:  sessionStore,
-		Policy:   policy.New(policyMode),
+		LLM:              modelClient,
+		Model:            cfg.Model,
+		Logger:           logger,
+		MaxSteps:         20,
+		WorkDir:          workDir,
+		In:               in,
+		Out:              out,
+		Session:          sessionStore,
+		RuntimeStoreRoot: runtimeStoreRoot,
+		Policy:           policy.New(policyMode),
 	})
 	if err != nil {
 		return err

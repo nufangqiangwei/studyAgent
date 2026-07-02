@@ -45,8 +45,10 @@ func TestMachineAdvanceStoresEventUpdatesStateAndPersistsEffect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List returned error: %v", err)
 	}
-	if len(storedEvents) != 1 || storedEvents[0].ID != started.ID {
-		t.Fatalf("events = %#v, want started event", storedEvents)
+	if !hasEvent(storedEvents, started.ID, runtimeevent.EventRunStarted) ||
+		!hasEventType(storedEvents, runtimeevent.EventStateChanged) ||
+		!hasEventType(storedEvents, runtimeevent.EventContextPersisted) {
+		t.Fatalf("events = %#v, want started, StateChanged, and ContextPersisted", storedEvents)
 	}
 
 	storedEffects, err := effects.ListPending(ctx, "run_1")
@@ -87,8 +89,10 @@ func TestMachineDispatchOnlyAdvancesAndPersistsEffects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List returned error: %v", err)
 	}
-	if len(storedEvents) != 1 {
-		t.Fatalf("events = %d, want only original event: %#v", len(storedEvents), storedEvents)
+	if !hasEventType(storedEvents, runtimeevent.EventRunStarted) ||
+		!hasEventType(storedEvents, runtimeevent.EventStateChanged) ||
+		!hasEventType(storedEvents, runtimeevent.EventContextPersisted) {
+		t.Fatalf("events = %#v, want original and observability events", storedEvents)
 	}
 	storedEffects, err := effects.ListPending(ctx, "run_1")
 	if err != nil {
@@ -133,8 +137,10 @@ func TestMachineAdvanceSkipsAlreadyStoredEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List returned error: %v", err)
 	}
-	if len(storedEvents) != 1 {
-		t.Fatalf("events = %d, want one stored event", len(storedEvents))
+	if !hasEvent(storedEvents, event.ID, runtimeevent.EventRunStarted) ||
+		!hasEventType(storedEvents, runtimeevent.EventStateChanged) ||
+		!hasEventType(storedEvents, runtimeevent.EventContextPersisted) {
+		t.Fatalf("events = %#v, want one driving event with observability events", storedEvents)
 	}
 	storedEffects, err := effects.ListPending(ctx, "run_1")
 	if err != nil {
@@ -143,4 +149,22 @@ func TestMachineAdvanceSkipsAlreadyStoredEvent(t *testing.T) {
 	if len(storedEffects) != 1 {
 		t.Fatalf("effects = %d, want one stored effect", len(storedEffects))
 	}
+}
+
+func hasEvent(events []runtimeevent.Event, id string, eventType runtimeevent.Type) bool {
+	for _, event := range events {
+		if event.ID == id && event.Type == eventType {
+			return true
+		}
+	}
+	return false
+}
+
+func hasEventType(events []runtimeevent.Event, eventType runtimeevent.Type) bool {
+	for _, event := range events {
+		if event.Type == eventType {
+			return true
+		}
+	}
+	return false
 }

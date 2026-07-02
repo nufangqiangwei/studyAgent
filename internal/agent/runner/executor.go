@@ -100,6 +100,8 @@ func (w *RuntimeEffectWorker) Execute(ctx context.Context, effect state.Effect) 
 		return w.executeExecuteModel(ctx, effect)
 	case state.EffectDispatchTool:
 		return w.executeDispatchTool(ctx, effect)
+	case state.EffectConfirmTool:
+		return w.executeConfirmTool(ctx, effect)
 	case state.EffectExecuteTool:
 		return w.executeExecuteTool(ctx, effect)
 	case state.EffectCompleteRun:
@@ -218,6 +220,23 @@ func (w *RuntimeEffectWorker) executeDispatchTool(ctx context.Context, effect st
 	if err != nil {
 		return nil, err
 	}
+
+	return []runtimeevent.Event{requested}, nil
+}
+
+func (w *RuntimeEffectWorker) executeConfirmTool(ctx context.Context, effect state.Effect) ([]runtimeevent.Event, error) {
+	var payload DispatchToolPayload
+	if err := json.Unmarshal(effect.Payload, &payload); err != nil {
+		return nil, fmt.Errorf("runner: decode confirm tool effect: %w", err)
+	}
+	call := cloneToolCall(payload.ToolCall)
+	if strings.TrimSpace(call.ID) == "" {
+		return nil, fmt.Errorf("runner: tool call id is required")
+	}
+	if strings.TrimSpace(call.Name) == "" {
+		return nil, fmt.Errorf("runner: tool name is required")
+	}
+
 	dispatched, err := newRuntimeEvent(runtimeevent.EventToolCallDispatched, effect.RunID, ToolCallEventPayload{
 		ToolCallID: call.ID,
 		ToolName:   call.Name,
@@ -226,8 +245,7 @@ func (w *RuntimeEffectWorker) executeDispatchTool(ctx context.Context, effect st
 	if err != nil {
 		return nil, err
 	}
-
-	return []runtimeevent.Event{requested, dispatched}, nil
+	return []runtimeevent.Event{dispatched}, nil
 }
 
 func (w *RuntimeEffectWorker) executeExecuteTool(ctx context.Context, effect state.Effect) ([]runtimeevent.Event, error) {

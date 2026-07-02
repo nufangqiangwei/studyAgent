@@ -29,5 +29,12 @@ func (Run) Execute(ctx context.Context, env content.Env, args []string) error {
 	if env.Logger != nil {
 		env.Logger.Infof("running task with provider=%s model=%s workdir=%s", env.Config.Provider, env.Config.Model, env.Config.WorkDir)
 	}
+	if async, ok := env.Agent.(content.AsyncAgentRunner); ok {
+		status, err := async.Submit(ctx, task)
+		if err != nil {
+			return err
+		}
+		return printAsyncStatus(env, "Submitted", status)
+	}
 	return env.Agent.Run(ctx, task)
 }

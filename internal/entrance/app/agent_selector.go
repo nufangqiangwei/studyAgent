@@ -2,6 +2,7 @@ package app
 
 import (
 	"agent/internal/agent"
+	"agent/internal/content"
 	"context"
 	"fmt"
 	"strings"
@@ -43,6 +44,70 @@ func (s *agentSelector) Run(ctx context.Context, task string) error {
 	return s.current.Run(ctx, task)
 }
 
+func (s *agentSelector) Submit(ctx context.Context, task string) (content.AsyncRunStatus, error) {
+	async, err := s.asyncAgent()
+	if err != nil {
+		return content.AsyncRunStatus{}, err
+	}
+	return async.Submit(ctx, task)
+}
+
+func (s *agentSelector) Recover(ctx context.Context) (content.AsyncRecoverResult, error) {
+	async, err := s.asyncAgent()
+	if err != nil {
+		return content.AsyncRecoverResult{}, err
+	}
+	return async.Recover(ctx)
+}
+
+func (s *agentSelector) Work(ctx context.Context) (content.AsyncWorkResult, error) {
+	async, err := s.asyncAgent()
+	if err != nil {
+		return content.AsyncWorkResult{}, err
+	}
+	return async.Work(ctx)
+}
+
+func (s *agentSelector) Advance(ctx context.Context, runID string) (content.AsyncRunStatus, error) {
+	async, err := s.asyncAgent()
+	if err != nil {
+		return content.AsyncRunStatus{}, err
+	}
+	return async.Advance(ctx, runID)
+}
+
+func (s *agentSelector) DispatchNextEffect(ctx context.Context, runID string) (content.AsyncRunStatus, error) {
+	async, err := s.asyncAgent()
+	if err != nil {
+		return content.AsyncRunStatus{}, err
+	}
+	return async.DispatchNextEffect(ctx, runID)
+}
+
+func (s *agentSelector) SubmitUserInput(ctx context.Context, runID string, answer string) (content.AsyncRunStatus, error) {
+	async, err := s.asyncAgent()
+	if err != nil {
+		return content.AsyncRunStatus{}, err
+	}
+	return async.SubmitUserInput(ctx, runID, answer)
+}
+
+func (s *agentSelector) SubmitUserApproval(ctx context.Context, runID string, approved bool, reason string) (content.AsyncRunStatus, error) {
+	async, err := s.asyncAgent()
+	if err != nil {
+		return content.AsyncRunStatus{}, err
+	}
+	return async.SubmitUserApproval(ctx, runID, approved, reason)
+}
+
+func (s *agentSelector) Result(ctx context.Context, runID string) (content.AsyncRunStatus, error) {
+	async, err := s.asyncAgent()
+	if err != nil {
+		return content.AsyncRunStatus{}, err
+	}
+	return async.Result(ctx, runID)
+}
+
 func (s *agentSelector) ActiveAgentName() string {
 	if s == nil || s.current == nil {
 		return ""
@@ -75,6 +140,17 @@ func (s *agentSelector) SelectAgent(name string) error {
 	}
 	s.current = nextAgent
 	return nil
+}
+
+func (s *agentSelector) asyncAgent() (content.AsyncAgentRunner, error) {
+	if s == nil || s.current == nil {
+		return nil, fmt.Errorf("agent selector: active agent is not configured")
+	}
+	async, ok := s.current.(content.AsyncAgentRunner)
+	if !ok {
+		return nil, fmt.Errorf("agent selector: active agent %q does not support async runtime", s.current.Name())
+	}
+	return async, nil
 }
 
 func (s *agentSelector) canonicalAgentName(name string) (string, error) {

@@ -27,6 +27,43 @@ type AgentRunner interface {
 	Run(context.Context, string) error
 }
 
+type AsyncRunStatus struct {
+	RunID              string
+	AdvanceStatus      string
+	Phase              string
+	FinalAnswer        string
+	StepsUsed          int
+	WorkDir            string
+	WaitingReason      string
+	WaitingTarget      string
+	PendingEvents      int
+	PendingEffects     int
+	EventType          string
+	EffectType         string
+	ProducedEventTypes []string
+	Error              string
+}
+
+type AsyncRecoverResult struct {
+	Runs []AsyncRunStatus
+}
+
+type AsyncWorkResult struct {
+	Ran    bool
+	Status AsyncRunStatus
+}
+
+type AsyncAgentRunner interface {
+	Submit(context.Context, string) (AsyncRunStatus, error)
+	Recover(context.Context) (AsyncRecoverResult, error)
+	Work(context.Context) (AsyncWorkResult, error)
+	Advance(context.Context, string) (AsyncRunStatus, error)
+	DispatchNextEffect(context.Context, string) (AsyncRunStatus, error)
+	SubmitUserInput(context.Context, string, string) (AsyncRunStatus, error)
+	SubmitUserApproval(context.Context, string, bool, string) (AsyncRunStatus, error)
+	Result(context.Context, string) (AsyncRunStatus, error)
+}
+
 type AgentSelector interface {
 	ActiveAgentName() string
 	ListAgentNames() []string
