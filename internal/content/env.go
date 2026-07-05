@@ -1,7 +1,6 @@
 package content
 
 import (
-	"agent/internal/session"
 	"context"
 	systemIO "io"
 )
@@ -27,6 +26,43 @@ type AgentRunner interface {
 	Run(context.Context, string) error
 }
 
+type AsyncRunStatus struct {
+	RunID              string
+	AdvanceStatus      string
+	Phase              string
+	FinalAnswer        string
+	StepsUsed          int
+	WorkDir            string
+	WaitingReason      string
+	WaitingTarget      string
+	PendingEvents      int
+	PendingEffects     int
+	EventType          string
+	EffectType         string
+	ProducedEventTypes []string
+	Error              string
+}
+
+type AsyncRecoverResult struct {
+	Runs []AsyncRunStatus
+}
+
+type AsyncWorkResult struct {
+	Ran    bool
+	Status AsyncRunStatus
+}
+
+type AsyncAgentRunner interface {
+	Submit(context.Context, string) (AsyncRunStatus, error)
+	Recover(context.Context) (AsyncRecoverResult, error)
+	Work(context.Context) (AsyncWorkResult, error)
+	Advance(context.Context, string) (AsyncRunStatus, error)
+	DispatchNextEffect(context.Context, string) (AsyncRunStatus, error)
+	SubmitUserInput(context.Context, string, string) (AsyncRunStatus, error)
+	SubmitUserApproval(context.Context, string, bool, string) (AsyncRunStatus, error)
+	Result(context.Context, string) (AsyncRunStatus, error)
+}
+
 type AgentSelector interface {
 	ActiveAgentName() string
 	ListAgentNames() []string
@@ -50,14 +86,12 @@ type CommandRegistry interface {
 }
 
 type Env struct {
-	IO         IO
-	Agent      AgentRunner
-	Registry   CommandRegistry
-	Logger     Logger
-	Config     Config
-	Session    session.Recorder
-	EventScope session.EventScope
-	RunModel   string // cli 或者 cmd
+	IO       IO
+	Agent    AgentRunner
+	Registry CommandRegistry
+	Logger   Logger
+	Config   Config
+	RunModel string // cli 或者 cmd
 }
 
 type envContextKey struct{}
@@ -88,18 +122,6 @@ func (e Env) WithRegistry(registry CommandRegistry) Env {
 // WithLogger returns an environment copy with Logger replaced.
 func (e Env) WithLogger(logger Logger) Env {
 	e.Logger = logger
-	return e
-}
-
-// WithSession returns an environment copy with the session recorder replaced.
-func (e Env) WithSession(recorder session.Recorder) Env {
-	e.Session = recorder
-	return e
-}
-
-// WithEventScope returns an environment copy with event metadata replaced.
-func (e Env) WithEventScope(scope session.EventScope) Env {
-	e.EventScope = scope
 	return e
 }
 

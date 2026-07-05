@@ -1,11 +1,10 @@
 package app
 
 import (
-	"agent/internal/agent"
-	agentsession "agent/internal/session"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -49,19 +48,33 @@ func TestRunCommandUsesStartupWrapper(t *testing.T) {
 	configureTestHome(t)
 
 	workDir := t.TempDir()
-	var out bytes.Buffer
-	var errOut bytes.Buffer
 
-	err := Run(context.Background(), []string{"--workdir", workDir, "run", "hello"}, strings.NewReader(""), &out, &errOut)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
+	out := runAppCommand(t, nil, workDir, "", "run", "hello")
+	runID := requireSubmittedRunID(t, out)
+	if !strings.Contains(out, "Submitted run: "+runID) {
+		t.Fatalf("output missing submitted run:\n%s", out)
 	}
-	if !strings.Contains(out.String(), "Mock LLM response") {
-		t.Fatalf("output missing mock response:\n%s", out.String())
+
+	result := driveRunToCompletion(t, nil, workDir, runID, nil)
+	if !strings.Contains(result, "Mock LLM response") {
+		t.Fatalf("result missing mock response:\n%s", result)
 	}
 }
 
-func TestRunUsesOneAgentFileForStartupConversation(t *testing.T) {
+func TestRunWorkCommandDrivesSubmittedRunWithoutRunID(t *testing.T) {
+	configureTestHome(t)
+
+	workDir := t.TempDir()
+	out := runAppCommand(t, nil, workDir, "", "run", "hello worker")
+	runID := requireSubmittedRunID(t, out)
+
+	result := driveRunToCompletionWithWork(t, nil, workDir, runID, nil)
+	if !strings.Contains(result, "Mock LLM response") {
+		t.Fatalf("result missing mock response:\n%s", result)
+	}
+}
+
+func TestRunDoesNotCreateLegacySessionDirectory(t *testing.T) {
 	homeDir := configureTestHome(t)
 	workDir := t.TempDir()
 	var out bytes.Buffer
@@ -73,95 +86,46 @@ func TestRunUsesOneAgentFileForStartupConversation(t *testing.T) {
 	}
 
 	sessionRoot := filepath.Join(homeDir, ".testAgent", "sessions")
-	sessionEntries, err := os.ReadDir(sessionRoot)
-	if err != nil {
-		t.Fatalf("read session dir: %v", err)
-	}
-	if len(sessionEntries) != 1 || !sessionEntries[0].IsDir() {
-		t.Fatalf("session entries = %#v, want one session directory", sessionEntries)
-	}
-
-	sessionDir := filepath.Join(sessionRoot, sessionEntries[0].Name())
-	manifestData, err := os.ReadFile(filepath.Join(sessionDir, "manifest.json"))
-	if err != nil {
-		t.Fatalf("read manifest: %v", err)
-	}
-	var manifest agentsession.Manifest
-	if err := json.Unmarshal(manifestData, &manifest); err != nil {
-		t.Fatalf("parse manifest: %v", err)
-	}
-	if manifest.Layout.AgentsDir != "agents" || len(manifest.Agents) != 1 {
-		t.Fatalf("manifest = %#v, want one agent file", manifest)
-	}
-
-	agentData, err := os.ReadFile(filepath.Join(sessionDir, filepath.FromSlash(manifest.Agents[0].Path)))
-	if err != nil {
-		t.Fatalf("read agent session file: %v", err)
-	}
-	records := parseSessionRecords(t, agentData)
-	if len(records) < 6 {
-		t.Fatalf("records = %d, want at least 6: %#v", len(records), records)
-	}
-
-	var firstUser, secondUser bool
-	usageSummaries := 0
-	for _, record := range records {
-		if record.Timestamp.IsZero() {
-			t.Fatalf("record timestamp missing: %#v", record)
-		}
-		if record.Kind == agentsession.RecordKindMessage && record.Message != nil && record.Message.Role == "user" {
-			if record.AgentName == agent.AnalyzeAgentName && strings.Contains(record.Message.Content, "first") {
-				firstUser = true
-			}
-			if record.AgentName == agent.DefaultAgentName && strings.Contains(record.Message.Content, "second") {
-				secondUser = true
-			}
-		}
-		if record.Kind == agentsession.RecordKindUsageSummary {
-			usageSummaries++
-		}
-	}
-	if !firstUser || !secondUser {
-		t.Fatalf("missing expected user message records: %#v", records)
-	}
-	if usageSummaries != 2 {
-		t.Fatalf("usage summaries = %d, want 2: %#v", usageSummaries, records)
+	if _, err := os.Stat(sessionRoot); !os.IsNotExist(err) {
+		t.Fatalf("legacy session directory exists or stat failed unexpectedly: %v", err)
 	}
 }
 
-func TestRunBindsEnvToToolContext(t *testing.T) {
+func TestRunExecutesToolCallsThroughRunner(t *testing.T) {
 	homeDir := configureTestHome(t)
 	workDir := t.TempDir()
-	var seenToolResult bool
+	var requestCount int
+	var sawToolResultMessage bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload struct {
 			Tools    []any `json:"tool"`
 			Messages []struct {
-				Role       string `json:"role"`
-				Content    string `json:"content"`
-				ToolCallID string `json:"tool_call_id"`
+				Role string `json:"role"`
 			} `json:"messages"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
-
-		w.Header().Set("Content-Type", "application/json")
 		if len(payload.Tools) == 0 {
-			t.Fatal("request missing tool")
+			t.Fatal("request missing tool definitions")
 		}
-		if len(payload.Messages) > 0 {
-			lastMessage := payload.Messages[len(payload.Messages)-1]
-			if lastMessage.Role == "tool" && lastMessage.ToolCallID == "call_ask_user_1" && lastMessage.Content == "web app" {
-				seenToolResult = true
-				_, _ = w.Write([]byte(`{
-  "model": "gpt-test",
-  "choices": [{"finish_reason": "stop", "message": {"content": "final answer"}}]
-}`))
-				return
+		requestCount++
+		hasToolResult := false
+		for _, message := range payload.Messages {
+			if message.Role == "tool" {
+				sawToolResultMessage = true
+				hasToolResult = true
 			}
 		}
 
+		w.Header().Set("Content-Type", "application/json")
+		if hasToolResult {
+			_, _ = w.Write([]byte(`{
+  "model": "gpt-test",
+  "choices": [{"finish_reason": "stop", "message": {"content": "tool flow complete"}}]
+}`))
+			return
+		}
 		_, _ = w.Write([]byte(`{
   "model": "gpt-test",
   "choices": [{
@@ -188,22 +152,120 @@ func TestRunBindsEnvToToolContext(t *testing.T) {
   "api_key": "secret-token"
 }`))
 
-	var out bytes.Buffer
-	var errOut bytes.Buffer
-
-	err := Run(context.Background(), []string{"--workdir", workDir, "run", "build a feature"}, strings.NewReader("web app\n"), &out, &errOut)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
+	out := runAppCommand(t, nil, workDir, "", "run", "build a feature")
+	runID := requireSubmittedRunID(t, out)
+	inputSent := false
+	result := driveRunToCompletion(t, nil, workDir, runID, func(stepOutput string) {
+		if inputSent || !strings.Contains(stepOutput, "Waiting: user_input") {
+			return
+		}
+		runAppCommand(t, nil, workDir, "", "input", runID, "backend")
+		inputSent = true
+	})
+	if requestCount != 2 {
+		t.Fatalf("requests = %d, want 2", requestCount)
 	}
-	if !seenToolResult {
-		t.Fatal("model did not receive ask_user tool result")
+	if !sawToolResultMessage {
+		t.Fatal("llm did not receive tool result message")
 	}
-	wantAgents := []string{agent.AnalyzeAgentName, agent.DefaultAgentName, agent.ToolsTesterAgentName}
-	if got := agent.RegisteredAgentNames(); !reflect.DeepEqual(got, wantAgents) {
+	if !inputSent {
+		t.Fatal("run never requested user input")
+	}
+	if !strings.Contains(result, "tool flow complete") {
+		t.Fatalf("result missing final answer:\n%s", result)
+	}
+	wantAgents := []string{analyzeAgentName, defaultAgentName, toolsTesterAgentName}
+	if got := registeredAgentNames(); !reflect.DeepEqual(got, wantAgents) {
 		t.Fatalf("registered agent names = %#v, want %#v", got, wantAgents)
 	}
-	if got := out.String(); !strings.Contains(got, "? Which target?") || !strings.Contains(got, "final answer") {
-		t.Fatalf("output missing tool prompt or final answer:\n%s", got)
+}
+
+func TestRunRestoresSubmittedWorkDirWhenSteppingFromAnotherDirectory(t *testing.T) {
+	homeDir := configureTestHome(t)
+	workDirA := t.TempDir()
+	workDirB := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDirA, "marker.txt"), []byte("from submitted workspace\n"), 0600); err != nil {
+		t.Fatalf("write marker A: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDirB, "marker.txt"), []byte("from step workspace\n"), 0600); err != nil {
+		t.Fatalf("write marker B: %v", err)
+	}
+
+	var requestCount int
+	var sawSubmittedWorkspace bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		requestCount++
+		hasToolResult := false
+		for _, message := range payload.Messages {
+			if message.Role != "tool" {
+				continue
+			}
+			hasToolResult = true
+			if strings.Contains(message.Content, "from submitted workspace") {
+				sawSubmittedWorkspace = true
+			}
+			if strings.Contains(message.Content, "from step workspace") {
+				t.Fatalf("tool used step command workspace instead of submitted workspace: %q", message.Content)
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if hasToolResult {
+			_, _ = w.Write([]byte(`{
+  "model": "gpt-test",
+  "choices": [{"finish_reason": "stop", "message": {"content": "workspace restored"}}]
+}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{
+  "model": "gpt-test",
+  "choices": [{
+    "finish_reason": "tool_calls",
+    "message": {
+      "content": "",
+      "tool_calls": [{
+        "id": "call_read_marker_1",
+        "type": "function",
+        "function": {
+          "name": "read_file",
+          "arguments": "{\"path\":\"marker.txt\"}"
+        }
+      }]
+    }
+  }]
+}`))
+	}))
+	defer server.Close()
+
+	writeDefaultConfig(t, homeDir, []byte(`{
+  "model_url": "`+server.URL+`",
+  "model_name": "gpt-test",
+  "api_key": "secret-token"
+}`))
+
+	out := runAppCommand(t, nil, workDirA, "", "run", "read marker")
+	runID := requireSubmittedRunID(t, out)
+	result := driveRunToCompletion(t, nil, workDirB, runID, nil)
+	if requestCount != 2 {
+		t.Fatalf("requests = %d, want 2", requestCount)
+	}
+	if !sawSubmittedWorkspace {
+		t.Fatal("model did not receive tool result from submitted workspace")
+	}
+	if !strings.Contains(result, "Workspace: "+workDirA) {
+		t.Fatalf("result missing submitted workspace:\n%s", result)
+	}
+	if !strings.Contains(result, "workspace restored") {
+		t.Fatalf("result missing final answer:\n%s", result)
 	}
 }
 
@@ -225,23 +287,12 @@ func TestRunDebugWritesLLMBodyJSONL(t *testing.T) {
   "api_key": "secret-token"
 }`))
 
-	var out bytes.Buffer
-	var errOut bytes.Buffer
-	err := Run(context.Background(), []string{"--debug", "--workdir", workDir, "run", "hello debug"}, strings.NewReader(""), &out, &errOut)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
+	out := runAppCommand(t, []string{"--debug"}, workDir, "", "run", "hello debug")
+	runID := requireSubmittedRunID(t, out)
+	_ = driveRunToCompletion(t, []string{"--debug"}, workDir, runID, nil)
 
-	sessionRoot := filepath.Join(homeDir, ".testAgent", "sessions")
-	sessionEntries, err := os.ReadDir(sessionRoot)
-	if err != nil {
-		t.Fatalf("read session root: %v", err)
-	}
-	if len(sessionEntries) != 1 || !sessionEntries[0].IsDir() {
-		t.Fatalf("session entries = %#v, want one session directory", sessionEntries)
-	}
-
-	debugPath := filepath.Join(sessionRoot, sessionEntries[0].Name(), "llm.jsonl")
+	debugRoot := filepath.Join(homeDir, ".testAgent", "debug")
+	debugPath := findFirstFile(t, debugRoot, "llm.jsonl")
 	data, err := os.ReadFile(debugPath)
 	if err != nil {
 		t.Fatalf("read debug jsonl: %v", err)
@@ -296,19 +347,16 @@ func TestRunLoadsDefaultConfigFile(t *testing.T) {
   "api_key": "secret-token"
 }`))
 
-	var out bytes.Buffer
-	var errOut bytes.Buffer
-	err := Run(context.Background(), []string{"--workdir", workDir, "run", "hello"}, strings.NewReader(""), &out, &errOut)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
+	out := runAppCommand(t, nil, workDir, "", "run", "hello")
+	runID := requireSubmittedRunID(t, out)
+	result := driveRunToCompletion(t, nil, workDir, runID, nil)
 
-	got := out.String()
+	got := result
 	if !strings.Contains(got, "openai response") {
 		t.Fatalf("output missing model response:\n%s", got)
 	}
-	if strings.Contains(got, "secret-token") || strings.Contains(errOut.String(), "secret-token") {
-		t.Fatalf("api key leaked in output:\nout=%s\nerr=%s", got, errOut.String())
+	if strings.Contains(got, "secret-token") {
+		t.Fatalf("api key leaked in output:\nout=%s", got)
 	}
 }
 
@@ -337,19 +385,16 @@ func TestRunInfersDeepSeekProviderFromConfigFileModelName(t *testing.T) {
   "api_key": "secret-token"
 }`))
 
-	var out bytes.Buffer
-	var errOut bytes.Buffer
-	err := Run(context.Background(), []string{"--workdir", workDir, "run", "hello"}, strings.NewReader(""), &out, &errOut)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
+	out := runAppCommand(t, nil, workDir, "", "run", "hello")
+	runID := requireSubmittedRunID(t, out)
+	result := driveRunToCompletion(t, nil, workDir, runID, nil)
 
-	got := out.String()
+	got := result
 	if !strings.Contains(got, "deepseek response") {
 		t.Fatalf("output missing model response:\n%s", got)
 	}
-	if strings.Contains(got, "secret-token") || strings.Contains(errOut.String(), "secret-token") {
-		t.Fatalf("api key leaked in output:\nout=%s\nerr=%s", got, errOut.String())
+	if strings.Contains(got, "secret-token") {
+		t.Fatalf("api key leaked in output:\nout=%s", got)
 	}
 }
 
@@ -377,17 +422,108 @@ func TestRunModelNameOverridesProviderFlag(t *testing.T) {
   "api_key": "secret-token"
 }`))
 
-	var out bytes.Buffer
-	var errOut bytes.Buffer
-	err := Run(context.Background(), []string{"--workdir", workDir, "--provider", "openai", "run", "hello"}, strings.NewReader(""), &out, &errOut)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
+	out := runAppCommand(t, []string{"--provider", "openai"}, workDir, "", "run", "hello")
+	runID := requireSubmittedRunID(t, out)
+	result := driveRunToCompletion(t, []string{"--provider", "openai"}, workDir, runID, nil)
 
-	got := out.String()
+	got := result
 	if !strings.Contains(got, "deepseek chat response") {
 		t.Fatalf("output missing model response:\n%s", got)
 	}
+}
+
+func runAppCommand(t *testing.T, flags []string, workDir string, input string, args ...string) string {
+	t.Helper()
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	allArgs := make([]string, 0, len(flags)+len(args)+2)
+	allArgs = append(allArgs, flags...)
+	if workDir != "" {
+		allArgs = append(allArgs, "--workdir", workDir)
+	}
+	allArgs = append(allArgs, args...)
+	if err := Run(context.Background(), allArgs, strings.NewReader(input), &out, &errOut); err != nil {
+		t.Fatalf("Run(%v) returned error: %v\nstdout:\n%s\nstderr:\n%s", allArgs, err, out.String(), errOut.String())
+	}
+	if strings.Contains(errOut.String(), "secret-token") {
+		t.Fatalf("api key leaked in stderr:\n%s", errOut.String())
+	}
+	return out.String()
+}
+
+func requireSubmittedRunID(t *testing.T, output string) string {
+	t.Helper()
+
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Submitted run: ") {
+			runID := strings.TrimSpace(strings.TrimPrefix(line, "Submitted run: "))
+			if runID != "" {
+				return runID
+			}
+		}
+	}
+	t.Fatalf("submitted run id not found in output:\n%s", output)
+	return ""
+}
+
+func driveRunToCompletion(t *testing.T, flags []string, workDir string, runID string, afterStep func(string)) string {
+	t.Helper()
+
+	for i := 0; i < 40; i++ {
+		stepOutput := runAppCommand(t, flags, workDir, "", "step", runID)
+		if afterStep != nil {
+			afterStep(stepOutput)
+		}
+		result := runAppCommand(t, flags, workDir, "", "result", runID)
+		if strings.Contains(result, "Phase: completed") {
+			return result
+		}
+	}
+	t.Fatalf("run %s did not complete after 40 async steps", runID)
+	return ""
+}
+
+func driveRunToCompletionWithWork(t *testing.T, flags []string, workDir string, runID string, afterStep func(string)) string {
+	t.Helper()
+
+	for i := 0; i < 40; i++ {
+		stepOutput := runAppCommand(t, flags, workDir, "", "work")
+		if afterStep != nil {
+			afterStep(stepOutput)
+		}
+		result := runAppCommand(t, flags, workDir, "", "result", runID)
+		if strings.Contains(result, "Phase: completed") {
+			return result
+		}
+	}
+	t.Fatalf("run %s did not complete after 40 async worker ticks", runID)
+	return ""
+}
+
+func findFirstFile(t *testing.T, root string, name string) string {
+	t.Helper()
+
+	var found string
+	stopWalk := errors.New("stop walk")
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() || entry.Name() != name {
+			return nil
+		}
+		found = path
+		return stopWalk
+	})
+	if err != nil && !errors.Is(err, stopWalk) {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+	if found == "" {
+		t.Fatalf("%s not found under %s", name, root)
+	}
+	return found
 }
 
 func configureTestHome(t *testing.T) string {
@@ -409,22 +545,4 @@ func writeDefaultConfig(t *testing.T, homeDir string, data []byte) {
 	if err := os.WriteFile(configPath, data, 0600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-}
-
-func parseSessionRecords(t *testing.T, data []byte) []agentsession.Record {
-	t.Helper()
-
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	records := make([]agentsession.Record, 0, len(lines))
-	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		var record agentsession.Record
-		if err := json.Unmarshal([]byte(line), &record); err != nil {
-			t.Fatalf("parse session jsonl: %v\n%s", err, line)
-		}
-		records = append(records, record)
-	}
-	return records
 }

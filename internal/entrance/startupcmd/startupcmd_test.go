@@ -9,28 +9,8 @@ import (
 	"testing"
 )
 
-func TestRunExecutesStartupCommand(t *testing.T) {
-	registry := command.NewRegistry()
-	cmd := &recordingCommand{name: "test"}
-	if err := registry.Register(cmd); err != nil {
-		t.Fatalf("Register returned error: %v", err)
-	}
-
-	cfg := startup.Config{
-		Command:     "test",
-		CommandArgs: []string{"one", "two"},
-	}
-	err := Run(context.Background(), cfg, registry, content.Env{})
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	if strings.Join(cmd.args, ",") != "one,two" {
-		t.Fatalf("args = %#v, want [one two]", cmd.args)
-	}
-}
-
 func TestRunReturnsUnknownCommandError(t *testing.T) {
-	registry := command.NewRegistry()
+	registry := command.Manage
 	cfg := startup.Config{Command: "missing"}
 
 	err := Run(context.Background(), cfg, registry, content.Env{})

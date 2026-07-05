@@ -41,8 +41,8 @@ internal/logging
 internal/tools
   工具接口、注册表和具体工具，对外暴露 Tool 抽象
 
-internal/session
-  会话、消息、上下文窗口和历史记录
+internal/runtime/persistence
+  任务状态、agent snapshot、runtime snapshot 和事件持久化
 
 internal/workspace
   项目文件读取、搜索、路径处理和工作区元信息
@@ -68,7 +68,7 @@ internal/app -> internal/llm
 internal/app -> internal/tools
 internal/app -> internal/config
 internal/command -> internal/content
-internal/agent -> internal/session
+internal/runtime -> internal/runtime/persistence
 internal/agent -> internal/tools interfaces
 internal/agent -> internal/llm interfaces
 internal/tools -> internal/content

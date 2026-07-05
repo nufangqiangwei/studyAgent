@@ -35,7 +35,7 @@ func Parse(args []string) (Config, error) {
 	model := fs.String("model", "mock-native", "llm model name")
 	logLevel := fs.String("log-level", "info", "log level: debug, info, warn, error, silent")
 	workDir := fs.String("workdir", "", "workspace directory")
-	debug := fs.Bool("debug", false, "write llm request and response bodies to session debug jsonl")
+	debug := fs.Bool("debug", false, "write llm request and response bodies to debug jsonl")
 	policyMode := fs.String("policy-mode", "read", "tool permission policy mode: read, validate, or modify")
 	help := fs.Bool("help", false, "show help")
 	version := fs.Bool("version", false, "show version")

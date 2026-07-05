@@ -20,7 +20,7 @@
 │   ├── llm/
 │   ├── logging/
 │   ├── prompt/
-│   ├── session/
+│   ├── runtime/
 │   ├── startup/
 │   ├── startupcmd/
 │   ├── tools/
@@ -138,12 +138,12 @@
 - 未匹配到已注册命令的输入默认作为用户消息发给模型。
 - `/exit` 和 `/quit` 只作为交互会话控制，不作为 command 包命令。
 
-### internal/session
+### internal/runtime/persistence
 
-- 用户消息、模型消息和工具消息。
-- 会话历史。
-- 上下文裁剪。
-- token 或长度预算。
+- task state、agent snapshot、runtime snapshot 和 event store。
+- 支持文件持久化和 SQLite fallback/open 入口。
+- 为可恢复 runner 提供事实来源。
+- 不承载用户可读 session JSONL；如需审计视图，应由 runtime events 投影生成。
 
 ### internal/workspace
 
@@ -177,7 +177,7 @@ internal/tools
 
 ```text
 internal/workspace
-internal/session
+internal/runtime
 ```
 
 ## 解耦原则
@@ -195,5 +195,5 @@ internal/session
 建议下一阶段优先补齐：
 
 - `internal/workspace`：文件枚举、文件读取、文本搜索。
-- `internal/session`：消息历史、上下文窗口、步骤记录。
+- `internal/runtime/contextmgr`：上下文窗口、压缩接口和 token budget 策略接入。
 - `internal/config`：环境变量、用户级配置和更完整的配置优先级合并。

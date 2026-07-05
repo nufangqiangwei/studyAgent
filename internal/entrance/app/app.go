@@ -3,21 +3,19 @@ package app
 import (
 	"agent/internal/capability/command"
 	"agent/internal/content"
-	"agent/internal/entrance/cli"
+	"agent/internal/entrance/runtimecli"
 	"agent/internal/entrance/startupcmd"
 	appconfig "agent/internal/foundation/config"
 	provider2 "agent/internal/foundation/llmClient/provider"
 	"agent/internal/foundation/logging"
 	"agent/internal/foundation/policy"
 	"agent/internal/foundation/startup"
+	"agent/internal/runtime/contextmgr"
 	"context"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-
-	"agent/internal/agent"
-	"agent/internal/session"
 )
 
 // Run wires application dependencies and executes the requested command.
@@ -50,19 +48,21 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer, errOut
 		return err
 	}
 	cfg.PolicyMode = string(policyMode)
+	policyChecker := policy.New(policyMode)
 
-	sessionDir, err := session.DefaultDir()
+	dataDir, err := defaultDataDir()
 	if err != nil {
 		return err
 	}
-	sessionStore, err := session.NewFileStore(sessionDir)
-	if err != nil {
-		return fmt.Errorf("create session: %w", err)
-	}
+	runtimeStoreRoot := filepath.Join(dataDir, "runtime")
 
 	var debugRecorder provider2.BodyDebugRecorder
 	if cfg.Debug {
-		debugRecorder, err = provider2.NewJSONLDebugRecorder(filepath.Join(sessionStore.SessionDir(), "llm.jsonl"))
+		debugID, err := newAppID("debug")
+		if err != nil {
+			return err
+		}
+		debugRecorder, err = provider2.NewJSONLDebugRecorder(filepath.Join(dataDir, "debug", debugID, "llm.jsonl"))
 		if err != nil {
 			return fmt.Errorf("create debug recorder: %w", err)
 		}
@@ -82,7 +82,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer, errOut
 		return err
 	}
 	cfg.Provider = resolvedProvider
-	if result, lookupErr := agent.ResolveAndCacheContextWindowTokens(ctx, agent.ContextWindowLookupOptions{
+	if result, lookupErr := contextmgr.ResolveAndCacheContextWindowTokens(ctx, contextmgr.ContextWindowLookupOptions{
 		Provider: cfg.Provider,
 		Model:    cfg.Model,
 		ModelURL: cfg.ModelURL,
@@ -93,16 +93,16 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer, errOut
 		logger.Debugf("context window tokens resolved for provider=%s model=%s tokens=%d source=%s", cfg.Provider, result.Model, result.Tokens, result.Source)
 	}
 
-	agentSelector, err := newAgentSelector(ctx, agent.Catalog, agent.AnalyzeAgentName, agent.CreatAgentOptions{
-		LLM:      modelClient,
-		Model:    cfg.Model,
-		Logger:   logger,
-		MaxSteps: 20,
-		WorkDir:  workDir,
-		In:       in,
-		Out:      out,
-		Session:  sessionStore,
-		Policy:   policy.New(policyMode),
+	agentSelector, err := newAgentSelector(ctx, analyzeAgentName, agentSelectorOptions{
+		LLM:              modelClient,
+		Model:            cfg.Model,
+		Logger:           logger,
+		MaxSteps:         20,
+		WorkDir:          workDir,
+		In:               in,
+		Out:              out,
+		RuntimeStoreRoot: runtimeStoreRoot,
+		Policy:           policyChecker,
 	})
 	if err != nil {
 		return err
@@ -120,9 +120,8 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer, errOut
 			Out: out,
 			Err: errOut,
 		},
-		Agent:   agentSelector,
-		Logger:  logger,
-		Session: sessionStore,
+		Agent:  agentSelector,
+		Logger: logger,
 		Config: content.Config{
 			ConfigPath:       cfg.ConfigPath,
 			Provider:         cfg.Provider,
@@ -139,9 +138,20 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer, errOut
 	runCtx := content.WithEnv(ctx, &env)
 
 	if cfg.Command == "cli" {
-		return cli.Run(runCtx, env, command.Manage)
+		return runtimecli.Run(runCtx, env, command.Manage, runtimecli.Options{
+			LLM:    modelClient,
+			Policy: policyChecker,
+		})
 	}
 	return startupcmd.Run(runCtx, cfg, command.Manage, env)
+}
+
+func defaultDataDir() (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	return filepath.Join(homeDir, ".testAgent"), nil
 }
 
 func applyFileConfig(cfg startup.Config) (startup.Config, error) {

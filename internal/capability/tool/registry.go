@@ -4,9 +4,7 @@ import (
 	"agent/internal/capability/builtin"
 	"agent/internal/capability/builtin/askUser"
 	"agent/internal/capability/builtin/workspace"
-	"agent/internal/content"
 	"agent/internal/foundation/policy"
-	"agent/internal/session"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -26,20 +24,26 @@ type PolicyRequester interface {
 
 type Result = builtin.Result
 
-type policyDecisionEventPayload struct {
-	Request           policy.Request `json:"request"`
-	Result            policy.Result  `json:"result"`
-	Confirmed         *bool          `json:"confirmed,omitempty"`
-	ConfirmationError string         `json:"confirmation_error,omitempty"`
+type ApprovalRequiredError struct {
+	Request policy.Request
+	Result  policy.Result
+}
+
+func (e *ApprovalRequiredError) Error() string {
+	if e == nil {
+		return "policy approval required"
+	}
+	return fmt.Sprintf("policy approval required for tool %q: %s", e.Request.ToolName, e.Result.Reason)
 }
 
 type Manage struct {
-	tools  map[string]Tool
-	policy policy.Checker
+	tools               map[string]Tool
+	policy              policy.Checker
+	asyncPolicyApproval bool
 }
 
 var (
-	currentRegistry *Manage // 运行时候只读对象，只有在init中可被写入
+	currentRegistry *Manage
 	toolsNames      []string
 )
 
@@ -61,6 +65,7 @@ func init() {
 			panic(fmt.Errorf("register default tool %q: %w", tool.Name(), err))
 		}
 	}
+	toolsNames = registeredToolNames(currentRegistry)
 }
 
 func WithPolicy(checker policy.Checker) ManageOption {
@@ -68,6 +73,12 @@ func WithPolicy(checker policy.Checker) ManageOption {
 		if checker != nil {
 			manager.policy = checker
 		}
+	}
+}
+
+func WithAsyncPolicyApproval() ManageOption {
+	return func(manager *Manage) {
+		manager.asyncPolicyApproval = true
 	}
 }
 
@@ -89,7 +100,16 @@ func NewDefaultManage(options ...ManageOption) (*Manage, error) {
 }
 
 func AllToolNames() []string {
-	return toolsNames
+	return append([]string(nil), toolsNames...)
+}
+
+func registeredToolNames(registry *Manage) []string {
+	tools := registry.List()
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		names = append(names, tool.Name())
+	}
+	return names
 }
 
 func AddTool(name string, manager *Manage) error {
@@ -139,8 +159,9 @@ func (r *Manage) Subset(names []string, options ...ManageOption) (*Manage, error
 		return nil, fmt.Errorf("select tools: nil Manage")
 	}
 	manager := &Manage{
-		tools:  make(map[string]Tool, len(names)),
-		policy: r.policy,
+		tools:               make(map[string]Tool, len(names)),
+		policy:              r.policy,
+		asyncPolicyApproval: r.asyncPolicyApproval,
 	}
 	if manager.policy == nil {
 		manager.policy = policy.Default()
@@ -177,33 +198,32 @@ func (r *Manage) Execute(ctx context.Context, name string, input json.RawMessage
 	decision := checker.Check(request)
 	switch decision.Decision {
 	case policy.Allow:
-		if err := recordPolicyDecisionEvent(ctx, request, decision, nil, ""); err != nil {
-			return Result{}, err
-		}
 	case policy.Ask:
+		if r.asyncPolicyApproval {
+			return Result{}, &ApprovalRequiredError{Request: request, Result: decision}
+		}
 		confirmed, err := confirmPolicyDecision(ctx, request, decision)
 		if err != nil {
-			if recordErr := recordPolicyDecisionEvent(ctx, request, decision, nil, err.Error()); recordErr != nil {
-				return Result{}, recordErr
-			}
 			return Result{}, fmt.Errorf("policy confirmation for tool %q: %w", name, err)
-		}
-		if err := recordPolicyDecisionEvent(ctx, request, decision, &confirmed, ""); err != nil {
-			return Result{}, err
 		}
 		if !confirmed {
 			return Result{}, fmt.Errorf("policy denied tool %q: user declined confirmation: %s", name, decision.Reason)
 		}
 	case policy.Deny:
-		if err := recordPolicyDecisionEvent(ctx, request, decision, nil, ""); err != nil {
-			return Result{}, err
-		}
 		return Result{}, fmt.Errorf("policy denied tool %q: %s", name, decision.Reason)
 	default:
-		if err := recordPolicyDecisionEvent(ctx, request, decision, nil, ""); err != nil {
-			return Result{}, err
-		}
 		return Result{}, fmt.Errorf("policy returned unknown decision %q for tool %q", decision.Decision, name)
+	}
+	return tool.Execute(ctx, input)
+}
+
+func (r *Manage) ExecuteApproved(ctx context.Context, name string, input json.RawMessage) (Result, error) {
+	if r == nil {
+		return Result{}, fmt.Errorf("tool Manage is nil")
+	}
+	tool, ok := r.tools[name]
+	if !ok {
+		return Result{}, fmt.Errorf("unknown tool %q", name)
 	}
 	return tool.Execute(ctx, input)
 }
@@ -223,25 +243,4 @@ func (r *Manage) List() []Tool {
 		result = append(result, r.tools[name])
 	}
 	return result
-}
-
-func recordPolicyDecisionEvent(ctx context.Context, request policy.Request, result policy.Result, confirmed *bool, confirmationError string) error {
-	env, ok := content.EnvFromContext(ctx)
-	if !ok || env.Session == nil {
-		return nil
-	}
-	scope := env.EventScope
-	if scope.AgentName == "" {
-		scope.AgentName = env.Config.AgentName
-	}
-	err := session.SaveEvent(ctx, env.Session, scope, session.EventTypePolicyDecision, policyDecisionEventPayload{
-		Request:           request,
-		Result:            result,
-		Confirmed:         confirmed,
-		ConfirmationError: confirmationError,
-	})
-	if err != nil {
-		return fmt.Errorf("record policy decision event: %w", err)
-	}
-	return nil
 }
