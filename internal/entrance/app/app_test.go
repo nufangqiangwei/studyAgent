@@ -1,7 +1,6 @@
 package app
 
 import (
-	"agent/internal/agent"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -75,7 +74,7 @@ func TestRunWorkCommandDrivesSubmittedRunWithoutRunID(t *testing.T) {
 	}
 }
 
-func TestRunCreatesSessionDirectoryWithoutRuntimeConversationRecords(t *testing.T) {
+func TestRunDoesNotCreateLegacySessionDirectory(t *testing.T) {
 	homeDir := configureTestHome(t)
 	workDir := t.TempDir()
 	var out bytes.Buffer
@@ -87,17 +86,8 @@ func TestRunCreatesSessionDirectoryWithoutRuntimeConversationRecords(t *testing.
 	}
 
 	sessionRoot := filepath.Join(homeDir, ".testAgent", "sessions")
-	sessionEntries, err := os.ReadDir(sessionRoot)
-	if err != nil {
-		t.Fatalf("read session dir: %v", err)
-	}
-	if len(sessionEntries) != 1 || !sessionEntries[0].IsDir() {
-		t.Fatalf("session entries = %#v, want one session directory", sessionEntries)
-	}
-
-	sessionDir := filepath.Join(sessionRoot, sessionEntries[0].Name())
-	if _, err := os.Stat(filepath.Join(sessionDir, "manifest.json")); !os.IsNotExist(err) {
-		t.Fatalf("manifest exists or stat failed unexpectedly: %v", err)
+	if _, err := os.Stat(sessionRoot); !os.IsNotExist(err) {
+		t.Fatalf("legacy session directory exists or stat failed unexpectedly: %v", err)
 	}
 }
 
@@ -184,8 +174,8 @@ func TestRunExecutesToolCallsThroughRunner(t *testing.T) {
 	if !strings.Contains(result, "tool flow complete") {
 		t.Fatalf("result missing final answer:\n%s", result)
 	}
-	wantAgents := []string{agent.AnalyzeAgentName, agent.DefaultAgentName, agent.ToolsTesterAgentName}
-	if got := agent.RegisteredAgentNames(); !reflect.DeepEqual(got, wantAgents) {
+	wantAgents := []string{analyzeAgentName, defaultAgentName, toolsTesterAgentName}
+	if got := registeredAgentNames(); !reflect.DeepEqual(got, wantAgents) {
 		t.Fatalf("registered agent names = %#v, want %#v", got, wantAgents)
 	}
 }
@@ -301,8 +291,8 @@ func TestRunDebugWritesLLMBodyJSONL(t *testing.T) {
 	runID := requireSubmittedRunID(t, out)
 	_ = driveRunToCompletion(t, []string{"--debug"}, workDir, runID, nil)
 
-	sessionRoot := filepath.Join(homeDir, ".testAgent", "sessions")
-	debugPath := findFirstFile(t, sessionRoot, "llm.jsonl")
+	debugRoot := filepath.Join(homeDir, ".testAgent", "debug")
+	debugPath := findFirstFile(t, debugRoot, "llm.jsonl")
 	data, err := os.ReadFile(debugPath)
 	if err != nil {
 		t.Fatalf("read debug jsonl: %v", err)

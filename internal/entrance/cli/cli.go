@@ -12,9 +12,14 @@ import (
 	"agent/internal/content"
 )
 
-func Run(ctx context.Context, env content.Env, registry *command.Registry) error {
+type PlainInputHandler func(ctx context.Context, env content.Env, line string) error
+
+func Run(ctx context.Context, env content.Env, registry *command.Registry, handlePlainInput PlainInputHandler) error {
 	if registry == nil {
 		registry = command.Manage
+	}
+	if handlePlainInput == nil {
+		return fmt.Errorf("plain input handler is not configured")
 	}
 	if err := printBanner(env); err != nil {
 		return err
@@ -48,7 +53,7 @@ func Run(ctx context.Context, env content.Env, registry *command.Registry) error
 				return scanner.Text(), true
 			})
 		} else {
-			err = executeDefault(ctx, env, registry, line)
+			err = handlePlainInput(ctx, env, line)
 		}
 		if err != nil {
 			if errors.Is(err, errExit) {
@@ -119,27 +124,6 @@ func executeSuggestedCommand(ctx context.Context, env content.Env, registry *com
 
 func unknownCommandError(input string) error {
 	return fmt.Errorf("unknown command %q", input)
-}
-
-func executeDefault(ctx context.Context, env content.Env, registry *command.Registry, line string) error {
-	name := strings.ToLower(strings.TrimSpace(line))
-	if isAgentName(env.Agent, name) {
-		return registry.Execute(ctx, "set-agent", env, []string{name})
-	}
-	if registry != nil {
-		return registry.Execute(ctx, "run", env, []string{line})
-	}
-	return executeAgentTask(ctx, env, line)
-}
-
-func executeAgentTask(ctx context.Context, env content.Env, line string) error {
-	if env.Agent == nil {
-		return fmt.Errorf("agent runner is not configured")
-	}
-	if env.Logger != nil {
-		env.Logger.Infof("running task with provider=%s model=%s workdir=%s", env.Config.Provider, env.Config.Model, env.Config.WorkDir)
-	}
-	return env.Agent.Run(ctx, line)
 }
 
 func commandArgs(arg string) []string {

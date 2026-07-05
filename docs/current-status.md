@@ -44,7 +44,7 @@ main.go
 
 | 包 | 当前职责 |
 | --- | --- |
-| `internal/entrance/app` | 应用装配入口，串联 startup、config、logging、session、LLM provider、agent selector、CLI/startupcmd。 |
+| `internal/entrance/app` | 应用装配入口，串联 startup、config、logging、runtime persistence、LLM provider、agent selector、CLI/startupcmd。 |
 | `internal/entrance/cli` | 交互式 CLI 输入循环和 slash command 适配。 |
 | `internal/entrance/startupcmd` | 非交互命令入口，把启动命令交给 command registry。 |
 | `internal/capability/command` | 命令接口、注册表和命令分发。 |
@@ -59,7 +59,7 @@ main.go
 | `internal/capability/builtin/workspace` | workspace 只读工具和写入工具：`list_files`、`read_file`、`search_text`、`get_workspace_summary`、`apply_patch`、`write_file`。 |
 | `internal/foundation/workspace` | workspace 文件系统能力：安全路径解析、读取、搜索、列表、snapshot 和忽略规则。 |
 | `internal/foundation/policy` | read / validate / modify 三档工具权限策略。 |
-| `internal/session` | 用户可读 session JSONL、manifest、message/event/usage/context snapshot 记录能力。 |
+| `internal/runtime/persistence` | runtime task state、agent snapshot、runtime snapshot 和 event store 的本地持久化。 |
 | `internal/content` | 单次执行的 Env、IO、配置快照、小接口和 context 绑定。 |
 | `internal/prompt` | prompt builder 和内置 prompt。 |
 
@@ -72,7 +72,7 @@ main.go
 - policy 三档权限：现在位于 `internal/foundation/policy`。
 - 写入工具 `apply_patch` / `write_file`：已经实现，默认 dry-run，并接入 policy。
 - provider 多模型接入：现在位于 `internal/foundation/llmClient`。
-- session 文件存储：仍在 `internal/session`。
+- session 文件存储：已移除；恢复事实来源统一到 `internal/runtime/persistence`。
 
 旧文档里描述的同步 `NativeLoop` 已不再是当前代码的实际文件结构。现在的替代实现是：
 
@@ -96,7 +96,7 @@ main.go
   -> startup.Parse
   -> config.LoadOptional
   -> logging.New
-  -> session.NewFileStore
+  -> runtime persistence root
   -> llmClient/provider.New
   -> llm.ResolveAndCacheContextWindowTokens
   -> agent selector
@@ -284,16 +284,15 @@ policy 中已经预留了 `run_command`、`run_tests`、`git_status`、`git_diff
 
 当前有两套持久化：
 
-- `internal/session`：用户可读 session、manifest、message/event/usage/context snapshot 记录能力。
-- `internal/state`：当前 runner 的恢复事实来源，保存 states/events/effects/event_inbox。
+- `internal/runtime/persistence`：当前 runner 的恢复事实来源，保存 task states、agent snapshots、runtime snapshots 和 events。
+- `internal/entrance/app` 的 async queue：保存待处理 events/effects 队列。
 
-当前主 runner 的模型事件、工具事件主要进入 `internal/state` 的 event store；`session.SaveEvent` 目前主要由 tool policy decision 等路径使用。后续需要明确：
+当前主 runner 的模型事件、工具事件进入 `internal/runtime/persistence` 的 event store；旧的 session event helper 路径已经移除。后续需要明确：
 
-- 是否把 runtime events 同步投影到 session。
-- session 是否只做用户可读视图。
 - runtime store 是否成为唯一恢复事实来源。
+- 是否需要在 runtime event store 之外再生成用户可读审计视图。
 
-建议保持“state/store 是恢复事实来源，session 是用户可读审计视图”的方向。
+建议保持 runtime store 作为恢复事实来源；如果需要用户可读审计视图，应从 runtime events 投影生成。
 
 ### 5. prompt/context builder 已被简化为当前任务 prompt
 
@@ -353,7 +352,7 @@ go test ./... -count=1
 1. 把旧文档中仍指向 `internal/app`、`internal/tools`、`internal/workspace`、同步 `NativeLoop` 的内容逐步更新为当前包结构。
 2. 明确 `agent/runner` 是否就是当前 NativeLoop 概念的正式实现，并在文档中统一命名。
 3. 补齐验证工具：`internal/execx`、`run_tests`、`git_status`、`git_diff`、受限 `run_command`。
-4. 明确 session 与 runtime state 的边界，决定是否把 runtime event 投影成用户可读 session 记录。
+4. 明确是否需要从 runtime event store 投影用户可读审计记录。
 5. 将 context budget / compression 接入 event-driven runner，或者先把旧文档中“已接入”的说法降级为“接口已存在”。
 6. 在验证工具稳定后，再实现 `GoalLoop`、`Verifier`、`Planner` 和 stop condition。
 7. 最后再做 project skills / memory、automation、sub-agent、MCP 等更高层能力。

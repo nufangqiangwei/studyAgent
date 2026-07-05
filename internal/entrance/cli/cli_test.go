@@ -11,7 +11,7 @@ import (
 	"agent/internal/content"
 )
 
-func TestRunExecutesPlainTextDirectlyWithAgent(t *testing.T) {
+func TestRunDelegatesPlainTextToHandler(t *testing.T) {
 	var out strings.Builder
 	runner := &recordingRunner{output: "done", out: &out}
 	env := content.Env{
@@ -27,7 +27,7 @@ func TestRunExecutesPlainTextDirectlyWithAgent(t *testing.T) {
 		},
 	}
 
-	err := Run(context.Background(), env, defaultRegistry())
+	err := Run(context.Background(), env, defaultRegistry(), runWithAgent(runner))
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestRunExecutesSlashRunThroughCommand(t *testing.T) {
 		Agent: runner,
 	}
 
-	err := Run(context.Background(), env, defaultRegistry())
+	err := Run(context.Background(), env, defaultRegistry(), noopPlainInput)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestRunExecutesSlashStatusThroughCommand(t *testing.T) {
 		},
 	}
 
-	err := Run(context.Background(), env, defaultRegistry())
+	err := Run(context.Background(), env, defaultRegistry(), noopPlainInput)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestRunUnknownSlashInputReportsError(t *testing.T) {
 		Agent: runner,
 	}
 
-	err := Run(context.Background(), env, defaultRegistry())
+	err := Run(context.Background(), env, defaultRegistry(), noopPlainInput)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestRunSuggestsMistypedSlashCommandAndExecutesWhenConfirmed(t *testing.T) {
 		},
 	}
 
-	err := Run(context.Background(), env, defaultRegistry())
+	err := Run(context.Background(), env, defaultRegistry(), noopPlainInput)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestRunDoesNotExecuteSuggestedCommandWhenDeclined(t *testing.T) {
 		},
 	}
 
-	err := Run(context.Background(), env, defaultRegistry())
+	err := Run(context.Background(), env, defaultRegistry(), noopPlainInput)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestRunSuggestedRunCommandKeepsArgument(t *testing.T) {
 		Agent: runner,
 	}
 
-	err := Run(context.Background(), env, defaultRegistry())
+	err := Run(context.Background(), env, defaultRegistry(), noopPlainInput)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -207,12 +207,13 @@ func TestRunSuggestedRunCommandKeepsArgument(t *testing.T) {
 	}
 }
 
-func TestRunSwitchesAgentWithBareAgentName(t *testing.T) {
+func TestRunDelegatesBareAgentNameToPlainInputHandler(t *testing.T) {
 	var out strings.Builder
 	selector := &recordingAgentSelector{
 		active: "analyze",
 		names:  []string{"analyze", "review"},
 	}
+	var handled string
 	env := content.Env{
 		IO: content.IO{
 			In:  strings.NewReader("review\n/exit\n"),
@@ -221,15 +222,21 @@ func TestRunSwitchesAgentWithBareAgentName(t *testing.T) {
 		Agent: selector,
 	}
 
-	err := Run(context.Background(), env, defaultRegistry())
+	err := Run(context.Background(), env, defaultRegistry(), func(_ context.Context, _ content.Env, line string) error {
+		handled = line
+		return nil
+	})
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
-	if selector.active != "review" {
-		t.Fatalf("active = %q, want review", selector.active)
+	if handled != "review" {
+		t.Fatalf("handled = %q, want review", handled)
 	}
-	if !strings.Contains(out.String(), "Agent switched to: review") {
-		t.Fatalf("output missing switch message:\n%s", out.String())
+	if selector.active != "analyze" {
+		t.Fatalf("active = %q, want analyze", selector.active)
+	}
+	if strings.Contains(out.String(), "Agent switched to: review") {
+		t.Fatalf("bare plain input switched agent unexpectedly:\n%s", out.String())
 	}
 }
 
@@ -247,7 +254,7 @@ func TestRunSwitchesAgentWithSlashAgentName(t *testing.T) {
 		Agent: selector,
 	}
 
-	err := Run(context.Background(), env, defaultRegistry())
+	err := Run(context.Background(), env, defaultRegistry(), noopPlainInput)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -272,7 +279,7 @@ func TestRunSlashOnlyReportsError(t *testing.T) {
 		Agent: runner,
 	}
 
-	err := Run(context.Background(), env, defaultRegistry())
+	err := Run(context.Background(), env, defaultRegistry(), noopPlainInput)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -300,7 +307,7 @@ func TestRunCommandErrorContinues(t *testing.T) {
 		},
 	}
 
-	err := Run(context.Background(), env, defaultRegistry())
+	err := Run(context.Background(), env, defaultRegistry(), noopPlainInput)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -314,6 +321,16 @@ func TestRunCommandErrorContinues(t *testing.T) {
 
 func defaultRegistry() *command2.Registry {
 	return command2.Manage
+}
+
+func noopPlainInput(context.Context, content.Env, string) error {
+	return nil
+}
+
+func runWithAgent(runner content.AgentRunner) PlainInputHandler {
+	return func(ctx context.Context, _ content.Env, line string) error {
+		return runner.Run(ctx, line)
+	}
 }
 
 type recordingRunner struct {

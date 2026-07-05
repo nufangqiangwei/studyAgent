@@ -4,9 +4,7 @@ import (
 	"agent/internal/capability/builtin"
 	"agent/internal/capability/builtin/askUser"
 	"agent/internal/capability/builtin/workspace"
-	"agent/internal/content"
 	"agent/internal/foundation/policy"
-	"agent/internal/session"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -36,13 +34,6 @@ func (e *ApprovalRequiredError) Error() string {
 		return "policy approval required"
 	}
 	return fmt.Sprintf("policy approval required for tool %q: %s", e.Request.ToolName, e.Result.Reason)
-}
-
-type policyDecisionEventPayload struct {
-	Request           policy.Request `json:"request"`
-	Result            policy.Result  `json:"result"`
-	Confirmed         *bool          `json:"confirmed,omitempty"`
-	ConfirmationError string         `json:"confirmation_error,omitempty"`
 }
 
 type Manage struct {
@@ -207,38 +198,20 @@ func (r *Manage) Execute(ctx context.Context, name string, input json.RawMessage
 	decision := checker.Check(request)
 	switch decision.Decision {
 	case policy.Allow:
-		if err := recordPolicyDecisionEvent(ctx, request, decision, nil, ""); err != nil {
-			return Result{}, err
-		}
 	case policy.Ask:
 		if r.asyncPolicyApproval {
-			if err := recordPolicyDecisionEvent(ctx, request, decision, nil, "approval required"); err != nil {
-				return Result{}, err
-			}
 			return Result{}, &ApprovalRequiredError{Request: request, Result: decision}
 		}
 		confirmed, err := confirmPolicyDecision(ctx, request, decision)
 		if err != nil {
-			if recordErr := recordPolicyDecisionEvent(ctx, request, decision, nil, err.Error()); recordErr != nil {
-				return Result{}, recordErr
-			}
 			return Result{}, fmt.Errorf("policy confirmation for tool %q: %w", name, err)
-		}
-		if err := recordPolicyDecisionEvent(ctx, request, decision, &confirmed, ""); err != nil {
-			return Result{}, err
 		}
 		if !confirmed {
 			return Result{}, fmt.Errorf("policy denied tool %q: user declined confirmation: %s", name, decision.Reason)
 		}
 	case policy.Deny:
-		if err := recordPolicyDecisionEvent(ctx, request, decision, nil, ""); err != nil {
-			return Result{}, err
-		}
 		return Result{}, fmt.Errorf("policy denied tool %q: %s", name, decision.Reason)
 	default:
-		if err := recordPolicyDecisionEvent(ctx, request, decision, nil, ""); err != nil {
-			return Result{}, err
-		}
 		return Result{}, fmt.Errorf("policy returned unknown decision %q for tool %q", decision.Decision, name)
 	}
 	return tool.Execute(ctx, input)
@@ -270,25 +243,4 @@ func (r *Manage) List() []Tool {
 		result = append(result, r.tools[name])
 	}
 	return result
-}
-
-func recordPolicyDecisionEvent(ctx context.Context, request policy.Request, result policy.Result, confirmed *bool, confirmationError string) error {
-	env, ok := content.EnvFromContext(ctx)
-	if !ok || env.Session == nil {
-		return nil
-	}
-	scope := env.EventScope
-	if scope.AgentName == "" {
-		scope.AgentName = env.Config.AgentName
-	}
-	err := session.SaveEvent(ctx, env.Session, scope, session.EventTypePolicyDecision, policyDecisionEventPayload{
-		Request:           request,
-		Result:            result,
-		Confirmed:         confirmed,
-		ConfirmationError: confirmationError,
-	})
-	if err != nil {
-		return fmt.Errorf("record policy decision event: %w", err)
-	}
-	return nil
 }

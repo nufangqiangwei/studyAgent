@@ -54,7 +54,7 @@ internal/
   llm/              模型调用抽象、模型 manager、provider client
   tools/            tool contract、tool manager、具体工具实现
   workspace/        workspace manager 和本地文件系统实现
-  session/          用户可读会话记录和审计记录
+  audit/            可选的用户可读会话记录和审计视图
   policy/           工具风险评估和审批策略
   command/          命令定义、命令 manager
   cli/              交互式入口适配
@@ -486,32 +486,30 @@ internal/
 - 不保存 session。
 - 不知道 agent。
 
-### `internal/session`
+### 用户可读审计视图（可选）
 
 边界范围：
 
 - 用户可读会话记录、审计日志、usage 汇总。
-- 可以保留现有 JSONL 记录能力。
-- 不建议把它直接当运行恢复的事实来源。
+- 可以从 runtime event store 投影生成 JSONL 或其他视图。
+- 不应作为运行恢复的事实来源。
 
 对外服务：
 
-- `Recorder`
-- `Loader`
-- `SaveEvent`
-- `SessionManager`
+- runtime event projection
+- audit log exporter
+- usage summary exporter
 
 生命周期：
 
-- session manager 是 Instance 级。
-- session record 是 Runtime 级。
+- audit projector 是 Instance 级。
+- audit record 是 Runtime 级。
 
 和 `store` 的关系：
 
 - `store` 是恢复流程的事实来源。
-- `session` 是面向用户和调试的会话记录。
-- 短期可以由 orchestrator/executor 同步写两边。
-- 长期可以让 session 订阅事件流生成用户可读视图。
+- 审计视图面向用户和调试。
+- 长期可以让审计 projector 订阅事件流生成用户可读视图。
 
 ### `internal/policy`
 

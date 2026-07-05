@@ -1,7 +1,6 @@
 package content
 
 import (
-	"agent/internal/session"
 	"context"
 	systemIO "io"
 )
@@ -87,14 +86,12 @@ type CommandRegistry interface {
 }
 
 type Env struct {
-	IO         IO
-	Agent      AgentRunner
-	Registry   CommandRegistry
-	Logger     Logger
-	Config     Config
-	Session    session.Recorder
-	EventScope session.EventScope
-	RunModel   string // cli 或者 cmd
+	IO       IO
+	Agent    AgentRunner
+	Registry CommandRegistry
+	Logger   Logger
+	Config   Config
+	RunModel string // cli 或者 cmd
 }
 
 type envContextKey struct{}
@@ -125,18 +122,6 @@ func (e Env) WithRegistry(registry CommandRegistry) Env {
 // WithLogger returns an environment copy with Logger replaced.
 func (e Env) WithLogger(logger Logger) Env {
 	e.Logger = logger
-	return e
-}
-
-// WithSession returns an environment copy with the session recorder replaced.
-func (e Env) WithSession(recorder session.Recorder) Env {
-	e.Session = recorder
-	return e
-}
-
-// WithEventScope returns an environment copy with event metadata replaced.
-func (e Env) WithEventScope(scope session.EventScope) Env {
-	e.EventScope = scope
 	return e
 }
 
