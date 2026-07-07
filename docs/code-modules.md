@@ -171,8 +171,8 @@ type AgentRunner interface {
 
 - `agent.Catalog` 是包级 agent 工厂注册表。
 - `init` 默认注册 `default`、`analyze` 和 `tools-tester` agent。
-- `app.agentSelector` 通过 `Catalog.SelectAgent` 选择工厂并创建当前 active agent。
-- `content.AgentRunner` 和 `content.AgentSelector` 是命令层使用的外部接口，命令不依赖 `DefaultAgent`、`AnalyzeAgent` 或 `ToolsTesterAgent` 具体类型。
+- `app.AppAgentRunner` 通过 `Catalog.SelectAgent` 选择工厂并创建当前 active agent。
+- `content.AgentRunner` 和 `content.AgentSwitcher` 是命令层使用的外部接口，命令不依赖 `DefaultAgent`、`AnalyzeAgent` 或 `ToolsTesterAgent` 具体类型。
 - 每个 agent 创建自己的工具注册表并注入 `NativeLoop`，agent loop 只依赖 `ToolRegistry` 接口。
 
 ## Prompt Engineering 模块
@@ -261,7 +261,7 @@ main.go
   -> config.LoadOptional
   -> provider.New
   -> agent.Catalog
-  -> app.agentSelector
+  -> app.AppAgentRunner
   -> content.WithEnv
   -> command.Manage
   -> startupcmd.Run or cli.Run

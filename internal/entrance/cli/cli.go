@@ -287,11 +287,11 @@ func errorWriter(env content.Env) io.Writer {
 }
 
 func isAgentName(runner content.AgentRunner, name string) bool {
-	selector, ok := runner.(content.AgentSelector)
-	if !ok || selector == nil || name == "" {
+	switcher, ok := runner.(content.AgentSwitcher)
+	if !ok || switcher == nil || name == "" {
 		return false
 	}
-	for _, agentName := range selector.ListAgentNames() {
+	for _, agentName := range switcher.ListAgentNames() {
 		if strings.EqualFold(agentName, name) {
 			return true
 		}

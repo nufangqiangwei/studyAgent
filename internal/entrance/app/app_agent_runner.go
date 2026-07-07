@@ -27,7 +27,7 @@ import (
 
 const (
 	analyzeAgentName     = builtinagents.AnalyzeAgentName
-	defaultAgentName     = "default"
+	defaultAgentName     = builtinagents.DefaultAgentName
 	toolsTesterAgentName = builtinagents.ToolsTesterAgentName
 
 	asyncStatusEventEnqueued    = "event_enqueued"
@@ -40,7 +40,7 @@ type appLLMClient interface {
 	Complete(ctx context.Context, req llmClient.Request) (llmClient.Response, error)
 }
 
-type agentSelectorOptions struct {
+type AppAgentRunnerOptions struct {
 	LLM              appLLMClient
 	Model            string
 	Logger           content.Logger
@@ -52,31 +52,31 @@ type agentSelectorOptions struct {
 	Policy           policy.Checker
 }
 
-type agentSelector struct {
+type AppAgentRunner struct {
 	ctx     context.Context
-	opts    agentSelectorOptions
+	opts    AppAgentRunnerOptions
 	current string
 }
 
-func newAgentSelector(ctx context.Context, initialName string, opts agentSelectorOptions) (*agentSelector, error) {
+func newAppAgentRunner(ctx context.Context, initialName string, opts AppAgentRunnerOptions) (*AppAgentRunner, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	selector := &agentSelector{
+	runner := &AppAgentRunner{
 		ctx:  ctx,
 		opts: opts,
 	}
-	if err := selector.SelectAgent(initialName); err != nil {
+	if err := runner.SelectAgent(initialName); err != nil {
 		return nil, err
 	}
-	return selector, nil
+	return runner, nil
 }
 
-func registeredAgentNames() []string {
+func availableAgentNames() []string {
 	return []string{analyzeAgentName, defaultAgentName, toolsTesterAgentName}
 }
 
-func (s *agentSelector) Run(ctx context.Context, task string) error {
+func (s *AppAgentRunner) Run(ctx context.Context, task string) error {
 	status, err := s.Submit(ctx, task)
 	if err != nil {
 		return err
@@ -101,16 +101,16 @@ func (s *agentSelector) Run(ctx context.Context, task string) error {
 			return err
 		}
 	}
-	return fmt.Errorf("agent selector: synchronous run reached step limit for %s", status.RunID)
+	return fmt.Errorf("app agent runner: synchronous run reached step limit for %s", status.RunID)
 }
 
-func (s *agentSelector) Submit(ctx context.Context, task string) (content.AsyncRunStatus, error) {
+func (s *AppAgentRunner) Submit(ctx context.Context, task string) (content.AsyncRunStatus, error) {
 	if s == nil {
-		return content.AsyncRunStatus{}, fmt.Errorf("agent selector is nil")
+		return content.AsyncRunStatus{}, fmt.Errorf("app agent runner is nil")
 	}
 	task = strings.TrimSpace(task)
 	if task == "" {
-		return content.AsyncRunStatus{}, fmt.Errorf("agent selector: task is required")
+		return content.AsyncRunStatus{}, fmt.Errorf("app agent runner: task is required")
 	}
 	taskID, err := newAppID("task")
 	if err != nil {
@@ -144,7 +144,7 @@ func (s *agentSelector) Submit(ctx context.Context, task string) (content.AsyncR
 	})
 }
 
-func (s *agentSelector) Recover(ctx context.Context) (content.AsyncRecoverResult, error) {
+func (s *AppAgentRunner) Recover(ctx context.Context) (content.AsyncRecoverResult, error) {
 	storage, queue, closeStore, err := s.openStorage(ctx)
 	if err != nil {
 		return content.AsyncRecoverResult{}, err
@@ -169,7 +169,7 @@ func (s *agentSelector) Recover(ctx context.Context) (content.AsyncRecoverResult
 	return content.AsyncRecoverResult{Runs: statuses}, nil
 }
 
-func (s *agentSelector) Work(ctx context.Context) (content.AsyncWorkResult, error) {
+func (s *AppAgentRunner) Work(ctx context.Context) (content.AsyncWorkResult, error) {
 	_, queue, closeStore, err := s.openStorage(ctx)
 	if err != nil {
 		return content.AsyncWorkResult{}, err
@@ -190,7 +190,7 @@ func (s *agentSelector) Work(ctx context.Context) (content.AsyncWorkResult, erro
 	case queuedWorkEffect:
 		status, err = s.DispatchNextEffect(ctx, work.TaskID)
 	default:
-		err = fmt.Errorf("agent selector: unsupported queued work kind %q", work.Kind)
+		err = fmt.Errorf("app agent runner: unsupported queued work kind %q", work.Kind)
 	}
 	if err != nil {
 		return content.AsyncWorkResult{}, err
@@ -198,7 +198,7 @@ func (s *agentSelector) Work(ctx context.Context) (content.AsyncWorkResult, erro
 	return content.AsyncWorkResult{Ran: true, Status: status}, nil
 }
 
-func (s *agentSelector) Advance(ctx context.Context, runID string) (content.AsyncRunStatus, error) {
+func (s *AppAgentRunner) Advance(ctx context.Context, runID string) (content.AsyncRunStatus, error) {
 	runID = strings.TrimSpace(runID)
 	if runID == "" {
 		return content.AsyncRunStatus{}, fmt.Errorf("advance: run id is required")
@@ -225,7 +225,7 @@ func (s *agentSelector) Advance(ctx context.Context, runID string) (content.Asyn
 	})
 }
 
-func (s *agentSelector) DispatchNextEffect(ctx context.Context, runID string) (content.AsyncRunStatus, error) {
+func (s *AppAgentRunner) DispatchNextEffect(ctx context.Context, runID string) (content.AsyncRunStatus, error) {
 	runID = strings.TrimSpace(runID)
 	if runID == "" {
 		return content.AsyncRunStatus{}, fmt.Errorf("effect: run id is required")
@@ -254,11 +254,11 @@ func (s *agentSelector) DispatchNextEffect(ctx context.Context, runID string) (c
 	})
 }
 
-func (s *agentSelector) SubmitUserInput(ctx context.Context, runID string, answer string) (content.AsyncRunStatus, error) {
+func (s *AppAgentRunner) SubmitUserInput(ctx context.Context, runID string, answer string) (content.AsyncRunStatus, error) {
 	return s.submitUserEvent(ctx, runID, strings.TrimSpace(answer), "")
 }
 
-func (s *agentSelector) SubmitUserApproval(ctx context.Context, runID string, approved bool, reason string) (content.AsyncRunStatus, error) {
+func (s *AppAgentRunner) SubmitUserApproval(ctx context.Context, runID string, approved bool, reason string) (content.AsyncRunStatus, error) {
 	answer := "no"
 	if approved {
 		answer = "yes"
@@ -269,7 +269,7 @@ func (s *agentSelector) SubmitUserApproval(ctx context.Context, runID string, ap
 	return s.submitUserEvent(ctx, runID, answer, "approval")
 }
 
-func (s *agentSelector) Result(ctx context.Context, runID string) (content.AsyncRunStatus, error) {
+func (s *AppAgentRunner) Result(ctx context.Context, runID string) (content.AsyncRunStatus, error) {
 	runID = strings.TrimSpace(runID)
 	if runID == "" {
 		return content.AsyncRunStatus{}, fmt.Errorf("result: run id is required")
@@ -282,20 +282,20 @@ func (s *agentSelector) Result(ctx context.Context, runID string) (content.Async
 	return s.status(ctx, storage, queue, runID, statusUpdate{})
 }
 
-func (s *agentSelector) ActiveAgentName() string {
+func (s *AppAgentRunner) ActiveAgentName() string {
 	if s == nil {
 		return ""
 	}
 	return s.current
 }
 
-func (s *agentSelector) ListAgentNames() []string {
-	return registeredAgentNames()
+func (s *AppAgentRunner) ListAgentNames() []string {
+	return availableAgentNames()
 }
 
-func (s *agentSelector) SelectAgent(name string) error {
+func (s *AppAgentRunner) SelectAgent(name string) error {
 	if s == nil {
-		return fmt.Errorf("agent selector is nil")
+		return fmt.Errorf("app agent runner is nil")
 	}
 	canonical, err := canonicalAgentName(name)
 	if err != nil {
@@ -305,7 +305,7 @@ func (s *agentSelector) SelectAgent(name string) error {
 	return nil
 }
 
-func (s *agentSelector) submitUserEvent(ctx context.Context, runID string, answer string, reason string) (content.AsyncRunStatus, error) {
+func (s *AppAgentRunner) submitUserEvent(ctx context.Context, runID string, answer string, reason string) (content.AsyncRunStatus, error) {
 	runID = strings.TrimSpace(runID)
 	if runID == "" {
 		return content.AsyncRunStatus{}, fmt.Errorf("input: run id is required")
@@ -361,7 +361,7 @@ type runtimeSetup struct {
 	workDir     string
 }
 
-func (s *agentSelector) setupRuntime(ctx context.Context, taskID string) (*runtimeSetup, error) {
+func (s *AppAgentRunner) setupRuntime(ctx context.Context, taskID string) (*runtimeSetup, error) {
 	storage, queue, closeStore, err := s.openStorage(ctx)
 	if err != nil {
 		return nil, err
@@ -396,7 +396,7 @@ func (s *agentSelector) setupRuntime(ctx context.Context, taskID string) (*runti
 		closeOnError()
 		return nil, err
 	}
-	modelExecutor, err := agents2.NewModelExecutor(&selectorModelAdapter{client: s.opts.LLM}, agents2.WithModelExecutorSource(s.source()+".model"))
+	modelExecutor, err := agents2.NewModelExecutor(&appRunnerModelAdapter{client: s.opts.LLM}, agents2.WithModelExecutorSource(s.source()+".model"))
 	if err != nil {
 		closeOnError()
 		return nil, err
@@ -434,7 +434,7 @@ func (s *agentSelector) setupRuntime(ctx context.Context, taskID string) (*runti
 	}, nil
 }
 
-func (s *agentSelector) newRuntimeAgent(workDir string, snapshots agents2.SnapshotStore, tools []agents2.ToolSpec) (agents2.Agent, error) {
+func (s *AppAgentRunner) newRuntimeAgent(workDir string, snapshots agents2.SnapshotStore, tools []agents2.ToolSpec) (agents2.Agent, error) {
 	maxTurns := s.opts.MaxSteps
 	if maxTurns <= 0 {
 		maxTurns = 20
@@ -448,6 +448,8 @@ func (s *agentSelector) newRuntimeAgent(workDir string, snapshots agents2.Snapsh
 		builtinagents.WithMaxTurns(maxTurns),
 	}
 	switch runtimeAgentName(s.current) {
+	case defaultAgentName:
+		return builtinagents.NewDefaultAgent(options...)
 	case toolsTesterAgentName:
 		return builtinagents.NewToolsTesterAgent(options...)
 	default:
@@ -455,10 +457,10 @@ func (s *agentSelector) newRuntimeAgent(workDir string, snapshots agents2.Snapsh
 	}
 }
 
-func (s *agentSelector) openStorage(_ context.Context) (*persistence.LocalStore, *asyncWorkQueue, func(), error) {
+func (s *AppAgentRunner) openStorage(_ context.Context) (*persistence.LocalStore, *asyncWorkQueue, func(), error) {
 	root := strings.TrimSpace(s.opts.RuntimeStoreRoot)
 	if root == "" {
-		return nil, nil, nil, fmt.Errorf("agent selector: runtime store root is required")
+		return nil, nil, nil, fmt.Errorf("app agent runner: runtime store root is required")
 	}
 	storage, err := persistence.NewFileStore(root)
 	if err != nil {
@@ -472,7 +474,7 @@ func (s *agentSelector) openStorage(_ context.Context) (*persistence.LocalStore,
 	return storage, queue, func() { _ = storage.Close() }, nil
 }
 
-func (s *agentSelector) workDirForTask(ctx context.Context, storage *persistence.LocalStore, taskID string) string {
+func (s *AppAgentRunner) workDirForTask(ctx context.Context, storage *persistence.LocalStore, taskID string) string {
 	if storage != nil && storage.TaskStates() != nil {
 		state, ok, err := storage.TaskStates().Load(ctx, taskID)
 		if err == nil && ok {
@@ -484,7 +486,7 @@ func (s *agentSelector) workDirForTask(ctx context.Context, storage *persistence
 	return strings.TrimSpace(s.opts.WorkDir)
 }
 
-func (s *agentSelector) status(ctx context.Context, storage *persistence.LocalStore, queue *asyncWorkQueue, runID string, update statusUpdate) (content.AsyncRunStatus, error) {
+func (s *AppAgentRunner) status(ctx context.Context, storage *persistence.LocalStore, queue *asyncWorkQueue, runID string, update statusUpdate) (content.AsyncRunStatus, error) {
 	status := content.AsyncRunStatus{
 		RunID:         runID,
 		AdvanceStatus: update.AdvanceStatus,
@@ -526,7 +528,7 @@ func (s *agentSelector) status(ctx context.Context, storage *persistence.LocalSt
 	return status, nil
 }
 
-func (s *agentSelector) source() string {
+func (s *AppAgentRunner) source() string {
 	if s == nil {
 		return "app"
 	}
@@ -601,18 +603,18 @@ func (userInputRequestExecutor) ExecuteEffect(_ context.Context, _ reactor2.Task
 	return reactor2.EffectResult{}, nil
 }
 
-type selectorModelAdapter struct {
+type appRunnerModelAdapter struct {
 	client appLLMClient
 }
 
-func (m *selectorModelAdapter) Complete(ctx context.Context, request agents2.ModelRequest) (agents2.ModelResponse, error) {
+func (m *appRunnerModelAdapter) Complete(ctx context.Context, request agents2.ModelRequest) (agents2.ModelResponse, error) {
 	if m == nil || m.client == nil {
 		return agents2.ModelResponse{}, fmt.Errorf("app model client is not configured")
 	}
 	response, err := m.client.Complete(ctx, llmClient.Request{
 		Model:       request.Model,
-		Messages:    selectorLLMMessages(request.Messages),
-		Tools:       selectorLLMTools(request.Tools),
+		Messages:    appRunnerLLMMessages(request.Messages),
+		Tools:       appRunnerLLMTools(request.Tools),
 		Temperature: request.Temperature,
 		Metadata:    cloneStringMap(request.Metadata),
 	})
@@ -673,21 +675,21 @@ func (m *selectorModelAdapter) Complete(ctx context.Context, request agents2.Mod
 	return modelResponse, nil
 }
 
-func selectorLLMMessages(messages []agents2.Message) []llmClient.Message {
+func appRunnerLLMMessages(messages []agents2.Message) []llmClient.Message {
 	if len(messages) == 0 {
 		return nil
 	}
 	out := make([]llmClient.Message, 0, len(messages))
 	for _, message := range messages {
-		role := selectorLLMRole(message.Role)
+		role := appRunnerLLMRole(message.Role)
 		content := message.Content
 		name := ""
 		toolCallID := ""
 		if strings.TrimSpace(message.Role) == string(llmClient.RoleTool) {
 			role = llmClient.RoleTool
-			content, name, toolCallID = selectorToolObservation(message)
+			content, name, toolCallID = appRunnerToolObservation(message)
 		} else if strings.TrimSpace(message.Role) == string(llmClient.RoleUser) && len(message.Data) > 0 {
-			if toolContent, toolName, id, ok := selectorUserInputAsTool(message); ok {
+			if toolContent, toolName, id, ok := appRunnerUserInputAsTool(message); ok {
 				role = llmClient.RoleTool
 				content = toolContent
 				name = toolName
@@ -708,7 +710,7 @@ func selectorLLMMessages(messages []agents2.Message) []llmClient.Message {
 	return out
 }
 
-func selectorLLMRole(role string) llmClient.Role {
+func appRunnerLLMRole(role string) llmClient.Role {
 	switch strings.TrimSpace(role) {
 	case string(llmClient.RoleSystem):
 		return llmClient.RoleSystem
@@ -721,7 +723,7 @@ func selectorLLMRole(role string) llmClient.Role {
 	}
 }
 
-func selectorToolObservation(message agents2.Message) (string, string, string) {
+func appRunnerToolObservation(message agents2.Message) (string, string, string) {
 	var payload statemachine2.ToolCallPayload
 	if len(message.Data) > 0 && json.Unmarshal(message.Data, &payload) == nil && payload.ToolCallID != "" {
 		if payload.Error != "" {
@@ -741,7 +743,7 @@ func selectorToolObservation(message agents2.Message) (string, string, string) {
 	return "{}", "", ""
 }
 
-func selectorUserInputAsTool(message agents2.Message) (string, string, string, bool) {
+func appRunnerUserInputAsTool(message agents2.Message) (string, string, string, bool) {
 	var payload statemachine2.UserInputPayload
 	if len(message.Data) == 0 || json.Unmarshal(message.Data, &payload) != nil || payload.RequestID == "" {
 		return "", "", "", false
@@ -770,7 +772,7 @@ func askUserPrompt(arguments json.RawMessage) string {
 	return prompt
 }
 
-func selectorLLMTools(specs []agents2.ToolSpec) []llmClient.ToolDefinition {
+func appRunnerLLMTools(specs []agents2.ToolSpec) []llmClient.ToolDefinition {
 	if len(specs) == 0 {
 		return nil
 	}
@@ -1145,9 +1147,9 @@ Do not include markdown outside the JSON object. Do not expose hidden reasoning 
 func canonicalAgentName(name string) (string, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return "", fmt.Errorf("agent selector: agent name is required")
+		return "", fmt.Errorf("app agent runner: agent name is required")
 	}
-	for _, candidate := range registeredAgentNames() {
+	for _, candidate := range availableAgentNames() {
 		if strings.EqualFold(candidate, name) {
 			return candidate, nil
 		}
@@ -1156,10 +1158,14 @@ func canonicalAgentName(name string) (string, error) {
 }
 
 func runtimeAgentName(name string) string {
-	if strings.EqualFold(strings.TrimSpace(name), toolsTesterAgentName) {
+	switch {
+	case strings.EqualFold(strings.TrimSpace(name), defaultAgentName):
+		return defaultAgentName
+	case strings.EqualFold(strings.TrimSpace(name), toolsTesterAgentName):
 		return toolsTesterAgentName
+	default:
+		return analyzeAgentName
 	}
-	return analyzeAgentName
 }
 
 func isTerminalPhase(phase string) bool {
@@ -1185,7 +1191,7 @@ func cloneStringMap(values map[string]string) map[string]string {
 func newAppID(prefix string) (string, error) {
 	var raw [16]byte
 	if _, err := rand.Read(raw[:]); err != nil {
-		return "", fmt.Errorf("agent selector: generate id: %w", err)
+		return "", fmt.Errorf("app agent runner: generate id: %w", err)
 	}
 	raw[6] = (raw[6] & 0x0f) | 0x40
 	raw[8] = (raw[8] & 0x3f) | 0x80

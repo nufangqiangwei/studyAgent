@@ -22,15 +22,15 @@ func (Agent) Execute(_ context.Context, env content.Env, _ []string) error {
 	if _, err := fmt.Fprintf(env.IO.Out, "Agent: %s\n", useAgentName); err != nil {
 		return err
 	}
-	selector := agentSelector(env)
-	if selector == nil {
+	switcher := agentSwitcher(env)
+	if switcher == nil {
 		return nil
 	}
 	if _, err := fmt.Fprintln(env.IO.Out, "Available agents:"); err != nil {
 		return err
 	}
 
-	for _, name := range selector.ListAgentNames() {
+	for _, name := range switcher.ListAgentNames() {
 		if _, err := fmt.Fprintf(env.IO.Out, "  %s\n", name); err != nil {
 			return err
 		}
@@ -61,26 +61,26 @@ func (SetAgent) Execute(ctx context.Context, env content.Env, args []string) err
 }
 
 func switchAgent(_ context.Context, env content.Env, agentName string) error {
-	selector := agentSelector(env)
-	if selector == nil {
-		return fmt.Errorf("set-agent command: agent selector is not configured")
+	switcher := agentSwitcher(env)
+	if switcher == nil {
+		return fmt.Errorf("set-agent command: app agent runner is not configured")
 	}
-	return selector.SelectAgent(agentName)
+	return switcher.SelectAgent(agentName)
 }
 
 func activeAgentName(env content.Env) string {
-	if selector := agentSelector(env); selector != nil {
-		if name := strings.TrimSpace(selector.ActiveAgentName()); name != "" {
+	if switcher := agentSwitcher(env); switcher != nil {
+		if name := strings.TrimSpace(switcher.ActiveAgentName()); name != "" {
 			return name
 		}
 	}
 	return env.Config.AgentName
 }
 
-func agentSelector(env content.Env) content.AgentSelector {
-	selector, ok := env.Agent.(content.AgentSelector)
+func agentSwitcher(env content.Env) content.AgentSwitcher {
+	switcher, ok := env.Agent.(content.AgentSwitcher)
 	if !ok {
 		return nil
 	}
-	return selector
+	return switcher
 }

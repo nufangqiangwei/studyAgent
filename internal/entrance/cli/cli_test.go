@@ -209,7 +209,7 @@ func TestRunSuggestedRunCommandKeepsArgument(t *testing.T) {
 
 func TestRunDelegatesBareAgentNameToPlainInputHandler(t *testing.T) {
 	var out strings.Builder
-	selector := &recordingAgentSelector{
+	switcher := &recordingAgentSwitcher{
 		active: "analyze",
 		names:  []string{"analyze", "review"},
 	}
@@ -219,7 +219,7 @@ func TestRunDelegatesBareAgentNameToPlainInputHandler(t *testing.T) {
 			In:  strings.NewReader("review\n/exit\n"),
 			Out: &out,
 		},
-		Agent: selector,
+		Agent: switcher,
 	}
 
 	err := Run(context.Background(), env, defaultRegistry(), func(_ context.Context, _ content.Env, line string) error {
@@ -232,8 +232,8 @@ func TestRunDelegatesBareAgentNameToPlainInputHandler(t *testing.T) {
 	if handled != "review" {
 		t.Fatalf("handled = %q, want review", handled)
 	}
-	if selector.active != "analyze" {
-		t.Fatalf("active = %q, want analyze", selector.active)
+	if switcher.active != "analyze" {
+		t.Fatalf("active = %q, want analyze", switcher.active)
 	}
 	if strings.Contains(out.String(), "Agent switched to: review") {
 		t.Fatalf("bare plain input switched agent unexpectedly:\n%s", out.String())
@@ -242,7 +242,7 @@ func TestRunDelegatesBareAgentNameToPlainInputHandler(t *testing.T) {
 
 func TestRunSwitchesAgentWithSlashAgentName(t *testing.T) {
 	var out strings.Builder
-	selector := &recordingAgentSelector{
+	switcher := &recordingAgentSwitcher{
 		active: "analyze",
 		names:  []string{"analyze", "review"},
 	}
@@ -251,15 +251,15 @@ func TestRunSwitchesAgentWithSlashAgentName(t *testing.T) {
 			In:  strings.NewReader("/review\n/exit\n"),
 			Out: &out,
 		},
-		Agent: selector,
+		Agent: switcher,
 	}
 
 	err := Run(context.Background(), env, defaultRegistry(), noopPlainInput)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
-	if selector.active != "review" {
-		t.Fatalf("active = %q, want review", selector.active)
+	if switcher.active != "review" {
+		t.Fatalf("active = %q, want review", switcher.active)
 	}
 	if !strings.Contains(out.String(), "Agent switched to: review") {
 		t.Fatalf("output missing switch message:\n%s", out.String())
@@ -348,24 +348,24 @@ func (r *recordingRunner) Run(_ context.Context, task string) error {
 	return err
 }
 
-type recordingAgentSelector struct {
+type recordingAgentSwitcher struct {
 	active string
 	names  []string
 }
 
-func (s *recordingAgentSelector) Run(_ context.Context, _ string) error {
+func (s *recordingAgentSwitcher) Run(_ context.Context, _ string) error {
 	return nil
 }
 
-func (s *recordingAgentSelector) ActiveAgentName() string {
+func (s *recordingAgentSwitcher) ActiveAgentName() string {
 	return s.active
 }
 
-func (s *recordingAgentSelector) ListAgentNames() []string {
+func (s *recordingAgentSwitcher) ListAgentNames() []string {
 	return append([]string(nil), s.names...)
 }
 
-func (s *recordingAgentSelector) SelectAgent(name string) error {
+func (s *recordingAgentSwitcher) SelectAgent(name string) error {
 	for _, agentName := range s.names {
 		if strings.EqualFold(agentName, name) {
 			s.active = agentName

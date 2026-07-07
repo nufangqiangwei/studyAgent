@@ -175,7 +175,7 @@ func TestRunExecutesToolCallsThroughRunner(t *testing.T) {
 		t.Fatalf("result missing final answer:\n%s", result)
 	}
 	wantAgents := []string{analyzeAgentName, defaultAgentName, toolsTesterAgentName}
-	if got := registeredAgentNames(); !reflect.DeepEqual(got, wantAgents) {
+	if got := availableAgentNames(); !reflect.DeepEqual(got, wantAgents) {
 		t.Fatalf("registered agent names = %#v, want %#v", got, wantAgents)
 	}
 }

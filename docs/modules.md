@@ -67,7 +67,7 @@
 
 - 应用级编排。
 - 读取启动参数和配置文件。
-- 创建 LLM client、agent selector 和运行时 `content.Env`。
+- 创建 LLM client、app agent runner 和运行时 `content.Env`。
 - 选择命令行模式或交互式 CLI 模式。
 - 连接 CLI 输入输出。
 - 管理启动和退出流程。
@@ -75,7 +75,7 @@
 ### internal/content
 
 - 定义运行时 `Env`、`IO` 和配置快照。
-- 定义跨模块小接口，例如 `AgentRunner`、`AgentSelector`、`Logger`、`CommandInfo`、`CommandRegistry`。
+- 定义跨模块小接口，例如 `AgentRunner`、`AgentSwitcher`、`Logger`、`CommandInfo`、`CommandRegistry`。
 - 通过 `WithEnv` 把当前执行环境绑定到 `context.Context`。
 - 通过 `EnvFromContext` 让工具等底层动作读取当前执行流的 IO 和配置。
 - 子 agent 或并发任务需要独立配置时，派生子 context 并绑定自己的 `Env`，避免互相覆盖运行态。

@@ -146,7 +146,7 @@ type Tool interface {
 - `internal/agent` 对外暴露 `Agent` 和 `NewAgent`，包内维护 `Catalog` 注册默认 agent。
 - `internal/command` 对外暴露 `Command`，包内维护 `Registry`，默认命令注册到 `Manage`。
 - `internal/tools` 对外暴露 `Tool`，包内维护工具 `Registry` 和默认工具集合。
-- `internal/content` 提供 `AgentRunner`、`AgentSelector`、`CommandRegistry` 等小接口，避免命令层绑定 agent 具体实现。
+- `internal/content` 提供 `AgentRunner`、`AgentSwitcher`、`CommandRegistry` 等小接口，避免命令层绑定 agent 具体实现。
 
 接口应由使用方定义，具体实现由 app 启动阶段装配或由包内 registry 注册。
 

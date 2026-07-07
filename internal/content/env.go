@@ -63,7 +63,7 @@ type AsyncAgentRunner interface {
 	Result(context.Context, string) (AsyncRunStatus, error)
 }
 
-type AgentSelector interface {
+type AgentSwitcher interface {
 	ActiveAgentName() string
 	ListAgentNames() []string
 	SelectAgent(name string) error

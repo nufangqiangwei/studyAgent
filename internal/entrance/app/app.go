@@ -93,7 +93,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer, errOut
 		logger.Debugf("context window tokens resolved for provider=%s model=%s tokens=%d source=%s", cfg.Provider, result.Model, result.Tokens, result.Source)
 	}
 
-	agentSelector, err := newAgentSelector(ctx, analyzeAgentName, agentSelectorOptions{
+	appAgentRunner, err := newAppAgentRunner(ctx, analyzeAgentName, AppAgentRunnerOptions{
 		LLM:              modelClient,
 		Model:            cfg.Model,
 		Logger:           logger,
@@ -120,7 +120,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer, errOut
 			Out: out,
 			Err: errOut,
 		},
-		Agent:  agentSelector,
+		Agent:  appAgentRunner,
 		Logger: logger,
 		Config: content.Config{
 			ConfigPath:       cfg.ConfigPath,
@@ -128,7 +128,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer, errOut
 			Model:            cfg.Model,
 			ModelURL:         cfg.ModelURL,
 			APIKeyConfigured: cfg.APIKey != "",
-			AgentName:        agentSelector.ActiveAgentName(),
+			AgentName:        appAgentRunner.ActiveAgentName(),
 			WorkDir:          workDir,
 			Debug:            cfg.Debug,
 			PolicyMode:       cfg.PolicyMode,
