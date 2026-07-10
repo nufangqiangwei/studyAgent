@@ -31,6 +31,7 @@ type agentRuntime struct {
 	clock        func() time.Time
 	maxTurns     int
 	errorPrefix  string
+	hooks        AgentRuntimeHooks
 }
 
 func newAgentRuntime(defaults agentRuntimeDefaults, options ...AgentOption) (*agentRuntime, error) {
@@ -84,6 +85,7 @@ func newAgentRuntime(defaults agentRuntimeDefaults, options ...AgentOption) (*ag
 		clock:        config.clock,
 		maxTurns:     config.maxTurns,
 		errorPrefix:  errorPrefix,
+		hooks:        config.hooks,
 	}, nil
 }
 
@@ -110,10 +112,11 @@ func (r *agentRuntime) start(ctx context.Context, input agents2.AgentStartInput)
 
 	now := r.now()
 	snapshot := agents2.NewAgentSnapshot(r.agentName(), input, now)
-	if r.systemPrompt != "" {
-		snapshot.Messages = append(snapshot.Messages, agents2.Message{Role: "system", Content: r.systemPrompt})
+	messages, err := r.buildFirstMessage(ctx, input)
+	if err != nil {
+		return agents2.AgentResult{}, err
 	}
-	snapshot.Messages = append(snapshot.Messages, agents2.Message{Role: "user", Content: input.Input})
+	snapshot.Messages = messages
 	return r.requestDecision(ctx, "start", input.Input, snapshot)
 }
 
@@ -423,4 +426,14 @@ func (r *agentRuntime) newTaskEvent(eventType eventbus.EventType, taskID string,
 
 func (r *agentRuntime) now() time.Time {
 	return r.clock().UTC()
+}
+
+func (r *agentRuntime) buildFirstMessage(ctx context.Context, input agents2.AgentStartInput) ([]agents2.Message, error) {
+	if r.hooks.BuildSystemPrompt == nil {
+		messages := make([]agents2.Message, 2)
+		messages[0] = agents2.Message{Role: "system", Content: r.systemPrompt}
+		messages[1] = agents2.Message{Role: "user", Content: input.Input}
+		return messages, nil
+	}
+	return r.hooks.BuildSystemPrompt(ctx, input)
 }

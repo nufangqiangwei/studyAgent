@@ -21,6 +21,7 @@ type agentConfig struct {
 	source       string
 	clock        func() time.Time
 	maxTurns     int
+	hooks        AgentRuntimeHooks
 }
 
 func withAgentName(name string) AgentOption {
@@ -80,5 +81,11 @@ func WithAgentClock(clock func() time.Time) AgentOption {
 func WithMaxTurns(maxTurns int) AgentOption {
 	return func(config *agentConfig) {
 		config.maxTurns = maxTurns
+	}
+}
+
+func WithAgentRuntimeHooks(hooks AgentRuntimeHooks) AgentOption {
+	return func(config *agentConfig) {
+		config.hooks = hooks
 	}
 }

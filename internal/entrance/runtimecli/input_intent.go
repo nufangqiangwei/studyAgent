@@ -17,7 +17,6 @@ type InputIntentRequest struct {
 	HasCurrentTask     bool
 	CurrentTaskID      string
 	CurrentTaskPhase   string
-	PendingPreprocess  bool
 	PendingUserRequest bool
 }
 

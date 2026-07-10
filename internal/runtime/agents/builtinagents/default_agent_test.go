@@ -2,6 +2,7 @@ package builtinagents
 
 import (
 	agents2 "agent/internal/runtime/agents"
+	"agent/internal/runtime/agents/builtinagents/prompt"
 	"context"
 	"strings"
 	"testing"
@@ -43,11 +44,23 @@ func TestDefaultAgentStartsWithPersonalAssistantPromptAndName(t *testing.T) {
 	if len(request.Tools) != 1 || request.Tools[0].Name != "ask_user" {
 		t.Fatalf("request tools = %#v, want ask_user", request.Tools)
 	}
-	if len(request.Messages) == 0 || !strings.Contains(request.Messages[0].Content, "personal life assistant") {
+	if len(request.Messages) == 0 || !strings.Contains(request.Messages[0].Content, "个人生活助手") {
 		t.Fatalf("system prompt missing personal assistant instructions: %#v", request.Messages)
 	}
-	if !strings.Contains(request.Messages[0].Content, "repository or workspace tools") {
-		t.Fatalf("system prompt missing workspace boundary: %#v", request.Messages[0])
+	if !strings.Contains(request.Messages[0].Content, "不用于无目的地窥探用户信息") {
+		t.Fatalf("system prompt missing private data boundary: %#v", request.Messages[0])
+	}
+	if !strings.Contains(request.Messages[0].Content, prompt.DefaultUserHabitContext) {
+		t.Fatalf("system prompt missing user habit context: %#v", request.Messages[0])
+	}
+	if !strings.Contains(request.Messages[0].Content, "<task_context>") ||
+		!strings.Contains(request.Messages[0].Content, "当前时间：2026-07-07T08:00:00Z") ||
+		!strings.Contains(request.Messages[0].Content, "用户原始输入：help me plan weekend errands") ||
+		!strings.Contains(request.Messages[0].Content, "- ask_user") {
+		t.Fatalf("system prompt missing filled task context: %#v", request.Messages[0])
+	}
+	if len(request.Messages) < 2 || request.Messages[1].Role != "user" || request.Messages[1].Content != "help me plan weekend errands" {
+		t.Fatalf("user message = %#v, want original input", request.Messages)
 	}
 	if startResult.Events[0].Metadata["agent"] != DefaultAgentName {
 		t.Fatalf("event metadata = %#v, want default agent", startResult.Events[0].Metadata)

@@ -264,7 +264,7 @@ main.go
   -> app.AppAgentRunner
   -> content.WithEnv
   -> command.Manage
-  -> startupcmd.Run or cli.Run
+  -> startupcmd.Run or runtimecli.Run
   -> command.Registry.Execute
   -> run command
   -> agent.NativeLoop.Run

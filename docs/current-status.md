@@ -45,7 +45,7 @@ main.go
 | 包 | 当前职责 |
 | --- | --- |
 | `internal/entrance/app` | 应用装配入口，串联 startup、config、logging、runtime persistence、LLM provider、app agent runner、CLI/startupcmd。 |
-| `internal/entrance/cli` | 交互式 CLI 输入循环和 slash command 适配。 |
+| `internal/entrance/runtimecli` | 交互式 CLI 输入循环、slash command 适配和 runtime task 会话。 |
 | `internal/entrance/startupcmd` | 非交互命令入口，把启动命令交给 command registry。 |
 | `internal/capability/command` | 命令接口、注册表和命令分发。 |
 | `internal/capability/builtin/command` | 内置命令：`run`、`help`、`status`、`model`、`agent`、`set-agent`。 |

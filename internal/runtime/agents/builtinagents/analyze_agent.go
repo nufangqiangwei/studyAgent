@@ -2,6 +2,7 @@ package builtinagents
 
 import (
 	agents2 "agent/internal/runtime/agents"
+	"agent/internal/runtime/agents/builtinagents/prompt"
 	"context"
 	"fmt"
 )
@@ -13,6 +14,7 @@ type AnalyzeAgent struct {
 }
 
 func NewAnalyzeAgent(options ...AgentOption) (*AnalyzeAgent, error) {
+	options = append(options, WithSystemPrompt(prompt.DefaultSystemPrompt))
 	runtime, err := newAgentRuntime(agentRuntimeDefaults{
 		name:        AnalyzeAgentName,
 		source:      "agent.analyze",

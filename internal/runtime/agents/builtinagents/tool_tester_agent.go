@@ -1,8 +1,8 @@
 package builtinagents
 
 import (
-	"agent/internal/prompt"
 	agents2 "agent/internal/runtime/agents"
+	"agent/internal/runtime/agents/builtinagents/prompt"
 	"context"
 	"fmt"
 )

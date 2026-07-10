@@ -1,0 +1,497 @@
+<mxfile host="Electron" pages="2">
+  <diagram id="architecture" name="Project Architecture">
+    <mxGraphModel dx="1884" dy="883" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=26;fontStyle=1;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;" value="Go 命令行 Agent 运行时架构" vertex="1">
+          <mxGeometry height="40" width="700" x="450" y="20" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=14;fontColor=#4b5563;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;" value="可编程运行时：接口 + 注册表 + 工厂，事件驱动状态，可恢复执行" vertex="1">
+          <mxGeometry height="30" width="920" x="340" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="band_entry" parent="1" style="swimlane;html=1;rounded=0;startSize=30;fontSize=14;fontStyle=1;fillColor=#e8f0fe;strokeColor=#6b8fd6;" value="入口与装配" vertex="1">
+          <mxGeometry height="420" width="320" x="40" y="110" as="geometry" />
+        </mxCell>
+        <mxCell id="band_overview" parent="1" style="swimlane;html=1;rounded=0;startSize=30;fontSize=14;fontStyle=1;fillColor=#e8f7ef;strokeColor=#63a87c;" value="运行时概览" vertex="1">
+          <mxGeometry height="420" width="560" x="400" y="110" as="geometry" />
+        </mxCell>
+        <mxCell id="band_infra" parent="1" style="swimlane;html=1;rounded=0;startSize=30;fontSize=14;fontStyle=1;fillColor=#fff4df;strokeColor=#d49a3a;" value="能力与基础设施" vertex="1">
+          <mxGeometry height="420" width="560" x="1000" y="110" as="geometry" />
+        </mxCell>
+        <mxCell id="band_detail" parent="1" style="swimlane;html=1;rounded=0;startSize=32;fontSize=14;fontStyle=1;fillColor=#f0fdf4;strokeColor=#16a34a;" value="运行时核心详图：事件驱动推进链路" vertex="1">
+          <mxGeometry height="360" width="1520" x="40" y="570" as="geometry" />
+        </mxCell>
+        <mxCell id="band_future" parent="1" style="swimlane;html=1;rounded=0;startSize=30;fontSize=14;fontStyle=1;fillColor=#f3e8ff;strokeColor=#9b72cf;dashed=1;" value="高层协调" vertex="1">
+          <mxGeometry height="110" width="1520" x="40" y="950" as="geometry" />
+        </mxCell>
+        <mxCell id="user" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#374151;fontSize=13;" value="用户 / Shell" vertex="1">
+          <mxGeometry height="45" width="210" x="95" y="155" as="geometry" />
+        </mxCell>
+        <mxCell id="main" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#374151;fontSize=13;" value="main.go&lt;br&gt;处理进程参数与标准 IO" vertex="1">
+          <mxGeometry height="55" width="210" x="95" y="225" as="geometry" />
+        </mxCell>
+        <mxCell id="app" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#dbeafe;strokeColor=#2563eb;fontSize=13;fontStyle=1;" value="internal/entrance/app&lt;br&gt;应用装配根" vertex="1">
+          <mxGeometry height="65" width="210" x="95" y="310" as="geometry" />
+        </mxCell>
+        <mxCell id="startup" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#6b7280;fontSize=12;" value="启动参数 + 配置 + 日志&lt;div&gt;策略 + 模型供应商 + 数据目录&lt;/div&gt;" vertex="1">
+          <mxGeometry height="65" width="250" x="75" y="405" as="geometry" />
+        </mxCell>
+        <mxCell id="app_runner" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#dcfce7;strokeColor=#16a34a;fontSize=13;fontStyle=1;" value="AppAgentRunner&lt;div&gt;选择当前 active agent&lt;/div&gt;" vertex="1">
+          <mxGeometry height="65" width="210" x="445" y="155" as="geometry" />
+        </mxCell>
+        <mxCell id="agent_registry" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#15803d;fontSize=12;" value="Agent 注册表 / 工厂&lt;div&gt;default, analyze, tools-tester&lt;/div&gt;" vertex="1">
+          <mxGeometry height="65" width="210" x="705" y="155" as="geometry" />
+        </mxCell>
+        <mxCell id="runtime" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#bbf7d0;strokeColor=#16a34a;fontSize=13;fontStyle=1;" value="internal/runtime.Runtime&lt;div&gt;注册 agent、启动任务、暴露状态&lt;/div&gt;" vertex="1">
+          <mxGeometry height="75" width="210" x="445" y="285" as="geometry" />
+        </mxCell>
+        <mxCell id="agent" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#15803d;fontSize=12;" value="runtime/agents.Agent&lt;div&gt;启动 / 恢复 / 快照&lt;/div&gt;" vertex="1">
+          <mxGeometry height="75" width="210" x="705" y="285" as="geometry" />
+        </mxCell>
+        <mxCell id="overview_note" parent="1" style="shape=note;whiteSpace=wrap;html=1;backgroundOutline=1;darkOpacity=0.05;fillColor=#ffffff;strokeColor=#15803d;fontSize=11;" value="详细事件推进链路见下方单独区域。" vertex="1">
+          <mxGeometry height="55" width="320" x="520" y="410" as="geometry" />
+        </mxCell>
+        <mxCell id="commands" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#b45309;fontSize=12;" value="capability/command&lt;div&gt;run, help, status, model, agents&lt;/div&gt;" vertex="1">
+          <mxGeometry height="70" width="220" x="1040" y="150" as="geometry" />
+        </mxCell>
+        <mxCell id="tools" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#fffbeb;strokeColor=#b45309;fontSize=12;fontStyle=1;" value="capability/tool + 内置工具&lt;div&gt;ask_user, workspace 读 / 搜索 / 写&lt;/div&gt;" vertex="1">
+          <mxGeometry height="70" width="220" x="1300" y="150" as="geometry" />
+        </mxCell>
+        <mxCell id="workspace" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#b45309;fontSize=12;" value="foundation/workspace&lt;div&gt;路径安全、忽略规则、列表 / 读取 / 搜索 / 快照&lt;/div&gt;" vertex="1">
+          <mxGeometry height="80" width="220" x="1040" y="270" as="geometry" />
+        </mxCell>
+        <mxCell id="policy" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#b45309;fontSize=12;" value="foundation/policy&lt;div&gt;read / validate / modify&lt;/div&gt;" vertex="1">
+          <mxGeometry height="80" width="220" x="1300" y="270" as="geometry" />
+        </mxCell>
+        <mxCell id="llm_provider" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#b45309;fontSize=12;" value="foundation/llmClient/provider&lt;div&gt;OpenAI, DeepSeek, Gemini, Anthropic, mock&lt;/div&gt;" vertex="1">
+          <mxGeometry height="75" width="220" x="1040" y="395" as="geometry" />
+        </mxCell>
+        <mxCell id="content" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#b45309;fontSize=12;" value="content.Env&lt;div&gt;单次运行的 IO、配置、日志、agent、注册表&lt;/div&gt;" vertex="1">
+          <mxGeometry height="75" width="220" x="1300" y="395" as="geometry" />
+        </mxCell>
+        <mxCell id="detail_start" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#15803d;fontSize=12;" value="StartTask&lt;div&gt;创建任务启动事件&lt;/div&gt;" vertex="1">
+          <mxGeometry height="70" width="150" x="80" y="640" as="geometry" />
+        </mxCell>
+        <mxCell id="detail_bus" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#15803d;fontSize=12;" value="eventbus.Bus&lt;div&gt;发布事件 / 分发订阅&lt;/div&gt;" vertex="1">
+          <mxGeometry height="70" width="160" x="270" y="640" as="geometry" />
+        </mxCell>
+        <mxCell id="detail_reactor" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#dcfce7;strokeColor=#16a34a;fontSize=13;fontStyle=1;" value="reactor.Reactor&lt;div&gt;Advance(event)&lt;/div&gt;" vertex="1">
+          <mxGeometry height="70" width="160" x="480" y="640" as="geometry" />
+        </mxCell>
+        <mxCell id="detail_state" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#15803d;fontSize=12;" value="TaskStateMachine&lt;div&gt;消费事件，迁移状态&lt;/div&gt;" vertex="1">
+          <mxGeometry height="70" width="170" x="690" y="640" as="geometry" />
+        </mxCell>
+        <mxCell id="detail_effects" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#15803d;fontSize=12;" value="Effects&lt;div&gt;描述下一步动作&lt;/div&gt;" vertex="1">
+          <mxGeometry height="70" width="150" x="910" y="640" as="geometry" />
+        </mxCell>
+        <mxCell id="detail_exec" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#15803d;fontSize=12;" value="Executors&lt;div&gt;执行 agent_start / resume / 终态发布&lt;/div&gt;" vertex="1">
+          <mxGeometry height="70" width="190" x="1110" y="640" as="geometry" />
+        </mxCell>
+        <mxCell id="detail_events" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#15803d;fontSize=12;" value="新事件&lt;div&gt;模型响应、工具结果、任务结果&lt;/div&gt;" vertex="1">
+          <mxGeometry height="70" width="160" x="1350" y="640" as="geometry" />
+        </mxCell>
+        <mxCell id="detail_regs" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#f8fafc;strokeColor=#64748b;fontSize=12;" value="运行时注册表&lt;div&gt;RuntimeRegistry / ExecutorRegistry / AgentFlowRegistry&lt;/div&gt;" vertex="1">
+          <mxGeometry height="70" width="260" x="480" y="775" as="geometry" />
+        </mxCell>
+        <mxCell id="detail_agent" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#f8fafc;strokeColor=#64748b;fontSize=12;" value="Agent 执行边界&lt;div&gt;LLM 调用 + 工具分发 + 上下文管理&lt;/div&gt;" vertex="1">
+          <mxGeometry height="70" width="260" x="790" y="775" as="geometry" />
+        </mxCell>
+        <mxCell id="detail_persist" parent="1" style="shape=cylinder3d;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#ffffff;strokeColor=#15803d;fontSize=12;" value="runtime/persistence&lt;div&gt;状态、快照、运行时事件持久化&lt;/div&gt;" vertex="1">
+          <mxGeometry height="90" width="230" x="1100" y="760" as="geometry" />
+        </mxCell>
+        <mxCell id="detail_obs" parent="1" style="shape=note;whiteSpace=wrap;html=1;backgroundOutline=1;darkOpacity=0.05;fillColor=#ffffff;strokeColor=#15803d;fontSize=11;" value="可观测事件&lt;div&gt;模型、工具、策略、状态、终态结果&lt;/div&gt;" vertex="1">
+          <mxGeometry height="70" width="270" x="80" y="775" as="geometry" />
+        </mxCell>
+        <mxCell id="orchestrator" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#faf5ff;strokeColor=#8b5cf6;fontSize=12;dashed=1;" value="internal/orchestrator：规划器根据目标选择 agent 工作，决定启动、恢复、等待、完成或失败。GoalLoop / Verifier / Planner 属于后续扩展点；工具执行仍归运行时 agent。" vertex="1">
+          <mxGeometry height="45" width="1420" x="80" y="985" as="geometry" />
+        </mxCell>
+        <mxCell id="e_user_main" edge="1" parent="1" source="user" style="endArrow=block;html=1;rounded=0;strokeWidth=2;strokeColor=#374151;" target="main">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_main_app" edge="1" parent="1" source="main" style="endArrow=block;html=1;rounded=0;strokeWidth=2;strokeColor=#374151;" target="app">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_app_startup" edge="1" parent="1" source="app" style="endArrow=block;html=1;rounded=0;strokeColor=#2563eb;" target="startup">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_app_runner" edge="1" parent="1" source="app" style="endArrow=block;html=1;rounded=0;strokeWidth=2;strokeColor=#16a34a;" target="app_runner">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_runner_registry" edge="1" parent="1" source="app_runner" style="endArrow=block;html=1;rounded=0;strokeColor=#16a34a;" target="agent_registry">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_registry_agent" edge="1" parent="1" source="agent_registry" style="endArrow=block;html=1;rounded=0;strokeColor=#16a34a;" target="agent">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_runner_runtime" edge="1" parent="1" source="app_runner" style="endArrow=block;html=1;rounded=0;strokeWidth=2;strokeColor=#16a34a;" target="runtime">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_runtime_agent" edge="1" parent="1" source="runtime" style="endArrow=block;html=1;rounded=0;strokeColor=#16a34a;" target="agent">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_startup_commands" edge="1" parent="1" source="startup" style="endArrow=block;html=1;rounded=0;strokeColor=#b45309;" target="commands">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_app_content" edge="1" parent="1" source="app" style="endArrow=block;html=1;rounded=0;strokeColor=#b45309;" target="content">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_agent_tools" edge="1" parent="1" source="agent" style="endArrow=block;html=1;rounded=0;strokeColor=#b45309;" target="tools">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_agent_provider" edge="1" parent="1" source="agent" style="endArrow=block;html=1;rounded=0;strokeColor=#b45309;" target="llm_provider">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_tools_workspace" edge="1" parent="1" source="tools" style="endArrow=block;html=1;rounded=0;strokeColor=#b45309;" target="workspace">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_tools_policy" edge="1" parent="1" source="tools" style="endArrow=block;html=1;rounded=0;strokeColor=#b45309;" target="policy">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="d1" edge="1" parent="1" source="detail_start" style="endArrow=block;html=1;rounded=0;strokeWidth=2;strokeColor=#16a34a;" target="detail_bus">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="d2" edge="1" parent="1" source="detail_bus" style="endArrow=block;html=1;rounded=0;strokeWidth=2;strokeColor=#16a34a;" target="detail_reactor">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="d3" edge="1" parent="1" source="detail_reactor" style="endArrow=block;html=1;rounded=0;strokeWidth=2;strokeColor=#16a34a;" target="detail_state">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="d4" edge="1" parent="1" source="detail_state" style="endArrow=block;html=1;rounded=0;strokeWidth=2;strokeColor=#16a34a;" target="detail_effects">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="d5" edge="1" parent="1" source="detail_effects" style="endArrow=block;html=1;rounded=0;strokeWidth=2;strokeColor=#16a34a;" target="detail_exec">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="d6" edge="1" parent="1" source="detail_exec" style="endArrow=block;html=1;rounded=0;strokeWidth=2;strokeColor=#16a34a;" target="detail_events">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="d7" edge="1" parent="1" source="detail_events" style="endArrow=block;html=1;rounded=0;strokeWidth=2;strokeColor=#16a34a;" target="detail_bus">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1430" y="610" />
+              <mxPoint x="350" y="610" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="d8" edge="1" parent="1" source="detail_reactor" style="endArrow=block;html=1;rounded=0;dashed=1;strokeColor=#64748b;" target="detail_regs">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="d9" edge="1" parent="1" source="detail_exec" style="endArrow=block;html=1;rounded=0;dashed=1;strokeColor=#64748b;" target="detail_agent">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="d10" edge="1" parent="1" source="detail_state" style="endArrow=block;html=1;rounded=0;dashed=1;strokeColor=#15803d;" target="detail_persist">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="775" y="740" />
+              <mxPoint x="1215" y="740" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="d11" edge="1" parent="1" source="detail_bus" style="endArrow=block;html=1;rounded=0;dashed=1;strokeColor=#15803d;" target="detail_obs">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="350" y="745" />
+              <mxPoint x="215" y="745" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="WelBY5ZQXsU1tBIgt3pr" name="internal/runtime 内部结构">
+    <mxGraphModel dx="1872" dy="883" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="4000" pageHeight="3000" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=26;fontStyle=1;align=center;verticalAlign=middle;whiteSpace=wrap;" value="internal/runtime 包内部结构与接口调用" vertex="1">
+          <mxGeometry height="80" width="2000" x="1000" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=13;fontColor=#4b5563;align=center;verticalAlign=middle;whiteSpace=wrap;" value="实线表示同步调用 / 注册 / 执行；蓝色虚线表示事件发布或返回；灰色虚线表示持久化和观测。" vertex="1">
+          <mxGeometry height="60" width="2280" x="860" y="120" as="geometry" />
+        </mxCell>
+        <mxCell id="lane_facade" parent="1" style="swimlane;html=1;rounded=0;startSize=30;fontSize=14;fontStyle=1;fillColor=#e8f0fe;strokeColor=#3b82f6;" value="Facade：任务运行入口" vertex="1">
+          <mxGeometry height="760" width="720" x="80" y="220" as="geometry" />
+        </mxCell>
+        <mxCell id="lane_event" parent="1" style="swimlane;html=1;rounded=0;startSize=30;fontSize=14;fontStyle=1;fillColor=#e8f7ef;strokeColor=#16a34a;" value="事件总线与推进器" vertex="1">
+          <mxGeometry height="760" width="1240" x="880" y="220" as="geometry" />
+        </mxCell>
+        <mxCell id="lane_state" parent="1" style="swimlane;html=1;rounded=0;startSize=30;fontSize=14;fontStyle=1;fillColor=#f0fdf4;strokeColor=#15803d;" value="状态机与可恢复状态" vertex="1">
+          <mxGeometry height="760" width="840" x="2200" y="220" as="geometry" />
+        </mxCell>
+        <mxCell id="lane_store" parent="1" style="swimlane;html=1;rounded=0;startSize=30;fontSize=14;fontStyle=1;fillColor=#fff7ed;strokeColor=#c2410c;" value="持久化与恢复" vertex="1">
+          <mxGeometry height="760" width="800" x="3120" y="220" as="geometry" />
+        </mxCell>
+        <mxCell id="lane_exec" parent="1" style="swimlane;html=1;rounded=0;startSize=30;fontSize=14;fontStyle=1;fillColor=#f8fafc;strokeColor=#64748b;" value="Effect 执行器" vertex="1">
+          <mxGeometry height="860" width="3840" x="80" y="1080" as="geometry" />
+        </mxCell>
+        <mxCell id="lane_external" parent="1" style="swimlane;html=1;rounded=0;startSize=30;fontSize=14;fontStyle=1;fillColor=#fefce8;strokeColor=#ca8a04;" value="运行时外部依赖边界" vertex="1">
+          <mxGeometry height="500" width="3840" x="80" y="2020" as="geometry" />
+        </mxCell>
+        <mxCell id="lane_legend" parent="1" style="swimlane;html=1;rounded=0;startSize=30;fontSize=14;fontStyle=1;fillColor=#faf5ff;strokeColor=#8b5cf6;" value="关键事件与 Effect 类型" vertex="1">
+          <mxGeometry height="320" width="3840" x="80" y="2600" as="geometry" />
+        </mxCell>
+        <mxCell id="runtime" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#dbeafe;strokeColor=#2563eb;fontSize=12;fontStyle=1;align=left;spacing=10;" value="internal/runtime.Runtime&lt;br&gt;&lt;br&gt;职责备注：运行时 facade，装配 eventbus、reactor、state machine、executor registry、持久化 store；对外提供任务级 API。&lt;br&gt;&lt;br&gt;主要方法：&lt;br&gt;New(options...)&lt;br&gt;RegisterAgent(ctx, taskID, Agent)&lt;br&gt;StartTask(ctx, Task)&lt;br&gt;Publish / PublishAsync&lt;br&gt;State / AgentSnapshot&lt;br&gt;Close" vertex="1">
+          <mxGeometry height="410" width="600" x="140" y="310" as="geometry" />
+        </mxCell>
+        <mxCell id="task_runtime" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#3b82f6;fontSize=12;align=left;spacing=10;" value="TaskRuntime 包装对象&lt;br&gt;&lt;br&gt;职责备注：单个 task 的轻量句柄，限制 task_id / agent_name 范围。&lt;br&gt;&lt;br&gt;方法：&lt;br&gt;Start(ctx, TaskStart)&lt;br&gt;StartInput(ctx, string)&lt;br&gt;Publish / PublishAsync&lt;br&gt;State()&lt;br&gt;AgentSnapshot()&lt;br&gt;Cancel()" vertex="1">
+          <mxGeometry height="190" width="600" x="140" y="760" as="geometry" />
+        </mxCell>
+        <mxCell id="bus" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#dcfce7;strokeColor=#16a34a;fontSize=12;fontStyle=1;align=left;spacing=10;" value="eventbus.Bus&lt;br&gt;&lt;br&gt;职责备注：事件发布、订阅、过滤和异步队列；runtime 内部所有状态推进都通过 Event 进入。&lt;br&gt;&lt;br&gt;核心接口：&lt;br&gt;Subscribe(Filter, Handler)&lt;br&gt;SubscribeReadOnly(Filter, Handler)&lt;br&gt;Publish(ctx, Event)&lt;br&gt;PublishAsync(ctx, Event)&lt;br&gt;Broadcast / Enqueue&lt;br&gt;Close" vertex="1">
+          <mxGeometry height="370" width="520" x="940" y="310" as="geometry" />
+        </mxCell>
+        <mxCell id="event" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#16a34a;fontSize=12;align=left;spacing=10;" value="eventbus.Event&lt;br&gt;&lt;br&gt;字段：&lt;br&gt;ID, Topic, Type, TaskID&lt;br&gt;Source, Payload, Metadata&lt;br&gt;OccurredAt&lt;br&gt;&lt;br&gt;Filter.Match(event) 用于路由订阅。" vertex="1">
+          <mxGeometry height="210" width="520" x="940" y="730" as="geometry" />
+        </mxCell>
+        <mxCell id="reactor" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#bbf7d0;strokeColor=#16a34a;fontSize=12;fontStyle=1;align=left;spacing=10;" value="reactor.Reactor&lt;br&gt;&lt;br&gt;职责备注：事件驱动推进器；接收事件后解析 TaskRuntime，调用状态机，发布派生事件，并分发 effects。&lt;br&gt;&lt;br&gt;核心方法：&lt;br&gt;Attach(bus, filter)&lt;br&gt;HandleEvent(ctx, Event)&lt;br&gt;Advance(ctx, Event)&lt;br&gt;CancelTask(taskID)&lt;br&gt;EffectStarted / Succeeded / Failed&lt;br&gt;EffectResultEvents" vertex="1">
+          <mxGeometry height="370" width="520" x="1540" y="310" as="geometry" />
+        </mxCell>
+        <mxCell id="reactor_ifaces" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#16a34a;fontSize=11;align=left;spacing=10;" value="reactor 关键接口&lt;br&gt;&lt;br&gt;StateMachine.HandleEvent(ctx, Event) StateResult&lt;br&gt;RuntimeResolver.ResolveRuntime(ctx, Event) TaskRuntime&lt;br&gt;EffectDispatcher.DispatchEffect(ctx, EffectDispatchRequest)&lt;br&gt;EffectExecutor.ExecuteEffect(ctx, TaskRuntime, Effect) EffectResult" vertex="1">
+          <mxGeometry height="210" width="520" x="1540" y="730" as="geometry" />
+        </mxCell>
+        <mxCell id="statemachine" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#dcfce7;strokeColor=#15803d;fontSize=12;fontStyle=1;align=left;spacing=10;" value="statemachine.TaskStateMachine&lt;br&gt;&lt;br&gt;职责备注：可恢复任务状态机；根据事件迁移 TaskState，记录 pending model/tool/user/sub-agent，输出 reactor.Effect。&lt;br&gt;&lt;br&gt;实现接口：&lt;br&gt;reactor.StateMachine&lt;br&gt;&lt;br&gt;核心方法：&lt;br&gt;HandleEvent(ctx, Event) StateResult&lt;br&gt;State(ctx, taskID)" vertex="1">
+          <mxGeometry height="350" width="520" x="2260" y="310" as="geometry" />
+        </mxCell>
+        <mxCell id="state" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#15803d;fontSize=11;align=left;spacing=10;" value="TaskState&lt;br&gt;&lt;br&gt;Phase：Created / Running / WaitingModel / WaitingTool / WaitingUserInput / WaitingSubAgent / Completed / Failed / Cancelled&lt;br&gt;&lt;br&gt;含 pending 调用、失败计数、结果、生命周期记录。" vertex="1">
+          <mxGeometry height="240" width="520" x="2260" y="700" as="geometry" />
+        </mxCell>
+        <mxCell id="agent_flow" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#15803d;fontSize=11;align=left;spacing=10;" value="AgentFlowRegistry / AgentFlowMachine&lt;br&gt;&lt;br&gt;职责备注：可配置 agent 内部业务阶段迁移。&lt;br&gt;&lt;br&gt;接口：&lt;br&gt;InitialPhase() AgentPhase&lt;br&gt;HandleAgentEvent(ctx, TaskState, Event) AgentFlowResult" vertex="1">
+          <mxGeometry height="340" width="200" x="2820" y="460" as="geometry" />
+        </mxCell>
+        <mxCell id="storage" parent="1" style="shape=cylinder3d;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#ffedd5;strokeColor=#c2410c;fontSize=12;fontStyle=1;align=left;spacing=10;" value="persistence.RuntimeStorage&lt;br&gt;&lt;br&gt;职责备注：runtime 可恢复事实来源，统一暴露四类 store。&lt;br&gt;&lt;br&gt;接口：&lt;br&gt;TaskStates()&lt;br&gt;AgentSnapshots()&lt;br&gt;Runtimes()&lt;br&gt;Events()&lt;br&gt;Backend()&lt;br&gt;Close()" vertex="1">
+          <mxGeometry height="340" width="460" x="3180" y="300" as="geometry" />
+        </mxCell>
+        <mxCell id="stores" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#c2410c;fontSize=11;align=left;spacing=10;" value="Store 接口&lt;br&gt;&lt;br&gt;TaskStateStore：Load / Save / List&lt;br&gt;SnapshotStore：Load / Save / List&lt;br&gt;RuntimeStore：Load / Save / Delete / List&lt;br&gt;EventStore：Append / List / Last&lt;br&gt;&lt;br&gt;实现：file_store / sqlite_store / mirror" vertex="1">
+          <mxGeometry height="260" width="660" x="3180" y="680" as="geometry" />
+        </mxCell>
+        <mxCell id="registry_runtime" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#64748b;fontSize=11;align=left;spacing=10;" value="RuntimeRegistry&lt;br&gt;&lt;br&gt;职责备注：按 task_id 查找 reactor.TaskRuntime。&lt;br&gt;实现 RuntimeResolver。&lt;br&gt;&lt;br&gt;方法：Register / Unregister / ResolveRuntime / List" vertex="1">
+          <mxGeometry height="240" width="460" x="160" y="1200" as="geometry" />
+        </mxCell>
+        <mxCell id="registry_executor" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#64748b;fontSize=11;align=left;spacing=10;" value="ExecutorRegistry&lt;br&gt;&lt;br&gt;职责备注：按 EffectType 查找执行器。&lt;br&gt;&lt;br&gt;方法：Register / RegisterFunc / Lookup / ListTypes&lt;br&gt;&lt;br&gt;常见 effect：agent_start、agent_resume、model_call、tool_dispatch、task.completed.emit" vertex="1">
+          <mxGeometry height="280" width="460" x="160" y="1520" as="geometry" />
+        </mxCell>
+        <mxCell id="dispatcher_async" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#64748b;fontSize=11;align=left;spacing=10;" value="AsyncEffectDispatcher&lt;br&gt;&lt;br&gt;职责备注：异步执行 effect，使用 semaphore 控制并发，回调 reporter 记录 effect 生命周期。" vertex="1">
+          <mxGeometry height="240" width="460" x="700" y="1200" as="geometry" />
+        </mxCell>
+        <mxCell id="dispatcher_sync" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#64748b;fontSize=11;align=left;spacing=10;" value="SyncEffectDispatcher&lt;br&gt;&lt;br&gt;职责备注：测试 / 同步包装可用的同步分发器；同样实现 EffectDispatcher。" vertex="1">
+          <mxGeometry height="240" width="460" x="700" y="1520" as="geometry" />
+        </mxCell>
+        <mxCell id="task_agent_exec" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#f1f5f9;strokeColor=#64748b;fontSize=11;fontStyle=1;align=left;spacing=10;" value="taskAgentExecutor&lt;br&gt;&lt;br&gt;职责备注：runtime 内部默认执行器；把 EffectAgentStart / EffectAgentResume 转成 Agent.Start / Agent.Resume。&lt;br&gt;&lt;br&gt;依赖：taskAgentRegistry" vertex="1">
+          <mxGeometry height="260" width="480" x="1240" y="1180" as="geometry" />
+        </mxCell>
+        <mxCell id="agents_pkg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#64748b;fontSize=11;align=left;spacing=10;" value="runtime/agents&lt;br&gt;&lt;br&gt;Agent 接口：&lt;br&gt;Name() string&lt;br&gt;Start(ctx, AgentStartInput) AgentResult&lt;br&gt;Resume(ctx, AgentResumeInput) AgentResult&lt;br&gt;Snapshot(ctx, taskID) AgentSnapshot&lt;br&gt;&lt;br&gt;数据：AgentSnapshot、Message、ToolSpec、Decision" vertex="1">
+          <mxGeometry height="300" width="480" x="1240" y="1500" as="geometry" />
+        </mxCell>
+        <mxCell id="builtin_agents" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#64748b;fontSize=11;align=left;spacing=10;" value="builtinagents&lt;br&gt;&lt;br&gt;职责备注：内置 agent 实现。当前包含 default、analyze、tools-tester、task-intake；内部 agentRuntime 负责把模型决策翻译为 runtime 事件。" vertex="1">
+          <mxGeometry height="300" width="480" x="1800" y="1500" as="geometry" />
+        </mxCell>
+        <mxCell id="model_exec" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#f1f5f9;strokeColor=#64748b;fontSize=11;fontStyle=1;align=left;spacing=10;" value="contextmgr.ModelExecutor&lt;br&gt;&lt;br&gt;职责备注：执行 EffectModelCall；解码 ModelCallPayload，调用 Manager，生成 model.response_received / failed 事件。&lt;br&gt;&lt;br&gt;实现：reactor.EffectExecutor" vertex="1">
+          <mxGeometry height="260" width="480" x="1800" y="1180" as="geometry" />
+        </mxCell>
+        <mxCell id="ctx_manager" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#64748b;fontSize=11;align=left;spacing=10;" value="contextmgr.Manager&lt;br&gt;&lt;br&gt;职责备注：构造 llmClient.Request，调用模型，规范化 tool call ID 和空参数，生成 assistant/tool message。&lt;br&gt;&lt;br&gt;接口：LLMClient.Complete(ctx, Request) Response" vertex="1">
+          <mxGeometry height="260" width="480" x="2360" y="1180" as="geometry" />
+        </mxCell>
+        <mxCell id="tool_adapter" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#f1f5f9;strokeColor=#64748b;fontSize=11;fontStyle=1;align=left;spacing=10;" value="runtime/tools.Adapter&lt;br&gt;&lt;br&gt;职责备注：执行 EffectToolDispatch；调用 capability/tool.Manage，生成 tool.completed / tool.failed 事件。&lt;br&gt;&lt;br&gt;方法：Specs() / ToolNames() / ExecuteEffect(...)" vertex="1">
+          <mxGeometry height="280" width="480" x="2360" y="1520" as="geometry" />
+        </mxCell>
+        <mxCell id="terminal_exec" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#f1f5f9;strokeColor=#64748b;fontSize=11;fontStyle=1;align=left;spacing=10;" value="terminalEffectExecutor&lt;br&gt;&lt;br&gt;职责备注：把状态机终态 effect 转成 task.result topic 事件。&lt;br&gt;&lt;br&gt;输入：task.completed.emit / task.failed.emit / task.cancelled.emit&lt;br&gt;输出：task.completed / task.failed / task.cancelled" vertex="1">
+          <mxGeometry height="280" width="480" x="2920" y="1180" as="geometry" />
+        </mxCell>
+        <mxCell id="event_recorder" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#64748b;fontSize=11;align=left;spacing=10;" value="persistence.EventRecorder&lt;br&gt;&lt;br&gt;职责备注：read-only 订阅 eventbus，把运行时事件追加到 EventStore。&lt;br&gt;&lt;br&gt;接口：HandleEvent(ctx, Event)" vertex="1">
+          <mxGeometry height="240" width="480" x="2920" y="1540" as="geometry" />
+        </mxCell>
+        <mxCell id="ext_llm" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#fef9c3;strokeColor=#ca8a04;fontSize=12;align=left;spacing=10;" value="foundation/llmClient&lt;br&gt;&lt;br&gt;外部边界：具体 provider HTTP 适配，不属于 runtime 核心。contextmgr 只依赖 LLMClient 接口。" vertex="1">
+          <mxGeometry height="220" width="600" x="280" y="2140" as="geometry" />
+        </mxCell>
+        <mxCell id="ext_tool" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#fef9c3;strokeColor=#ca8a04;fontSize=12;align=left;spacing=10;" value="capability/tool&lt;br&gt;&lt;br&gt;外部边界：工具注册表、policy 托管执行、内置 workspace / ask_user 等工具。runtime/tools.Adapter 只做事件适配。" vertex="1">
+          <mxGeometry height="220" width="600" x="1120" y="2140" as="geometry" />
+        </mxCell>
+        <mxCell id="ext_content" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#fef9c3;strokeColor=#ca8a04;fontSize=12;align=left;spacing=10;" value="content.Env&lt;br&gt;&lt;br&gt;外部边界：为工具执行提供单次运行 IO、workdir、配置、日志和命令/agent 句柄。" vertex="1">
+          <mxGeometry height="220" width="600" x="1960" y="2140" as="geometry" />
+        </mxCell>
+        <mxCell id="ext_policy" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#fef9c3;strokeColor=#ca8a04;fontSize=12;align=left;spacing=10;" value="foundation/policy&lt;br&gt;&lt;br&gt;外部边界：read / validate / modify 权限判断。由 capability/tool.Manage 使用，runtime 不直接写策略逻辑。" vertex="1">
+          <mxGeometry height="220" width="600" x="2800" y="2140" as="geometry" />
+        </mxCell>
+        <mxCell id="legend_events" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#8b5cf6;fontSize=12;align=left;spacing=10;" value="主要 EventType：&lt;br&gt;task.start_requested -&gt; agent.model_requested -&gt; model.response_received / failed -&gt; agent.tool_requested -&gt; tool.completed / failed -&gt; agent.completed / failed&lt;br&gt;&lt;br&gt;等待类事件：agent.user_input_requested / user_input.received，agent.sub_agent_requested / sub_agent.completed / failed" vertex="1">
+          <mxGeometry height="150" width="1720" x="160" y="2700" as="geometry" />
+        </mxCell>
+        <mxCell id="legend_effects" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#8b5cf6;fontSize=12;align=left;spacing=10;" value="主要 EffectType：&lt;br&gt;agent_start、agent_resume、model_call、tool_dispatch、user_input_request、sub_agent_dispatch、task.completed.emit、task.failed.emit、task.cancelled.emit&lt;br&gt;&lt;br&gt;规则：状态机只产出 effect；具体副作用由 ExecutorRegistry 找到执行器完成。" vertex="1">
+          <mxGeometry height="150" width="1720" x="2040" y="2700" as="geometry" />
+        </mxCell>
+        <mxCell id="e_runtime_bus" edge="1" parent="1" source="runtime" style="endArrow=block;html=1;rounded=0;strokeWidth=2;strokeColor=#2563eb;fontSize=14;labelBackgroundColor=#ffffff;" target="bus" value="StartTask / Publish">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_runtime_attach" edge="1" parent="1" source="runtime" style="endArrow=block;html=1;rounded=0;strokeColor=#2563eb;fontSize=14;labelBackgroundColor=#ffffff;" target="reactor" value="RegisterAgent: reactor.Attach">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="810" y="360" />
+              <mxPoint x="1520" y="360" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_task_runtime_runtime" edge="1" parent="1" source="task_runtime" style="endArrow=block;html=1;rounded=0;strokeColor=#2563eb;fontSize=14;labelBackgroundColor=#ffffff;" target="runtime" value="包装调用">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_bus_reactor" edge="1" parent="1" source="bus" style="endArrow=block;html=1;rounded=0;strokeWidth=2;strokeColor=#16a34a;fontSize=14;labelBackgroundColor=#ffffff;" target="reactor" value="Subscribe Filter{topic: task}">
+          <mxGeometry relative="1" x="-1" y="-15" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_reactor_state" edge="1" parent="1" source="reactor" style="endArrow=block;html=1;rounded=0;strokeWidth=2;strokeColor=#16a34a;fontSize=14;labelBackgroundColor=#ffffff;" target="statemachine" value="StateMachine.HandleEvent">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_state_result" edge="1" parent="1" source="statemachine" style="endArrow=block;html=1;rounded=0;dashed=1;strokeWidth=2;strokeColor=#0ea5e9;fontSize=14;labelBackgroundColor=#ffffff;" target="reactor" value="StateResult{Effects, Events}">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="2140" y="240" />
+              <mxPoint x="1800" y="240" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_state_store" edge="1" parent="1" source="statemachine" style="endArrow=block;html=1;rounded=0;dashed=1;strokeColor=#c2410c;fontSize=14;labelBackgroundColor=#ffffff;" target="storage" value="Load / Save TaskState">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="3100" y="400" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_state_flow" edge="1" parent="1" source="statemachine" style="endArrow=block;html=1;rounded=0;strokeColor=#15803d;fontSize=14;labelBackgroundColor=#ffffff;" target="agent_flow" value="agent flow fallback">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_runtime_storage" edge="1" parent="1" source="runtime" style="endArrow=block;html=1;rounded=0;dashed=1;strokeColor=#c2410c;fontSize=14;labelBackgroundColor=#ffffff;" target="storage" value="mirrored stores / runtime snapshot">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="500" y="210" />
+              <mxPoint x="3410" y="210" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_storage_stores" edge="1" parent="1" source="storage" style="endArrow=block;html=1;rounded=0;strokeColor=#c2410c;fontSize=14;labelBackgroundColor=#ffffff;" target="stores" value="实现接口">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_reactor_runtime_registry" edge="1" parent="1" source="reactor" style="endArrow=block;html=1;rounded=0;strokeColor=#64748b;fontSize=14;labelBackgroundColor=#ffffff;" target="registry_runtime" value="ResolveRuntime">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1800" y="1040" />
+              <mxPoint x="390" y="1040" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_runtime_registries" edge="1" parent="1" source="runtime" style="endArrow=block;html=1;rounded=0;strokeColor=#2563eb;fontSize=14;labelBackgroundColor=#ffffff;" target="registry_runtime" value="Register">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="410" y="1040" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_reactor_executor_registry" edge="1" parent="1" source="reactor" style="endArrow=block;html=1;rounded=0;strokeColor=#64748b;fontSize=14;labelBackgroundColor=#ffffff;" target="registry_executor" value="Lookup(effect.Type)">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1800" y="1040" />
+              <mxPoint x="390" y="1040" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_reactor_dispatcher" edge="1" parent="1" source="reactor" style="endArrow=block;html=1;rounded=0;strokeWidth=2;strokeColor=#64748b;fontSize=14;labelBackgroundColor=#ffffff;" target="dispatcher_async" value="DispatchEffect">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1800" y="1040" />
+              <mxPoint x="930" y="1040" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_dispatcher_executor" edge="1" parent="1" source="dispatcher_async" style="endArrow=block;html=1;rounded=0;strokeWidth=2;strokeColor=#64748b;fontSize=14;labelBackgroundColor=#ffffff;" target="task_agent_exec" value="ExecuteEffect">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_executor_registry_model" edge="1" parent="1" source="registry_executor" style="endArrow=block;html=1;rounded=0;strokeColor=#64748b;fontSize=14;labelBackgroundColor=#ffffff;" target="model_exec" value="EffectModelCall">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_executor_registry_tool" edge="1" parent="1" source="registry_executor" style="endArrow=block;html=1;rounded=0;strokeColor=#64748b;fontSize=14;labelBackgroundColor=#ffffff;" target="tool_adapter" value="EffectToolDispatch">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="390" y="1880" />
+              <mxPoint x="2600" y="1880" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_executor_registry_terminal" edge="1" parent="1" source="registry_executor" style="endArrow=block;html=1;rounded=0;strokeColor=#64748b;fontSize=14;labelBackgroundColor=#ffffff;" target="terminal_exec" value="terminal effects">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="390" y="1080" />
+              <mxPoint x="3160" y="1080" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_task_agent_agents" edge="1" parent="1" source="task_agent_exec" style="endArrow=block;html=1;rounded=0;strokeWidth=2;strokeColor=#64748b;fontSize=14;labelBackgroundColor=#ffffff;" target="agents_pkg" value="Agent.Start / Resume">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_agents_builtin" edge="1" parent="1" source="agents_pkg" style="endArrow=block;html=1;rounded=0;strokeColor=#64748b;fontSize=14;labelBackgroundColor=#ffffff;" target="builtin_agents" value="具体实现">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_model_manager" edge="1" parent="1" source="model_exec" style="endArrow=block;html=1;rounded=0;strokeWidth=2;strokeColor=#64748b;fontSize=14;labelBackgroundColor=#ffffff;" target="ctx_manager" value="Manager.CallModel">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_model_event" edge="1" parent="1" source="model_exec" style="endArrow=block;html=1;rounded=0;dashed=1;strokeWidth=2;strokeColor=#0ea5e9;fontSize=14;labelBackgroundColor=#ffffff;" target="bus" value="model.response_received / failed">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="2040" y="1120" />
+              <mxPoint x="1200" y="1120" />
+              <mxPoint x="1200" y="700" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_tool_event" edge="1" parent="1" source="tool_adapter" style="endArrow=block;html=1;rounded=0;dashed=1;strokeWidth=2;strokeColor=#0ea5e9;fontSize=14;labelBackgroundColor=#ffffff;" target="bus" value="tool.completed / failed">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="2600" y="1860" />
+              <mxPoint x="1200" y="1860" />
+              <mxPoint x="1200" y="700" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_terminal_event" edge="1" parent="1" source="terminal_exec" style="endArrow=block;html=1;rounded=0;dashed=1;strokeWidth=2;strokeColor=#0ea5e9;fontSize=14;labelBackgroundColor=#ffffff;" target="bus" value="task.result events">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="3160" y="1080" />
+              <mxPoint x="1200" y="1080" />
+              <mxPoint x="1200" y="700" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_event_recorder" edge="1" parent="1" source="bus" style="endArrow=block;html=1;rounded=0;dashed=1;strokeColor=#c2410c;fontSize=14;labelBackgroundColor=#ffffff;" target="event_recorder" value="SubscribeReadOnly + Append">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1200" y="1900" />
+              <mxPoint x="3160" y="1900" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_recorder_store" edge="1" parent="1" source="event_recorder" style="endArrow=block;html=1;rounded=0;dashed=1;strokeColor=#c2410c;fontSize=14;labelBackgroundColor=#ffffff;" target="storage" value="EventStore.Append">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="3560" y="1600" />
+              <mxPoint x="3560" y="640" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_ctx_llm" edge="1" parent="1" source="ctx_manager" style="endArrow=block;html=1;rounded=0;strokeColor=#ca8a04;fontSize=14;labelBackgroundColor=#ffffff;" target="ext_llm" value="LLMClient.Complete">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="2600" y="1980" />
+              <mxPoint x="580" y="1980" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_tool_ext" edge="1" parent="1" source="tool_adapter" style="endArrow=block;html=1;rounded=0;strokeColor=#ca8a04;fontSize=14;labelBackgroundColor=#ffffff;" target="ext_tool" value="tool.Manage.Execute">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_tool_content" edge="1" parent="1" source="tool_adapter" style="endArrow=block;html=1;rounded=0;strokeColor=#ca8a04;fontSize=14;labelBackgroundColor=#ffffff;" target="ext_content" value="content.WithEnv">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_tool_policy" edge="1" parent="1" source="ext_tool" style="endArrow=block;html=1;rounded=0;dashed=1;strokeColor=#ca8a04;fontSize=14;labelBackgroundColor=#ffffff;" target="ext_policy" value="间接策略检查">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

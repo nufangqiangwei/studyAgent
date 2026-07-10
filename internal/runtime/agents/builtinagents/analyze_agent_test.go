@@ -109,6 +109,45 @@ func TestToolsTesterAgentStartsWithToolTesterPromptAndName(t *testing.T) {
 	}
 }
 
+func TestAnalyzeAgentBuildSystemPromptHookReceivesStartInput(t *testing.T) {
+	agent := mustAnalyzeAgent(t, nil, WithAgentRuntimeHooks(AgentRuntimeHooks{
+		BuildSystemPrompt: func(ctx context.Context, input agents2.AgentStartInput) ([]agents2.Message, error) {
+			if ctx == nil {
+				t.Fatalf("ctx is nil")
+			}
+			if input.TaskID != "task_hook" || input.Input != "inspect runtime hooks" || input.Metadata["profile"] != "local" {
+				t.Fatalf("input = %#v, want start input", input)
+			}
+			return []agents2.Message{
+				{Role: "system", Content: "hooked system prompt for " + input.Input},
+				{Role: "user", Content: input.Input},
+			}, nil
+		},
+	}))
+
+	startResult, err := agent.Start(context.Background(), agents2.AgentStartInput{
+		TaskID: "task_hook",
+		Input:  "inspect runtime hooks",
+		Metadata: map[string]string{
+			"profile": "local",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	_, request := mustModelRequestEvent(t, startResult.Events[0])
+	if len(request.Messages) < 2 {
+		t.Fatalf("messages = %#v, want system and user messages", request.Messages)
+	}
+	if request.Messages[0].Role != "system" || request.Messages[0].Content != "hooked system prompt for inspect runtime hooks" {
+		t.Fatalf("system message = %#v, want hooked prompt", request.Messages[0])
+	}
+	if request.Messages[1].Role != "user" || request.Messages[1].Content != "inspect runtime hooks" {
+		t.Fatalf("user message = %#v, want start input", request.Messages[1])
+	}
+}
+
 func TestAnalyzeAgentResumeToolResultRequestsModelThenCompletesTask(t *testing.T) {
 	agent := mustAnalyzeAgent(t, nil)
 	startResult, err := agent.Start(context.Background(), agents2.AgentStartInput{TaskID: "task_1", Input: "inspect module"})

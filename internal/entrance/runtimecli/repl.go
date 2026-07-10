@@ -1,4 +1,4 @@
-package cli
+package runtimecli
 
 import (
 	"agent/internal/capability/command"
@@ -12,9 +12,9 @@ import (
 	"agent/internal/content"
 )
 
-type PlainInputHandler func(ctx context.Context, env content.Env, line string) error
+type plainInputHandler func(ctx context.Context, env content.Env, line string) error
 
-func Run(ctx context.Context, env content.Env, registry *command.Registry, handlePlainInput PlainInputHandler) error {
+func runREPL(ctx context.Context, env content.Env, registry *command.Registry, handlePlainInput plainInputHandler) error {
 	if registry == nil {
 		registry = command.Manage
 	}

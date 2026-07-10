@@ -3,7 +3,6 @@ package runtimecli
 import (
 	"agent/internal/capability/command"
 	"agent/internal/content"
-	"agent/internal/entrance/cli"
 	"agent/internal/foundation/llmClient"
 	"agent/internal/foundation/policy"
 	"agent/internal/runtime"
@@ -13,7 +12,6 @@ import (
 	reactor2 "agent/internal/runtime/reactor"
 	statemachine2 "agent/internal/runtime/statemachine"
 	runtimetools "agent/internal/runtime/tools"
-	"agent/internal/taskpreprocess"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -33,12 +31,7 @@ type Options struct {
 	TaskID              string
 	Source              string
 	Sync                bool
-	Preprocessor        TaskPreprocessor
 	InputIntentAnalyzer InputIntentAnalyzer
-}
-
-type TaskPreprocessor interface {
-	Preprocess(ctx context.Context, request taskpreprocess.Request) (taskpreprocess.Result, error)
 }
 
 func Run(ctx context.Context, env content.Env, registry *command.Registry, options Options) error {
@@ -47,30 +40,22 @@ func Run(ctx context.Context, env content.Env, registry *command.Registry, optio
 		return err
 	}
 	defer session.Close()
-	return cli.Run(ctx, env, registry, session.HandlePlainInput)
+	return runREPL(ctx, env, registry, session.HandlePlainInput)
 }
 
 type Session struct {
-	env               content.Env
-	runtime           *runtime.Runtime
-	toolSpecs         []agents2.ToolSpec
-	preprocessor      TaskPreprocessor
-	intentAnalyzer    InputIntentAnalyzer
-	baseTaskID        string
-	source            string
-	taskSeq           int
-	taskRuntime       *runtime.TaskRuntime
-	pendingPreprocess *pendingPreprocess
-	taskIDs           map[string]struct{}
-	taskIDMu          sync.RWMutex
-	mu                sync.Mutex
-	outputMu          sync.Mutex
-}
-
-type pendingPreprocess struct {
-	originalInput  string
-	clarifications []taskpreprocess.Clarification
-	question       taskpreprocess.Question
+	env            content.Env
+	runtime        *runtime.Runtime
+	toolSpecs      []agents2.ToolSpec
+	intentAnalyzer InputIntentAnalyzer
+	baseTaskID     string
+	source         string
+	taskSeq        int
+	taskRuntime    *runtime.TaskRuntime
+	taskIDs        map[string]struct{}
+	taskIDMu       sync.RWMutex
+	mu             sync.Mutex
+	outputMu       sync.Mutex
 }
 
 func NewSession(ctx context.Context, env content.Env, options Options) (*Session, error) {
@@ -111,25 +96,11 @@ func NewSession(ctx context.Context, env content.Env, options Options) (*Session
 	if err != nil {
 		return nil, err
 	}
-	preprocessor := options.Preprocessor
-	if preprocessor == nil && options.LLM != nil {
-		analyzer, err := taskpreprocess.NewModelAnalyzer(options.LLM, env.Config.Model, taskpreprocess.WithSource(source+".preprocess"))
-		if err != nil {
-			_ = rt.Close()
-			return nil, err
-		}
-		preprocessor, err = taskpreprocess.NewProcessor(analyzer)
-		if err != nil {
-			_ = rt.Close()
-			return nil, err
-		}
-	}
 
 	session := &Session{
 		env:            env,
 		runtime:        rt,
 		toolSpecs:      toolAdapter.Specs(),
-		preprocessor:   preprocessor,
 		intentAnalyzer: defaultInputIntentAnalyzer(options.InputIntentAnalyzer),
 		baseTaskID:     strings.TrimSpace(options.TaskID),
 		source:         source,
@@ -165,23 +136,19 @@ func (s *Session) HandlePlainInput(ctx context.Context, env content.Env, line st
 	defer s.mu.Unlock()
 	s.env = env
 
-	if s.pendingPreprocess != nil {
-		return s.continuePreprocessLocked(ctx, input)
-	}
-
 	if s.taskRuntime == nil {
-		return s.preprocessAndStartTaskLocked(ctx, input)
+		return s.startNewTaskLocked(ctx, input)
 	}
 	state, ok, err := s.taskRuntime.State(ctx)
 	if err != nil {
 		return err
 	}
 	if !ok || state.Phase == statemachine2.PhaseCreated {
-		return s.preprocessAndStartTaskLocked(ctx, input)
+		return s.startNewTaskLocked(ctx, input)
 	}
 	if state.IsTerminal() {
 		s.taskRuntime = nil
-		return s.preprocessAndStartTaskLocked(ctx, input)
+		return s.startNewTaskLocked(ctx, input)
 	}
 
 	switch state.Phase {
@@ -211,7 +178,7 @@ func (s *Session) handleRunningInputLocked(ctx context.Context, state statemachi
 
 	previousTask := s.taskRuntime
 	s.taskRuntime = nil
-	if err := s.preprocessAndStartTaskLocked(ctx, input); err != nil {
+	if err := s.startNewTaskLocked(ctx, input); err != nil {
 		s.taskRuntime = previousTask
 		return err
 	}
@@ -238,75 +205,11 @@ func defaultInputIntentAnalyzer(analyzer InputIntentAnalyzer) InputIntentAnalyze
 	return defaultAnalyzer
 }
 
-func (s *Session) preprocessAndStartTaskLocked(ctx context.Context, input string) error {
-	result, err := s.preprocessLocked(ctx, input, nil)
-	if err != nil {
-		return err
-	}
-	if result.Action == taskpreprocess.ActionAskUser {
-		return s.setPendingPreprocessLocked(input, nil, result)
-	}
+func (s *Session) startNewTaskLocked(ctx context.Context, input string) error {
 	if err := s.ensureTaskLocked(ctx); err != nil {
 		return err
 	}
-	return s.startTaskLocked(ctx, result.AgentTask())
-}
-
-func (s *Session) continuePreprocessLocked(ctx context.Context, answer string) error {
-	pending := s.pendingPreprocess
-	if pending == nil {
-		return nil
-	}
-	clarifications := append([]taskpreprocess.Clarification(nil), pending.clarifications...)
-	clarifications = append(clarifications, taskpreprocess.Clarification{
-		QuestionID: pending.question.ID,
-		Question:   pending.question.Prompt,
-		Answer:     answer,
-	})
-	s.pendingPreprocess = nil
-
-	result, err := s.preprocessLocked(ctx, pending.originalInput, clarifications)
-	if err != nil {
-		return err
-	}
-	if result.Action == taskpreprocess.ActionAskUser {
-		return s.setPendingPreprocessLocked(pending.originalInput, clarifications, result)
-	}
-	if err := s.ensureTaskLocked(ctx); err != nil {
-		return err
-	}
-	return s.startTaskLocked(ctx, result.AgentTask())
-}
-
-func (s *Session) preprocessLocked(ctx context.Context, input string, clarifications []taskpreprocess.Clarification) (taskpreprocess.Result, error) {
-	input = strings.TrimSpace(input)
-	if s.preprocessor == nil {
-		return taskpreprocess.Result{
-			Action:         taskpreprocess.ActionProceed,
-			OriginalInput:  input,
-			NormalizedTask: input,
-		}, nil
-	}
-	return s.preprocessor.Preprocess(ctx, taskpreprocess.Request{
-		Input:          input,
-		WorkDir:        s.env.Config.WorkDir,
-		Model:          s.env.Config.Model,
-		MaxQuestions:   1,
-		Clarifications: clarifications,
-	})
-}
-
-func (s *Session) setPendingPreprocessLocked(input string, clarifications []taskpreprocess.Clarification, result taskpreprocess.Result) error {
-	if len(result.Questions) == 0 {
-		return fmt.Errorf("task preprocess requested user input without a question")
-	}
-	question := result.Questions[0]
-	s.pendingPreprocess = &pendingPreprocess{
-		originalInput:  strings.TrimSpace(input),
-		clarifications: append([]taskpreprocess.Clarification(nil), clarifications...),
-		question:       question,
-	}
-	return s.println("? " + question.Prompt)
+	return s.startTaskLocked(ctx, strings.TrimSpace(input))
 }
 
 func (s *Session) ensureTaskLocked(ctx context.Context) error {
