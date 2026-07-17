@@ -63,7 +63,7 @@ func (SetAgent) Execute(ctx context.Context, env content.Env, args []string) err
 func switchAgent(_ context.Context, env content.Env, agentName string) error {
 	switcher := agentSwitcher(env)
 	if switcher == nil {
-		return fmt.Errorf("set-agent command: app agent runner is not configured")
+		return fmt.Errorf("set-agent command: agent switcher is not configured")
 	}
 	return switcher.SelectAgent(agentName)
 }

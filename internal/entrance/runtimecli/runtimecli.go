@@ -28,6 +28,7 @@ type LLMClient interface {
 type Options struct {
 	LLM                 LLMClient
 	Policy              policy.Checker
+	Agents              *agents2.FactoryRegistry
 	TaskID              string
 	Source              string
 	Sync                bool
@@ -47,6 +48,7 @@ type Session struct {
 	env            content.Env
 	runtime        *runtime.Runtime
 	toolSpecs      []agents2.ToolSpec
+	agentFactories *agents2.FactoryRegistry
 	intentAnalyzer InputIntentAnalyzer
 	baseTaskID     string
 	source         string
@@ -65,6 +67,14 @@ func NewSession(ctx context.Context, env content.Env, options Options) (*Session
 	source := strings.TrimSpace(options.Source)
 	if source == "" {
 		source = "runtimecli"
+	}
+	agentFactories := options.Agents
+	if agentFactories == nil {
+		var err error
+		agentFactories, err = builtinagents.NewFactoryRegistry()
+		if err != nil {
+			return nil, err
+		}
 	}
 	toolAdapter, err := runtimetools.NewDefault(
 		runtimetools.WithPolicy(options.Policy),
@@ -101,6 +111,7 @@ func NewSession(ctx context.Context, env content.Env, options Options) (*Session
 		env:            env,
 		runtime:        rt,
 		toolSpecs:      toolAdapter.Specs(),
+		agentFactories: agentFactories,
 		intentAnalyzer: defaultInputIntentAnalyzer(options.InputIntentAnalyzer),
 		baseTaskID:     strings.TrimSpace(options.TaskID),
 		source:         source,
@@ -220,13 +231,23 @@ func (s *Session) ensureTaskLocked(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	agent, err := builtinagents.NewAnalyzeAgent(
-		builtinagents.WithModelName(s.env.Config.Model),
-		builtinagents.WithSnapshotStore(s.runtime.SnapshotStore()),
-		builtinagents.WithTools(s.toolSpecs),
-		builtinagents.WithSystemPrompt(systemPrompt(s.env.Config.WorkDir)),
-		builtinagents.WithAgentSource(s.source+".agent"),
-	)
+	agentName := strings.TrimSpace(s.env.Config.AgentName)
+	if switcher, ok := s.env.Agent.(content.AgentSwitcher); ok {
+		if active := strings.TrimSpace(switcher.ActiveAgentName()); active != "" {
+			agentName = active
+		}
+	}
+	if agentName == "" {
+		available := s.agentFactories.ListNames()
+		if len(available) == 0 {
+			return fmt.Errorf("runtime cli: no agent factories are registered")
+		}
+		agentName = available[0]
+	}
+	agent, err := s.agentFactories.Create(agentName, agents2.FactoryConfig{
+		ModelName: s.env.Config.Model, SnapshotStore: s.runtime.SnapshotStore(),
+		Tools: s.toolSpecs, Source: s.source + ".agent", MaxTurns: 20,
+	})
 	if err != nil {
 		return err
 	}
@@ -548,21 +569,6 @@ func resultText(raw json.RawMessage) string {
 		}
 	}
 	return string(raw)
-}
-
-func systemPrompt(workDir string) string {
-	return strings.TrimSpace(fmt.Sprintf(`You are an interactive CLI coding agent.
-The user is talking to one runtime task and may provide follow-up guidance.
-Workspace: %s
-
-Return exactly one JSON object matching this decision protocol:
-- To answer: {"action":"complete","final_answer":"..."}
-- To use a tool: {"action":"use_tool","tool":{"tool_name":"workspace.read","arguments":{"path":"go.mod"}}}
-- To ask the user: {"action":"ask_user","user_input":{"prompt":"..."}}
-- To fail: {"action":"fail","error":"..."}
-
-Use tools when repository context is needed. Ask the user only when required information is missing.
-Do not include markdown outside the JSON object. Do not expose hidden reasoning or chain-of-thought.`, strings.TrimSpace(workDir)))
 }
 
 func cloneStringMap(values map[string]string) map[string]string {

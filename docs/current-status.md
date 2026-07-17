@@ -1,6 +1,6 @@
 # 项目最新现状
 
-更新时间：2026-07-01
+更新时间：2026-07-10
 
 本文是给后续 ChatGPT / agent 读取的最新项目状态快照。它基于 `tmp/` 目录中的四份历史材料，并以当前代码实现为准：
 
@@ -19,16 +19,13 @@
 
 ```text
 CLI / command
-  -> Agent
-  -> prompt builder
-  -> agent/runner
-  -> event inbox
-  -> state machine + reducers
-  -> effect store
-  -> effect worker
-  -> LLM runtime / tool registry
-  -> runtime events
-  -> persisted state
+  -> runtime/runservice.Service
+  -> entrance/app.runtimeSetupBuilder
+  -> runtime.Runtime
+  -> eventbus + statemachine + reactor
+  -> registered agent / model / tool executors
+  -> persistence.WorkQueue + runtime stores
+  -> projection.RunStatus
 ```
 
 ## 当前代码结构
@@ -44,24 +41,26 @@ main.go
 
 | 包 | 当前职责 |
 | --- | --- |
-| `internal/entrance/app` | 应用装配入口，串联 startup、config、logging、runtime persistence、LLM provider、app agent runner、CLI/startupcmd。 |
+| `internal/entrance/app` | 应用装配入口，串联 startup、config、logging、LLM provider、agent factory registry、runtime setup builder、CLI/startupcmd。 |
 | `internal/entrance/runtimecli` | 交互式 CLI 输入循环、slash command 适配和 runtime task 会话。 |
 | `internal/entrance/startupcmd` | 非交互命令入口，把启动命令交给 command registry。 |
 | `internal/capability/command` | 命令接口、注册表和命令分发。 |
 | `internal/capability/builtin/command` | 内置命令：`run`、`help`、`status`、`model`、`agent`、`set-agent`。 |
-| `internal/agent` | agent 接口、agent 工厂注册表、具体 agent，以及把 agent spec 装配到 runner 的适配层。 |
-| `internal/agent/runner` | 当前 ReAct 执行核心：事件驱动 runner、effect worker、ReAct reducer、同步 `Run` 便利封装、恢复入口。 |
-| `internal/state` | 可恢复运行状态、状态机、reducer registry、effect store、event inbox、内存和文件存储。 |
-| `internal/event` | 运行事件定义、事件 registry、dispatcher、hook 和事件 envelope。 |
-| `internal/llm` | LLM 调用运行时、请求构建、tool call 归一化、上下文窗口查询和压缩接口。 |
+| `internal/runtime/agents` | agent 接口、task-scoped instance registry、factory registry、模型执行协议。 |
+| `internal/runtime/agents/builtinagents` | 内置 agent 实现及其 factory spec 注册。 |
+| `internal/runtime/runservice` | 单个 run 的提交、推进、effect dispatch、恢复、输入与结果生命周期。 |
+| `internal/runtime/projection` | 从持久化状态和 work queue 投影用户可读运行状态。 |
+| `internal/runtime/statemachine` | 可恢复 task state 和状态转换。 |
+| `internal/runtime/eventbus` | 运行事件定义、发布与订阅。 |
+| `internal/runtime/reactor` | effect、executor registry 和 dispatch。 |
+| `internal/runtime/contextmgr` | 上下文窗口查询和压缩相关接口。 |
 | `internal/foundation/llmClient` | provider 无关请求/响应类型，以及 OpenAI、DeepSeek、Gemini、Anthropic、mock 适配。 |
 | `internal/capability/tool` | LLM tool 接口、默认工具注册表、policy 接入、异步审批错误。 |
 | `internal/capability/builtin/workspace` | workspace 只读工具和写入工具：`list_files`、`read_file`、`search_text`、`get_workspace_summary`、`apply_patch`、`write_file`。 |
 | `internal/foundation/workspace` | workspace 文件系统能力：安全路径解析、读取、搜索、列表、snapshot 和忽略规则。 |
 | `internal/foundation/policy` | read / validate / modify 三档工具权限策略。 |
-| `internal/runtime/persistence` | runtime task state、agent snapshot、runtime snapshot 和 event store 的本地持久化。 |
+| `internal/runtime/persistence` | runtime task state、agent snapshot、runtime snapshot、event store 和 `WorkQueue` 的本地持久化。 |
 | `internal/content` | 单次执行的 Env、IO、配置快照、小接口和 context 绑定。 |
-| `internal/prompt` | prompt builder 和内置 prompt。 |
 
 ## 从 tmp 材料到当前实现的演进
 
@@ -77,11 +76,11 @@ main.go
 旧文档里描述的同步 `NativeLoop` 已不再是当前代码的实际文件结构。现在的替代实现是：
 
 ```text
-internal/agent/runtime_agent.go
-  -> internal/agent/runner.AgentRunner
-  -> internal/state.Machine
-  -> internal/agent/runner.ReActReducer
-  -> internal/agent/runner.RuntimeEffectWorker
+internal/runtime/runservice.Service
+  -> internal/entrance/app.runtimeSetupBuilder
+  -> internal/runtime.Runtime
+  -> internal/runtime/statemachine.TaskStateMachine
+  -> internal/runtime/reactor.Reactor
 ```
 
 因此后续文档和实现讨论中，除非指代架构概念，否则应优先使用 “runner / state machine / effect worker” 来描述当前执行核心。
@@ -98,26 +97,26 @@ main.go
   -> logging.New
   -> runtime persistence root
   -> llmClient/provider.New
-  -> llm.ResolveAndCacheContextWindowTokens
-  -> app agent runner
+  -> contextmgr.ResolveAndCacheContextWindowTokens
+  -> runtime/runservice.Service
   -> content.Env
   -> startupcmd.Run
   -> command.Registry.Execute("run")
-  -> active Agent.Run
-  -> prompt.NativeBuilder.Build
-  -> runner.NewAgentRunner
-  -> runner.Run
+  -> runservice.Service.Submit
+  -> runtimeSetupBuilder.Build
+  -> registered Agent factory
+  -> runtime event/effect advancement
 ```
 
-`runner.Run` 是同步便利封装，但它内部通过事件和 effect 推进：
+`runservice.Service.Run` 是同步便利封装，但它内部仍通过持久化 event/effect 队列推进：
 
 ```text
-Start
-  -> enqueue RunStarted
+Submit
+  -> enqueue TaskStartRequested
   -> Advance consumes event
-  -> state reducer creates effect
-  -> DispatchNextEffect claims effect
-  -> effect worker emits next event
+  -> state machine creates effect
+  -> DispatchNextEffect executes one persisted effect
+  -> executor emits the next event
   -> next Advance consumes event
   -> terminal state or suspension
 ```
@@ -285,7 +284,7 @@ policy 中已经预留了 `run_command`、`run_tests`、`git_status`、`git_diff
 当前有两套持久化：
 
 - `internal/runtime/persistence`：当前 runner 的恢复事实来源，保存 task states、agent snapshots、runtime snapshots 和 events。
-- `internal/entrance/app` 的 async queue：保存待处理 events/effects 队列。
+- `internal/runtime/persistence` 的 `WorkQueue`：保存待处理 events/effects 队列。
 
 当前主 runner 的模型事件、工具事件进入 `internal/runtime/persistence` 的 event store；旧的 session event helper 路径已经移除。后续需要明确：
 

@@ -557,6 +557,14 @@ internal/
 5. 如果涉及事件驱动、可恢复运行、状态机或 runtime 拆分，再读 [重构架构指南](docs/refactor-architecture-guide.md)。
 6. 最后按 [开发路线](docs/development-roadmap.md) 分阶段实现，并遵守 [开发约定](docs/development-guide.md)。
 
+## 本地 Go 开发环境
+
+当前 IDE 使用的 Go SDK 路径：
+
+```text
+C:\Users\qiangwei\go\pkg\mod\golang.org\toolchain@v0.0.1-go1.26.0.windows-amd64
+```
+
 ## 本地辅助文档目录约定
 
 - `localDocs/` 和 `plan/` 是用户用于理解项目的本地辅助文档目录。

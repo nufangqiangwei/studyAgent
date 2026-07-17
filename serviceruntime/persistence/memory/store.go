@@ -1,0 +1,107 @@
+package memory
+
+import (
+	"agent/serviceruntime/contract"
+	"agent/serviceruntime/instance"
+	"agent/serviceruntime/persistence"
+	"context"
+	"fmt"
+	"sync"
+	"time"
+)
+
+var _ persistence.RuntimeStorage = (*Store)(nil)
+
+type systemClock struct{}
+
+func (systemClock) Now() time.Time { return time.Now().UTC() }
+
+type Store struct {
+	mu     sync.Mutex
+	clock  contract.Clock
+	closed bool
+	serial uint64
+
+	events      map[contract.StreamID][]contract.StoredEvent
+	eventIDs    map[string]contract.StreamID
+	snapshots   map[contract.StreamID]contract.Snapshot
+	inbox       map[string]persistence.InboxRecord
+	inboxOrder  map[contract.MailboxID][]string
+	inboxDedupe map[string]string
+	outbox      map[string]persistence.OutboxRecord
+	outboxOrder []string
+	effects     map[string]persistence.EffectRecord
+	effectOrder []string
+	instances   map[contract.ServiceInstanceID]instance.Record
+	addresses   map[addressKey]contract.ServiceInstanceID
+	leases      map[contract.ServiceInstanceID]instance.ActivationLease
+}
+
+type addressKey struct {
+	runtime  contract.RuntimeID
+	revision contract.PlanRevision
+	address  contract.ServiceAddress
+}
+
+func New(clock contract.Clock) *Store {
+	if clock == nil {
+		clock = systemClock{}
+	}
+	return &Store{
+		clock:       clock,
+		events:      make(map[contract.StreamID][]contract.StoredEvent),
+		eventIDs:    make(map[string]contract.StreamID),
+		snapshots:   make(map[contract.StreamID]contract.Snapshot),
+		inbox:       make(map[string]persistence.InboxRecord),
+		inboxOrder:  make(map[contract.MailboxID][]string),
+		inboxDedupe: make(map[string]string),
+		outbox:      make(map[string]persistence.OutboxRecord),
+		effects:     make(map[string]persistence.EffectRecord),
+		instances:   make(map[contract.ServiceInstanceID]instance.Record),
+		addresses:   make(map[addressKey]contract.ServiceInstanceID),
+		leases:      make(map[contract.ServiceInstanceID]instance.ActivationLease),
+	}
+}
+
+func (s *Store) Journal() persistence.JournalStore         { return s }
+func (s *Store) Snapshots() persistence.SnapshotStore      { return s }
+func (s *Store) Inbox() persistence.InboxStore             { return &inboxStore{owner: s} }
+func (s *Store) Outbox() persistence.OutboxStore           { return &outboxStore{owner: s} }
+func (s *Store) Effects() persistence.EffectStore          { return &effectStore{owner: s} }
+func (s *Store) Instances() instance.Store                 { return s }
+func (s *Store) Leases() instance.ActivationLeaseStore     { return s }
+func (s *Store) Committer() persistence.MessageCommitStore { return s }
+
+func (s *Store) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *Store) check(ctx context.Context) error {
+	if s == nil {
+		return fmt.Errorf("memory runtime store is nil")
+	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	if s.closed {
+		return persistence.ErrClosed
+	}
+	return nil
+}
+
+func (s *Store) now() time.Time {
+	return s.clock.Now().UTC()
+}
+
+func (s *Store) token(prefix string) string {
+	s.serial++
+	return fmt.Sprintf("%s-%d", prefix, s.serial)
+}

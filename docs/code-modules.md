@@ -169,9 +169,9 @@ type AgentRunner interface {
 
 当前 agent 注册机制：
 
-- `agent.Catalog` 是包级 agent 工厂注册表。
-- `init` 默认注册 `default`、`analyze` 和 `tools-tester` agent。
-- `app.AppAgentRunner` 通过 `Catalog.SelectAgent` 选择工厂并创建当前 active agent。
+- `runtime/agents.FactoryRegistry` 是通用 agent 工厂注册表，负责规范化名称、列举和按名称创建实例。
+- `runtime/agents/builtinagents.NewFactoryRegistry` 注册 `default`、`analyze` 和 `tool-tester`，具体构造逻辑留在 builtin agent 模块内。
+- `runtime/runservice.Service` 只负责 run 生命周期和 active agent 选择；实际实例由 runtime setup builder 通过 factory registry 创建。
 - `content.AgentRunner` 和 `content.AgentSwitcher` 是命令层使用的外部接口，命令不依赖 `DefaultAgent`、`AnalyzeAgent` 或 `ToolsTesterAgent` 具体类型。
 - 每个 agent 创建自己的工具注册表并注入 `NativeLoop`，agent loop 只依赖 `ToolRegistry` 接口。
 
@@ -260,8 +260,9 @@ main.go
   -> logging.New
   -> config.LoadOptional
   -> provider.New
-  -> agent.Catalog
-  -> app.AppAgentRunner
+  -> runtime/agents.FactoryRegistry
+  -> entrance/app.runtimeSetupBuilder
+  -> runtime/runservice.Service
   -> content.WithEnv
   -> command.Manage
   -> startupcmd.Run or runtimecli.Run
@@ -275,7 +276,7 @@ main.go
 ## 扩展原则
 
 - 新命令加到 `internal/command` 或独立 command 包，再注册到 registry。
-- 新 agent 实现 `agent.Agent`，提供 `NewAgent` 工厂，并注册到 `agent.Catalog` 或 app 装配的 registry。
+- 新 agent 实现 `runtime/agents.Agent`，提供 factory spec，并注册到 `runtime/agents.FactoryRegistry`；无需修改 app 或 run service 的构造分支。
 - 新 prompt 策略实现 `agent.PromptBuilder` 需要的方法。
 - 新 LLM provider 实现 `llm.Client`。
 - 新工具实现 `tools.Tool`，由 registry 管理。

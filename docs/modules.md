@@ -67,7 +67,7 @@
 
 - 应用级编排。
 - 读取启动参数和配置文件。
-- 创建 LLM client、app agent runner 和运行时 `content.Env`。
+- 创建 LLM client、agent factory registry、runtime setup builder、run service 和运行时 `content.Env`。
 - 选择命令行模式或交互式 CLI 模式。
 - 连接 CLI 输入输出。
 - 管理启动和退出流程。
@@ -84,7 +84,7 @@
 
 - 定义对外 `Agent` 接口和 `NewAgent` 工厂类型。
 - 维护 agent 工厂注册表 `Catalog`。
-- 当前默认注册 `default`、`analyze` 和 `tools-tester` agent。
+- 当前默认注册 `default`、`analyze` 和 `tool-tester` agent。
 - agent 任务循环。
 - 决定下一步是调用模型、调用工具还是结束。
 - 管理步骤状态。

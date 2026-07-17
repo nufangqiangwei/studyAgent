@@ -1,6 +1,7 @@
 package app
 
 import (
+	"agent/internal/runtime/agents/builtinagents"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -174,8 +175,12 @@ func TestRunExecutesToolCallsThroughRunner(t *testing.T) {
 	if !strings.Contains(result, "tool flow complete") {
 		t.Fatalf("result missing final answer:\n%s", result)
 	}
-	wantAgents := []string{analyzeAgentName, defaultAgentName, toolsTesterAgentName}
-	if got := availableAgentNames(); !reflect.DeepEqual(got, wantAgents) {
+	registry, err := builtinagents.NewFactoryRegistry()
+	if err != nil {
+		t.Fatalf("NewFactoryRegistry returned error: %v", err)
+	}
+	wantAgents := []string{builtinagents.AnalyzeAgentName, builtinagents.DefaultAgentName, builtinagents.ToolsTesterAgentName}
+	if got := registry.ListNames(); !reflect.DeepEqual(got, wantAgents) {
 		t.Fatalf("registered agent names = %#v, want %#v", got, wantAgents)
 	}
 }

@@ -6,11 +6,14 @@ import (
 	"agent/internal/entrance/runtimecli"
 	"agent/internal/entrance/startupcmd"
 	appconfig "agent/internal/foundation/config"
+	"agent/internal/foundation/identity"
 	provider2 "agent/internal/foundation/llmClient/provider"
 	"agent/internal/foundation/logging"
 	"agent/internal/foundation/policy"
 	"agent/internal/foundation/startup"
+	"agent/internal/runtime/agents/builtinagents"
 	"agent/internal/runtime/contextmgr"
+	"agent/internal/runtime/runservice"
 	"context"
 	"fmt"
 	"io"
@@ -58,7 +61,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer, errOut
 
 	var debugRecorder provider2.BodyDebugRecorder
 	if cfg.Debug {
-		debugID, err := newAppID("debug")
+		debugID, err := identity.New("debug")
 		if err != nil {
 			return err
 		}
@@ -93,16 +96,30 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer, errOut
 		logger.Debugf("context window tokens resolved for provider=%s model=%s tokens=%d source=%s", cfg.Provider, result.Model, result.Tokens, result.Source)
 	}
 
-	appAgentRunner, err := newAppAgentRunner(ctx, analyzeAgentName, AppAgentRunnerOptions{
+	agentFactories, err := builtinagents.NewFactoryRegistry()
+	if err != nil {
+		return err
+	}
+	runtimeBuilder, err := newRuntimeSetupBuilder(runtimeSetupOptions{
 		LLM:              modelClient,
 		Model:            cfg.Model,
-		Logger:           logger,
 		MaxSteps:         20,
 		WorkDir:          workDir,
 		In:               in,
 		Out:              out,
 		RuntimeStoreRoot: runtimeStoreRoot,
 		Policy:           policyChecker,
+		Agents:           agentFactories,
+	})
+	if err != nil {
+		return err
+	}
+	agentService, err := runservice.New(runservice.Options{
+		Builder:      runtimeBuilder,
+		Agents:       agentFactories,
+		InitialAgent: builtinagents.DefaultFactoryName(),
+		MaxSteps:     20,
+		Out:          out,
 	})
 	if err != nil {
 		return err
@@ -120,7 +137,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer, errOut
 			Out: out,
 			Err: errOut,
 		},
-		Agent:  appAgentRunner,
+		Agent:  agentService,
 		Logger: logger,
 		Config: content.Config{
 			ConfigPath:       cfg.ConfigPath,
@@ -128,7 +145,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer, errOut
 			Model:            cfg.Model,
 			ModelURL:         cfg.ModelURL,
 			APIKeyConfigured: cfg.APIKey != "",
-			AgentName:        appAgentRunner.ActiveAgentName(),
+			AgentName:        agentService.ActiveAgentName(),
 			WorkDir:          workDir,
 			Debug:            cfg.Debug,
 			PolicyMode:       cfg.PolicyMode,
@@ -141,6 +158,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer, errOut
 		return runtimecli.Run(runCtx, env, command.Manage, runtimecli.Options{
 			LLM:    modelClient,
 			Policy: policyChecker,
+			Agents: agentFactories,
 		})
 	}
 	return startupcmd.Run(runCtx, cfg, command.Manage, env)
