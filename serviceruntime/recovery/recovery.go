@@ -156,11 +156,13 @@ func (c *Coordinator) Recover(ctx context.Context, plan *building.RuntimePlan) (
 			}
 			continue
 		}
-		if _, activateErr := c.activator.Activate(ctx, record.InstanceID); activateErr != nil {
+		active, activateErr := c.activator.Activate(ctx, record.InstanceID)
+		if activateErr != nil {
 			return report, activateErr
 		}
 		report.InstancesActivated++
 		report.StreamsRestored++
+		report.EventsReplayed += active.ReplayedEvents()
 	}
 	if err := c.bus.Resume(ctx); err != nil {
 		return report, err

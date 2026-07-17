@@ -2,7 +2,7 @@
 
 `serviceruntime` 是新的事件溯源服务运行框架。它位于项目根目录下，与旧的 `internal/runtime` 完全隔离，不在旧实现上增量修改。
 
-当前实现是可运行的单进程、内存持久化 MVP，已经包含：
+当前实现是可运行的单进程 MVP，既提供内存测试存储，也提供可跨进程重开的 SQLite 持久化存储，已经包含：
 
 - 可序列化的 Message、StoredEvent 和 Snapshot 协议。
 - Service、Factory、Decision 和纯 Replay `Apply` 协议。
@@ -25,6 +25,7 @@ serviceruntime/
   building/            Register、Manifest、Plan、RoutingTable
   persistence/         持久化端口
   persistence/memory/  内存事务实现
+  persistence/sqlite/  SQLite 事务与跨进程持久化实现
   instance/            实例记录、生命周期、Directory、Lease
   activation/          Factory 创建、Snapshot + Replay、Activation
   request/             同步外观的跨 Service 请求客户端与 Reply Broker
@@ -159,9 +160,26 @@ go test ./serviceruntime/...
 
 端到端测试覆盖命令投递、ServiceHandle/Apply、事件与 Snapshot、Outbox、Effect、下游订阅、动态实例、Fencing、Sequence 冲突和重启恢复。
 
+## SQLite 持久化
+
+生产或需要进程重启恢复的本地 Runtime 应显式创建并注入 SQLite Store：
+
+```go
+store, err := sqlite.Open(ctx, "runtime-data/runtime.db", sqlite.Options{})
+if err != nil {
+    return err
+}
+
+builder, err := serviceruntime.NewBuilder(serviceruntime.BuilderOptions{
+    Storage: store,
+})
+```
+
+SQLite 实现使用 WAL、`BEGIN IMMEDIATE` 和 busy timeout。`CommitMessage` 在同一事务中提交 Inbox ACK、Journal Events、Snapshot、Outbox 和 Effects。测试会关闭数据库、创建新的 Store，再验证 Journal Replay、Pending Outbox 和 Pending Effect 恢复。
+
 ## 当前边界
 
-- 默认实现只在内存中持久化；下一种存储实现应实现 `persistence.RuntimeStorage`，优先选择 SQLite。
+- Builder 未显式注入 Storage 时仍使用内存实现；需要跨进程恢复时必须注入 `persistence/sqlite` Store。
 - 当前没有远程 Transport；Message、地址、配置和持久化结构已经保持可序列化。
 - 本目录不包含 Task、Agent、Policy、Capability、Model、Orchestrator、Memory 或 Knowledge 业务服务。
 - 业务服务只能通过 Message 通信，不能持有其他服务对象。可靠的状态派生消息优先放入 `Decision.Outgoing`；确需同步外观时使用注入的 `request.Client`。

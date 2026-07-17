@@ -21,6 +21,14 @@ type Activation struct {
 	mu       sync.RWMutex
 	state    service.State
 	sequence uint64
+	replayed int
+}
+
+func (a *Activation) ReplayedEvents() int {
+	if a == nil {
+		return 0
+	}
+	return a.replayed
 }
 
 func (a *Activation) Current() (service.State, uint64) {
@@ -215,7 +223,7 @@ func (m *Manager) Activate(ctx context.Context, instanceID contract.ServiceInsta
 		return nil, err
 	}
 	latest, _, _ = m.instances.Get(ctx, instanceID)
-	activation := &Activation{Instance: latest, Lease: lease, Service: target, Requests: requestClient, state: restored.State.Clone(), sequence: restored.LastSequence}
+	activation := &Activation{Instance: latest, Lease: lease, Service: target, Requests: requestClient, state: restored.State.Clone(), sequence: restored.LastSequence, replayed: restored.ReplayedEvents}
 	m.mu.Lock()
 	if existing, ok := m.active[instanceID]; ok {
 		m.mu.Unlock()

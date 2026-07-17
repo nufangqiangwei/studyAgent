@@ -67,6 +67,10 @@ func (w *RuntimeWorker) DispatchNext(ctx context.Context, ownerID string) (WorkR
 	if err != nil || !ok {
 		return WorkResult{Idle: !ok}, err
 	}
+	if claim.Record.Status == persistence.EffectStarted || claim.Record.Status == persistence.EffectReconciliationRequired {
+		result, reconcileErr := w.reconcileClaim(ctx, claim)
+		return WorkResult{EffectID: claim.Record.EffectID, Status: reconciliationStatus(result.Action)}, reconcileErr
+	}
 	executor, found := w.registry.ResolveExecutor(claim.Record.ExecutorRef)
 	if !found {
 		err = fmt.Errorf("effect executor %q is not registered", claim.Record.ExecutorRef)
@@ -106,9 +110,13 @@ func (w *RuntimeWorker) Reconcile(ctx context.Context, record persistence.Effect
 	if err != nil {
 		return ReconciliationResult{}, err
 	}
-	reconciler, found := w.registry.ResolveReconciler(record.ExecutorRef)
+	return w.reconcileClaim(ctx, claim)
+}
+
+func (w *RuntimeWorker) reconcileClaim(ctx context.Context, claim persistence.EffectClaim) (ReconciliationResult, error) {
+	reconciler, found := w.registry.ResolveReconciler(claim.Record.ExecutorRef)
 	if !found {
-		err = fmt.Errorf("effect reconciler %q is not registered", record.ExecutorRef)
+		err := fmt.Errorf("effect reconciler %q is not registered", claim.Record.ExecutorRef)
 		_ = w.store.RequireReconciliation(ctx, claim, err)
 		return ReconciliationResult{}, err
 	}
@@ -117,6 +125,7 @@ func (w *RuntimeWorker) Reconcile(ctx context.Context, record persistence.Effect
 		_ = w.store.RequireReconciliation(ctx, claim, reconcileErr)
 		return result, reconcileErr
 	}
+	var err error
 	switch result.Action {
 	case ReconcileComplete:
 		err = w.store.MarkSucceeded(ctx, claim, result.Result)
@@ -131,6 +140,19 @@ func (w *RuntimeWorker) Reconcile(ctx context.Context, record persistence.Effect
 		_ = w.store.RequireReconciliation(ctx, claim, err)
 	}
 	return result, err
+}
+
+func reconciliationStatus(action ReconciliationAction) persistence.EffectStatus {
+	switch action {
+	case ReconcileComplete:
+		return persistence.EffectSucceeded
+	case ReconcileRetry:
+		return persistence.EffectFailed
+	case ReconcileFail:
+		return persistence.EffectTerminalFailed
+	default:
+		return persistence.EffectReconciliationRequired
+	}
 }
 
 func (w *RuntimeWorker) now() time.Time {
