@@ -4,7 +4,6 @@ import (
 	"agent/serviceruntime/contract"
 	"agent/serviceruntime/instance"
 	"agent/serviceruntime/persistence"
-	"agent/serviceruntime/request"
 	"agent/serviceruntime/service"
 	"context"
 	"encoding/json"
@@ -26,7 +25,7 @@ type Options struct {
 	Store     persistence.ConnectionStore
 	Resolver  instance.AddressResolver
 	Drivers   *Registry
-	Sender    request.Sender
+	Sender    Sender
 	IDs       contract.IDGenerator
 	Clock     contract.Clock
 	Observer  contract.RuntimeEventRecorder
@@ -42,7 +41,7 @@ type Manager struct {
 	store     persistence.ConnectionStore
 	resolver  instance.AddressResolver
 	drivers   *Registry
-	sender    request.Sender
+	sender    Sender
 	ids       contract.IDGenerator
 	clock     contract.Clock
 	observer  contract.RuntimeEventRecorder

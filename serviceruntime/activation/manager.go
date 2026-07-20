@@ -7,7 +7,6 @@ import (
 	"agent/serviceruntime/instance"
 	leaseguard "agent/serviceruntime/lease"
 	"agent/serviceruntime/persistence"
-	"agent/serviceruntime/request"
 	"agent/serviceruntime/service"
 	"context"
 	"errors"
@@ -20,7 +19,6 @@ type Activation struct {
 	Instance instance.Record
 	Lease    instance.ActivationLease
 	Service  service.Service
-	Requests *request.Client
 
 	mu       sync.RWMutex
 	state    service.State
@@ -88,15 +86,10 @@ type Manager struct {
 	ownerID     string
 	leaseTTL    time.Duration
 	clock       contract.Clock
-	requests    RequestClientResolver
 	opMu        sync.Mutex
 
 	mu     sync.RWMutex
 	active map[contract.ServiceInstanceID]*Activation
-}
-
-type RequestClientResolver interface {
-	ClientFor(revision contract.PlanRevision, address contract.ServiceAddress) *request.Client
 }
 
 type Options struct {
@@ -109,7 +102,6 @@ type Options struct {
 	OwnerID     string
 	LeaseTTL    time.Duration
 	Clock       contract.Clock
-	Requests    RequestClientResolver
 }
 
 func NewManager(options Options) (*Manager, error) {
@@ -129,8 +121,7 @@ func NewManager(options Options) (*Manager, error) {
 		plan: options.Plan, plans: options.Plans, definitions: options.Definitions,
 		instances: options.Instances, leases: options.Leases, restorer: options.Restorer,
 		ownerID: options.OwnerID, leaseTTL: options.LeaseTTL, clock: options.Clock,
-		requests: options.Requests,
-		active:   make(map[contract.ServiceInstanceID]*Activation),
+		active: make(map[contract.ServiceInstanceID]*Activation),
 	}, nil
 }
 
@@ -218,13 +209,11 @@ func (m *Manager) Activate(ctx context.Context, instanceID contract.ServiceInsta
 	if mounted {
 		config = mount.Config
 	}
-	requestClient := m.requestClient(record.PlanRevision, record.Address)
 	target, err := definition.Factory.Create(heartbeat.Context(), service.CreateRequest{
 		RuntimeID: record.RuntimeID, PlanRevision: record.PlanRevision,
 		InstanceID: record.InstanceID, Address: record.Address,
 		Component: record.DefinitionRef, Config: contract.CloneRaw(config),
 		Metadata: contract.CloneStrings(record.Metadata),
-		Requests: requestClient,
 	})
 	if err != nil {
 		_ = stopHeartbeat()
@@ -275,7 +264,7 @@ func (m *Manager) Activate(ctx context.Context, instanceID contract.ServiceInsta
 		return nil, err
 	}
 	latest, _, _ = m.instances.Get(ctx, instanceID)
-	activation := &Activation{Instance: latest, Lease: lease, Service: target, Requests: requestClient, state: restored.State.Clone(), sequence: restored.LastSequence, replayed: restored.ReplayedEvents}
+	activation := &Activation{Instance: latest, Lease: lease, Service: target, state: restored.State.Clone(), sequence: restored.LastSequence, replayed: restored.ReplayedEvents}
 	m.mu.Lock()
 	if existing, ok := m.active[instanceID]; ok {
 		m.mu.Unlock()
@@ -285,13 +274,6 @@ func (m *Manager) Activate(ctx context.Context, instanceID contract.ServiceInsta
 	m.active[instanceID] = activation
 	m.mu.Unlock()
 	return activation, nil
-}
-
-func (m *Manager) requestClient(revision contract.PlanRevision, address contract.ServiceAddress) *request.Client {
-	if m.requests == nil {
-		return nil
-	}
-	return m.requests.ClientFor(revision, address)
 }
 
 func (m *Manager) acquireLease(ctx context.Context, instanceID contract.ServiceInstanceID) (instance.ActivationLease, error) {

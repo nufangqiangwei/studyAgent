@@ -12,14 +12,12 @@ import (
 	"agent/serviceruntime/persistence"
 	"agent/serviceruntime/persistence/memory"
 	"agent/serviceruntime/recovery"
-	"agent/serviceruntime/request"
 	"agent/serviceruntime/transport"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"time"
 )
 
 type BuilderOptions struct {
@@ -30,7 +28,6 @@ type BuilderOptions struct {
 	IDs               contract.IDGenerator
 	Observer          contract.RuntimeEventRecorder
 	OwnerID           string
-	RequestTimeout    time.Duration
 	RetryPolicy       fault.RetryPolicy
 	StateMigrator     activation.SnapshotMigrator
 	EventUpcaster     activation.EventUpcaster
@@ -45,27 +42,11 @@ type Builder struct {
 	ids               contract.IDGenerator
 	observer          contract.RuntimeEventRecorder
 	ownerID           string
-	requestTimeout    time.Duration
 	retryPolicy       fault.RetryPolicy
 	stateMigrator     activation.SnapshotMigrator
 	eventUpcaster     activation.EventUpcaster
 	connections       *connection.Registry
 	connectionFactory *connection.ServiceFactory
-}
-
-type requestClientCatalog struct {
-	factories map[contract.PlanRevision]*request.ClientFactory
-}
-
-func (c *requestClientCatalog) ClientFor(revision contract.PlanRevision, address contract.ServiceAddress) *request.Client {
-	if c == nil {
-		return nil
-	}
-	factory := c.factories[revision]
-	if factory == nil {
-		return nil
-	}
-	return factory.ForSource(address)
 }
 
 func NewBuilder(options BuilderOptions) (*Builder, error) {
@@ -91,9 +72,6 @@ func NewBuilder(options BuilderOptions) (*Builder, error) {
 		}
 		options.OwnerID = ownerID
 	}
-	if options.RequestTimeout <= 0 {
-		options.RequestTimeout = 30 * time.Second
-	}
 	if options.RetryPolicy == nil {
 		options.RetryPolicy = fault.ExponentialRetryPolicy{}
 	}
@@ -116,7 +94,7 @@ func NewBuilder(options BuilderOptions) (*Builder, error) {
 	return &Builder{
 		register: options.Register, effects: options.Effects, storage: options.Storage,
 		clock: options.Clock, ids: options.IDs, observer: options.Observer, ownerID: options.OwnerID,
-		requestTimeout: options.RequestTimeout, retryPolicy: options.RetryPolicy,
+		retryPolicy:   options.RetryPolicy,
 		stateMigrator: options.StateMigrator, eventUpcaster: options.EventUpcaster,
 		connections: options.ConnectionDrivers, connectionFactory: connectionFactory,
 	}, nil
@@ -202,18 +180,11 @@ func (b *Builder) Build(ctx context.Context, manifest building.RuntimeManifest) 
 		}
 		return nil, err
 	}
-	replyBroker, err := request.NewBroker(request.DefaultReplyAddress)
-	if err != nil {
-		if ownsStorage {
-			_ = storage.Close()
-		}
-		return nil, err
-	}
 	bus, err := transport.New(transport.Options{
 		Plan: plan, Plans: plans, Resolver: directory, Inbox: storage.Inbox(), Outbox: storage.Outbox(), Sequences: storage.Sequences(),
 		Clock: b.clock, Observer: b.observer, IDs: b.ids,
 		OutboxLease: plan.Recovery().OutboxLease, MaxAttempts: plan.Recovery().MaxDeliveryAttempts,
-		RetryPolicy: b.retryPolicy, ReplySink: replyBroker,
+		RetryPolicy: b.retryPolicy,
 	})
 	if err != nil {
 		if ownsStorage {
@@ -222,7 +193,7 @@ func (b *Builder) Build(ctx context.Context, manifest building.RuntimeManifest) 
 		return nil, err
 	}
 	spec := plan.Runtime()
-	sender := request.SenderFunc(func(ctx context.Context, message contract.Message) error {
+	sender := connection.SenderFunc(func(ctx context.Context, message contract.Message) error {
 		_, publishErr := bus.Publish(ctx, message)
 		return publishErr
 	})
@@ -241,27 +212,9 @@ func (b *Builder) Build(ctx context.Context, manifest building.RuntimeManifest) 
 		revisionSpec := revisionPlan.Runtime()
 		b.connectionFactory.Bind(revisionSpec.ID, revisionSpec.Revision, connectionManager)
 	}
-	requestCatalog := &requestClientCatalog{factories: make(map[contract.PlanRevision]*request.ClientFactory)}
-	for _, revisionPlan := range plans.Plans() {
-		revisionSpec := revisionPlan.Runtime()
-		factory, factoryErr := request.NewClientFactory(request.ClientFactoryOptions{
-			RuntimeID: revisionSpec.ID, PlanRevision: revisionSpec.Revision, IDs: b.ids,
-			DefaultTimeout: b.requestTimeout, Broker: replyBroker, Sender: sender,
-		})
-		if factoryErr != nil {
-			_ = bus.Close()
-			if ownsStorage {
-				_ = storage.Close()
-			}
-			return nil, factoryErr
-		}
-		requestCatalog.factories[revisionSpec.Revision] = factory
-	}
-	requestClients := requestCatalog.factories[spec.Revision]
 	activator, err := activation.NewManager(activation.Options{
 		Plan: plan, Plans: plans, Definitions: definitions, Instances: storage.Instances(), Leases: storage.Leases(),
 		Restorer: restorer, OwnerID: b.ownerID + ".activation", LeaseTTL: plan.Recovery().ActivationLease, Clock: b.clock,
-		Requests: requestCatalog,
 	})
 	if err != nil {
 		_ = bus.Close()
@@ -310,9 +263,8 @@ func (b *Builder) Build(ctx context.Context, manifest building.RuntimeManifest) 
 		plan: plan, plans: plans, definitions: definitions, storage: storage, ownsStorage: ownsStorage,
 		directory: directory, activator: activator, bus: bus, host: hostRuntime,
 		effects: effectWorker, recovery: recoveryRuntime,
-		connections:    connectionManager,
-		requestClients: requestClients,
-		ids:            b.ids, clock: b.clock, ownerID: b.ownerID, status: RuntimeCreated,
+		connections: connectionManager,
+		ids:         b.ids, clock: b.clock, ownerID: b.ownerID, status: RuntimeCreated,
 	}, nil
 }
 

@@ -10,7 +10,6 @@ import (
 	"agent/serviceruntime/instance"
 	"agent/serviceruntime/persistence"
 	"agent/serviceruntime/recovery"
-	"agent/serviceruntime/request"
 	"agent/serviceruntime/transport"
 	"context"
 	"fmt"
@@ -31,22 +30,21 @@ const (
 )
 
 type Runtime struct {
-	plan           *building.RuntimePlan
-	plans          *building.PlanCatalog
-	definitions    building.DefinitionResolver
-	storage        persistence.RuntimeStorage
-	ownsStorage    bool
-	directory      instance.InstanceDirectory
-	activator      activation.Activator
-	bus            transport.EventBus
-	host           host.Host
-	effects        effect.Worker
-	recovery       recovery.Manager
-	connections    *connection.Manager
-	requestClients *request.ClientFactory
-	ids            contract.IDGenerator
-	clock          contract.Clock
-	ownerID        string
+	plan        *building.RuntimePlan
+	plans       *building.PlanCatalog
+	definitions building.DefinitionResolver
+	storage     persistence.RuntimeStorage
+	ownsStorage bool
+	directory   instance.InstanceDirectory
+	activator   activation.Activator
+	bus         transport.EventBus
+	host        host.Host
+	effects     effect.Worker
+	recovery    recovery.Manager
+	connections *connection.Manager
+	ids         contract.IDGenerator
+	clock       contract.Clock
+	ownerID     string
 
 	mu     sync.RWMutex
 	status RuntimeStatus
@@ -127,16 +125,6 @@ func (r *Runtime) Publish(ctx context.Context, message contract.Message) (transp
 		message.CorrelationID = message.ID
 	}
 	return r.bus.Publish(ctx, message)
-}
-
-// RequestClient returns a client that can issue synchronous-looking requests
-// through this runtime. Service factories receive an equivalent source-bound
-// client in service.CreateRequest.Requests.
-func (r *Runtime) RequestClient(source contract.ServiceAddress) *request.Client {
-	if r == nil || r.requestClients == nil {
-		return nil
-	}
-	return r.requestClients.ForSource(source)
 }
 
 func (r *Runtime) HandleNext(ctx context.Context, address contract.ServiceAddress) (host.HandleResult, error) {

@@ -3,7 +3,6 @@ package connection
 import (
 	"agent/serviceruntime/contract"
 	"agent/serviceruntime/persistence"
-	"agent/serviceruntime/request"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -28,6 +27,16 @@ const (
 )
 
 var ManagerComponent = contract.ComponentRef{Type: "$runtime.connection-manager", Version: "v1"}
+
+type Sender interface {
+	Send(ctx context.Context, message contract.Message) error
+}
+
+type SenderFunc func(ctx context.Context, message contract.Message) error
+
+func (f SenderFunc) Send(ctx context.Context, message contract.Message) error {
+	return f(ctx, message)
+}
 
 type EventKind string
 
@@ -162,44 +171,4 @@ type InboundEvent struct {
 	Data         []byte            `json:"data,omitempty"`
 	Error        string            `json:"error,omitempty"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
-}
-
-func Open(ctx context.Context, input OpenRequest) (Info, error) {
-	var output Info
-	err := request.Command(ctx, ManagerAddress, OpenMessageType, input, &output)
-	return output, err
-}
-
-func OpenKey(ctx context.Context, callKey string, input OpenRequest) (Info, error) {
-	var output Info
-	err := request.CommandKey(ctx, callKey, ManagerAddress, OpenMessageType, input, &output)
-	return output, err
-}
-
-func Send(ctx context.Context, input SendRequest) error {
-	return request.Command(ctx, ManagerAddress, SendMessageType, input, nil)
-}
-
-func SendKey(ctx context.Context, callKey string, input SendRequest) error {
-	return request.CommandKey(ctx, callKey, ManagerAddress, SendMessageType, input, nil)
-}
-
-func Close(ctx context.Context, input CloseRequest) error {
-	return request.Command(ctx, ManagerAddress, CloseMessageType, input, nil)
-}
-
-func CloseKey(ctx context.Context, callKey string, input CloseRequest) error {
-	return request.CommandKey(ctx, callKey, ManagerAddress, CloseMessageType, input, nil)
-}
-
-func Get(ctx context.Context, input GetRequest) (Info, error) {
-	var output Info
-	err := request.Query(ctx, ManagerAddress, GetMessageType, input, &output)
-	return output, err
-}
-
-func List(ctx context.Context) ([]Info, error) {
-	var output ListResponse
-	err := request.Query(ctx, ManagerAddress, ListMessageType, ListRequest{}, &output)
-	return output.Connections, err
 }

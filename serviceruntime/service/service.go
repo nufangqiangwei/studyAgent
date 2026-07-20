@@ -2,7 +2,6 @@ package service
 
 import (
 	"agent/serviceruntime/contract"
-	"agent/serviceruntime/request"
 	"context"
 	"encoding/json"
 )
@@ -47,7 +46,6 @@ type CreateRequest struct {
 	Component    contract.ComponentRef
 	Config       json.RawMessage
 	Metadata     map[string]string
-	Requests     *request.Client
 }
 
 type Factory interface {

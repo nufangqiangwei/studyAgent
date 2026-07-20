@@ -9,35 +9,15 @@ import (
 	"agent/serviceruntime/service"
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
-const (
-	connectionOwnerOperation contract.MessageType = "test.connection-owner.operation"
-	connectionOwnerReply     contract.MessageType = "test.connection-owner.reply"
-)
-
 var connectionOwnerComponent = contract.ComponentRef{Type: "test-connection-owner", Version: "v1"}
 
-type connectionOwnerRequest struct {
-	Action string                  `json:"action"`
-	Open   connection.OpenRequest  `json:"open,omitempty"`
-	Send   connection.SendRequest  `json:"send,omitempty"`
-	Close  connection.CloseRequest `json:"close,omitempty"`
-	Get    connection.GetRequest   `json:"get,omitempty"`
-}
-
-type connectionOwnerResponse struct {
-	Info  connection.Info `json:"info,omitempty"`
-	Error string          `json:"error,omitempty"`
-}
-
 type connectionOwnerService struct {
-	address contract.ServiceAddress
 	inbound chan connection.InboundEvent
 }
 
@@ -53,53 +33,16 @@ func (s *connectionOwnerService) Apply(state service.State, _ contract.StoredEve
 	return state, nil
 }
 
-func (s *connectionOwnerService) Handle(ctx context.Context, _ service.State, message contract.Message) (service.Decision, error) {
-	if message.Kind == contract.MessageEvent {
-		var input connection.InboundEvent
-		if err := json.Unmarshal(message.Payload, &input); err != nil {
-			return service.Decision{}, err
-		}
-		select {
-		case s.inbound <- input:
-		default:
-		}
-		return service.Decision{}, nil
-	}
-	var input connectionOwnerRequest
+func (s *connectionOwnerService) Handle(_ context.Context, _ service.State, message contract.Message) (service.Decision, error) {
+	var input connection.InboundEvent
 	if err := json.Unmarshal(message.Payload, &input); err != nil {
 		return service.Decision{}, err
 	}
-	response := connectionOwnerResponse{}
-	switch input.Action {
-	case "open":
-		response.Info, response.Error = connectionResult(connection.Open(ctx, input.Open))
-	case "send":
-		response.Error = errorText(connection.Send(ctx, input.Send))
-	case "close":
-		response.Error = errorText(connection.Close(ctx, input.Close))
-	case "get":
-		response.Info, response.Error = connectionResult(connection.Get(ctx, input.Get))
+	select {
+	case s.inbound <- input:
 	default:
-		response.Error = fmt.Sprintf("unknown action %q", input.Action)
 	}
-	payload, err := json.Marshal(response)
-	if err != nil {
-		return service.Decision{}, err
-	}
-	return service.Decision{Reply: &service.Reply{
-		Key: "owner-result", Type: connectionOwnerReply, Version: 1, Payload: payload,
-	}}, nil
-}
-
-func connectionResult(info connection.Info, err error) (connection.Info, string) {
-	return info, errorText(err)
-}
-
-func errorText(err error) string {
-	if err == nil {
-		return ""
-	}
-	return err.Error()
+	return service.Decision{}, nil
 }
 
 type testManagedDriver struct {
@@ -171,44 +114,32 @@ func TestConnectionManagerUsesBusAndEnforcesServiceOwnership(t *testing.T) {
 	if _, err := runtime.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
-	serveCtx, stopServe := context.WithCancel(ctx)
-	serveDone := make(chan error, 1)
-	go func() { serveDone <- runtime.Serve(serveCtx) }()
 
-	client := runtime.RequestClient("test.client")
-	var opened connectionOwnerResponse
-	if err := client.Command(ctx, "owner.a", connectionOwnerOperation, connectionOwnerRequest{
-		Action: "open", Open: connection.OpenRequest{Key: "primary", Driver: "test", Config: json.RawMessage(`{"endpoint":"example"}`)},
-	}, &opened); err != nil {
+	publishConnectionManagerMessage(t, ctx, runtime, "owner.a", connection.OpenMessageType, connection.OpenRequest{
+		Key: "primary", Driver: "test", Config: json.RawMessage(`{"endpoint":"example"}`),
+	})
+	if result, err := runtime.HandleNext(ctx, connection.ManagerAddress); err != nil || result.Status != "committed" {
+		t.Fatalf("open connection result=%#v err=%v", result, err)
+	}
+	records, err := store.Connections().List(ctx, "connection-runtime")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if opened.Error != "" || opened.Info.ConnectionID == "" || opened.Info.Status != persistence.ConnectionOpen {
-		t.Fatalf("open response = %#v", opened)
+	if len(records) != 1 || records[0].Status != persistence.ConnectionOpen {
+		t.Fatalf("connection records = %#v", records)
 	}
+	connectionID := records[0].ConnectionID
 	if driver.openCount() != 1 {
 		t.Fatalf("driver opens = %d, want 1", driver.openCount())
 	}
 
-	var denied connectionOwnerResponse
-	if err := client.Command(ctx, "owner.b", connectionOwnerOperation, connectionOwnerRequest{
-		Action: "get", Get: connection.GetRequest{ConnectionID: opened.Info.ConnectionID},
-	}, &denied); err != nil {
-		t.Fatal(err)
+	publishConnectionManagerMessage(t, ctx, runtime, "owner.a", connection.SendMessageType, connection.SendRequest{
+		ConnectionID: connectionID, Data: []byte("hello"),
+	})
+	if result, err := runtime.HandleNext(ctx, connection.ManagerAddress); err != nil || result.Status != "committed" {
+		t.Fatalf("send connection result=%#v err=%v", result, err)
 	}
-	if !strings.Contains(denied.Error, "another service") {
-		t.Fatalf("cross-service get error = %q", denied.Error)
-	}
-
-	var sent connectionOwnerResponse
-	if err := client.Command(ctx, "owner.a", connectionOwnerOperation, connectionOwnerRequest{
-		Action: "send", Send: connection.SendRequest{ConnectionID: opened.Info.ConnectionID, Data: []byte("hello")},
-	}, &sent); err != nil {
-		t.Fatal(err)
-	}
-	if sent.Error != "" {
-		t.Fatalf("owner send error = %q", sent.Error)
-	}
-	session := driver.session(opened.Info.ConnectionID)
+	session := driver.session(connectionID)
 	if session == nil {
 		t.Fatal("driver session was not retained")
 	}
@@ -224,9 +155,12 @@ func TestConnectionManagerUsesBusAndEnforcesServiceOwnership(t *testing.T) {
 	if err := session.emit(ctx, connection.Event{Kind: connection.EventData, Data: []byte("world")}); err != nil {
 		t.Fatal(err)
 	}
+	if result, err := runtime.HandleNext(ctx, "owner.a"); err != nil || result.Status != "committed" {
+		t.Fatalf("owner inbound result=%#v err=%v", result, err)
+	}
 	select {
 	case event := <-inbound["owner.a"]:
-		if event.ConnectionID != opened.Info.ConnectionID || string(event.Data) != "world" {
+		if event.ConnectionID != connectionID || string(event.Data) != "world" {
 			t.Fatalf("owner inbound event = %#v", event)
 		}
 	case <-ctx.Done():
@@ -235,13 +169,14 @@ func TestConnectionManagerUsesBusAndEnforcesServiceOwnership(t *testing.T) {
 	select {
 	case event := <-inbound["owner.b"]:
 		t.Fatalf("other service received private connection event: %#v", event)
-	case <-time.After(50 * time.Millisecond):
+	default:
 	}
 
-	stopServe()
-	if err := <-serveDone; err != nil {
-		t.Fatal(err)
+	publishConnectionManagerMessage(t, ctx, runtime, "owner.b", connection.GetMessageType, connection.GetRequest{ConnectionID: connectionID})
+	if _, err := runtime.HandleNext(ctx, connection.ManagerAddress); err == nil || !strings.Contains(err.Error(), "another service") {
+		t.Fatalf("cross-service access error = %v", err)
 	}
+
 	if err := runtime.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -255,25 +190,24 @@ func TestConnectionManagerRestoresDesiredConnectionsWhenRuntimeIsRebuilt(t *test
 	defer cancel()
 	clock := fixedClock{now: time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)}
 	store := memory.New(&clock)
-	inbound := map[contract.ServiceAddress]chan connection.InboundEvent{"owner.a": make(chan connection.InboundEvent, 1), "owner.b": make(chan connection.InboundEvent, 1)}
+	inbound := map[contract.ServiceAddress]chan connection.InboundEvent{
+		"owner.a": make(chan connection.InboundEvent, 1),
+		"owner.b": make(chan connection.InboundEvent, 1),
+	}
 	firstDriver := newTestManagedDriver()
 	first := newConnectionTestRuntime(t, ctx, store, firstDriver, inbound, "connection-recovery-node-1")
 	if _, err := first.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
-	serveCtx, stopServe := context.WithCancel(ctx)
-	serveDone := make(chan error, 1)
-	go func() { serveDone <- first.Serve(serveCtx) }()
-	var opened connectionOwnerResponse
-	if err := first.RequestClient("test.client").Command(ctx, "owner.a", connectionOwnerOperation, connectionOwnerRequest{
-		Action: "open", Open: connection.OpenRequest{Key: "recover-me", Driver: "test"},
-	}, &opened); err != nil {
-		t.Fatal(err)
+	publishConnectionManagerMessage(t, ctx, first, "owner.a", connection.OpenMessageType, connection.OpenRequest{Key: "recover-me", Driver: "test"})
+	if result, err := first.HandleNext(ctx, connection.ManagerAddress); err != nil || result.Status != "committed" {
+		t.Fatalf("open connection result=%#v err=%v", result, err)
 	}
-	stopServe()
-	if err := <-serveDone; err != nil {
-		t.Fatal(err)
+	records, err := store.Connections().List(ctx, "connection-runtime")
+	if err != nil || len(records) != 1 {
+		t.Fatalf("connection records=%#v err=%v", records, err)
 	}
+	connectionID := records[0].ConnectionID
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -287,13 +221,31 @@ func TestConnectionManagerRestoresDesiredConnectionsWhenRuntimeIsRebuilt(t *test
 	if report.ConnectionsRestored != 1 || report.ConnectionsFailed != 0 {
 		t.Fatalf("connection recovery report = %#v", report)
 	}
-	if secondDriver.openCount() != 1 || secondDriver.session(opened.Info.ConnectionID) == nil {
-		t.Fatalf("restored driver opens = %d, connection = %#v", secondDriver.openCount(), opened.Info)
+	if secondDriver.openCount() != 1 || secondDriver.session(connectionID) == nil {
+		t.Fatalf("restored driver opens = %d, connection_id = %q", secondDriver.openCount(), connectionID)
 	}
 	if err := second.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func publishConnectionManagerMessage(t *testing.T, ctx context.Context, runtime *Runtime, from contract.ServiceAddress, messageType contract.MessageType, input any) {
+	t.Helper()
+	payload, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kind := contract.MessageCommand
+	if messageType == connection.GetMessageType || messageType == connection.ListMessageType {
+		kind = contract.MessageQuery
+	}
+	if _, err := runtime.Publish(ctx, contract.Message{
+		Kind: kind, Type: messageType, Version: 1,
+		From: from, To: connection.ManagerAddress, Payload: payload,
+	}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -317,16 +269,14 @@ func newConnectionTestRuntime(
 	if err := builder.RegisterService(building.ServiceDefinition{
 		Component: connectionOwnerComponent,
 		Factory: service.FactoryFunc(func(_ context.Context, create service.CreateRequest) (service.Service, error) {
-			return &connectionOwnerService{address: create.Address, inbound: inbound[create.Address]}, nil
+			return &connectionOwnerService{inbound: inbound[create.Address]}, nil
 		}),
 		Scope: building.ScopeMounted,
 		Consumes: []building.MessageContract{
-			{Kind: contract.MessageCommand, Type: connectionOwnerOperation, Version: 1},
 			{Kind: contract.MessageEvent, Type: connection.DataEventType, Version: 1},
 			{Kind: contract.MessageEvent, Type: connection.ClosedEventType, Version: 1},
 			{Kind: contract.MessageEvent, Type: connection.ErrorEventType, Version: 1},
 		},
-		Produces: []building.MessageContract{{Kind: contract.MessageReply, Type: connectionOwnerReply, Version: 1}},
 	}); err != nil {
 		t.Fatal(err)
 	}

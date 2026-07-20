@@ -7,7 +7,6 @@ import (
 	"agent/serviceruntime/fault"
 	leaseguard "agent/serviceruntime/lease"
 	"agent/serviceruntime/persistence"
-	"agent/serviceruntime/request"
 	"agent/serviceruntime/service"
 	"context"
 	"encoding/json"
@@ -211,8 +210,6 @@ func (h *ServiceHost) handleClaim(ctx context.Context, claim persistence.InboxCl
 	}
 	handleCtx, cancelHandle := messageContext(heartbeat.Context(), message)
 	defer cancelHandle()
-	handleCtx = request.WithMessageContext(handleCtx, message)
-	handleCtx = request.WithClient(handleCtx, active.Requests)
 	decision, err := active.Service.Handle(handleCtx, state.Clone(), message.Clone())
 	if err != nil {
 		return h.failClaim(ctx, claim, result, err)
