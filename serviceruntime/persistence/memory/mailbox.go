@@ -46,6 +46,9 @@ func (s *Store) enqueueInbox(ctx context.Context, target instance.DeliveryTarget
 	if err := message.Validate(); err != nil {
 		return persistence.InboxRecord{}, false, err
 	}
+	if message.StreamID != "" && message.Sequence == 0 {
+		return persistence.InboxRecord{}, false, fmt.Errorf("ordered message stream %q requires a sequence", message.StreamID)
+	}
 	dedupeKey := string(target.MailboxID) + "\x00" + message.ID
 	if inboxID, exists := s.inboxDedupe[dedupeKey]; exists {
 		return s.inbox[inboxID].Clone(), true, nil
@@ -80,6 +83,9 @@ func (s *Store) claimNextInbox(ctx context.Context, mailboxID contract.MailboxID
 			claimable = true
 		}
 		if !claimable {
+			continue
+		}
+		if !s.canClaimInbox(record) {
 			continue
 		}
 		record.Status = persistence.InboxClaimed
@@ -132,6 +138,11 @@ func (s *Store) finishInboxClaim(ctx context.Context, claim persistence.InboxCla
 	if !ok || record.Status != persistence.InboxClaimed || record.LeaseToken != claim.LeaseToken {
 		return persistence.ErrLeaseLost
 	}
+	if status == persistence.InboxDeadLetter {
+		if err := s.advanceInboxHead(record.Message, record.MailboxID, s.inboxHeads); err != nil {
+			return err
+		}
+	}
 	record.Status = status
 	record.LeaseOwner = ""
 	record.LeaseToken = ""
@@ -143,6 +154,31 @@ func (s *Store) finishInboxClaim(ctx context.Context, claim persistence.InboxCla
 		record.LastError = cause.Error()
 	}
 	s.inbox[record.InboxID] = record
+	return nil
+}
+
+func (s *Store) canClaimInbox(record persistence.InboxRecord) bool {
+	message := record.Message
+	if message.StreamID == "" || message.Sequence == 0 {
+		return true
+	}
+	head, found := s.inboxHeads[inboxStreamKey{mailbox: record.MailboxID, stream: message.StreamID}]
+	return !found && message.Sequence == 1 || found && message.Sequence == head+1
+}
+
+func (s *Store) advanceInboxHead(message contract.Message, mailboxID contract.MailboxID, heads map[inboxStreamKey]uint64) error {
+	if message.StreamID == "" || message.Sequence == 0 {
+		return nil
+	}
+	key := inboxStreamKey{mailbox: mailboxID, stream: message.StreamID}
+	head, found := heads[key]
+	if !found && message.Sequence != 1 {
+		return fmt.Errorf("inbox stream %q starts with sequence %d instead of 1", message.StreamID, message.Sequence)
+	}
+	if found && message.Sequence != head+1 {
+		return fmt.Errorf("inbox stream %q sequence %d is not next after %d", message.StreamID, message.Sequence, head)
+	}
+	heads[key] = message.Sequence
 	return nil
 }
 

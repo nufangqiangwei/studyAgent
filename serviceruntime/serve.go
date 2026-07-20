@@ -2,8 +2,11 @@ package serviceruntime
 
 import (
 	"agent/serviceruntime/contract"
+	"agent/serviceruntime/fault"
 	"agent/serviceruntime/instance"
+	"agent/serviceruntime/persistence"
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -48,22 +51,33 @@ func (r *Runtime) ServeWithOptions(ctx context.Context, options ServeOptions) er
 
 	options = options.withDefaults()
 	var background sync.WaitGroup
+	errCh := make(chan error, 3)
 	background.Add(3)
 	go func() {
 		defer background.Done()
-		r.serveMailboxes(serveCtx, options.PollInterval)
+		errCh <- r.serveMailboxes(serveCtx, options.PollInterval)
 	}()
 	go func() {
 		defer background.Done()
-		r.serveOutbox(serveCtx, options.PollInterval)
+		errCh <- r.serveOutbox(serveCtx, options.PollInterval)
 	}()
 	go func() {
 		defer background.Done()
-		r.serveEffects(serveCtx, options.PollInterval)
+		errCh <- r.serveEffects(serveCtx, options.PollInterval)
 	}()
 
-	<-serveCtx.Done()
+	var serveErr error
+	select {
+	case <-serveCtx.Done():
+	case serveErr = <-errCh:
+		cancel()
+	}
 	background.Wait()
+	if serveErr != nil && ctx.Err() == nil {
+		r.setStatus(RuntimeFailed)
+		_ = r.bus.Pause(context.Background())
+		return serveErr
+	}
 	return nil
 }
 
@@ -91,19 +105,25 @@ func (r *Runtime) finishServing() {
 	r.serveMu.Unlock()
 }
 
-func (r *Runtime) serveMailboxes(ctx context.Context, pollInterval time.Duration) {
-	completed := make(chan contract.ServiceInstanceID)
+func (r *Runtime) serveMailboxes(ctx context.Context, pollInterval time.Duration) error {
+	ctx, cancel := context.WithCancel(ctx)
+	type completion struct {
+		instanceID contract.ServiceInstanceID
+		err        error
+	}
+	completed := make(chan completion)
 	scheduled := make(map[contract.ServiceInstanceID]struct{})
 	var handlers sync.WaitGroup
 	defer handlers.Wait()
+	defer cancel()
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
-	scan := func() {
+	scan := func() error {
 		spec := r.plan.Runtime()
-		records, err := r.storage.Instances().List(ctx, instance.Query{RuntimeID: spec.ID, PlanRevision: spec.Revision})
+		records, err := r.storage.Instances().List(ctx, instance.Query{RuntimeID: spec.ID})
 		if err != nil {
-			return
+			return err
 		}
 		for _, record := range records {
 			if record.Lifecycle == instance.Terminated || record.Lifecycle == instance.Draining {
@@ -120,55 +140,71 @@ func (r *Runtime) serveMailboxes(ctx context.Context, pollInterval time.Duration
 			handlers.Add(1)
 			go func(instanceID contract.ServiceInstanceID) {
 				defer handlers.Done()
-				_, _ = r.host.HandleNext(ctx, instanceID)
+				_, handleErr := r.host.HandleNext(ctx, instanceID)
 				select {
-				case completed <- instanceID:
+				case completed <- completion{instanceID: instanceID, err: handleErr}:
 				case <-ctx.Done():
 				}
 			}(record.InstanceID)
 		}
+		return nil
 	}
 
-	scan()
+	if err := scan(); err != nil {
+		return err
+	}
 	for {
 		select {
 		case <-ctx.Done():
-			return
-		case instanceID := <-completed:
-			delete(scheduled, instanceID)
-			scan()
+			return nil
+		case result := <-completed:
+			delete(scheduled, result.instanceID)
+			if fault.IsKind(result.err, fault.CorruptState) {
+				return result.err
+			}
+			if err := scan(); err != nil {
+				return err
+			}
 		case <-ticker.C:
-			scan()
+			if err := scan(); err != nil {
+				return err
+			}
 		}
 	}
 }
 
-func (r *Runtime) serveOutbox(ctx context.Context, pollInterval time.Duration) {
+func (r *Runtime) serveOutbox(ctx context.Context, pollInterval time.Duration) error {
 	for {
 		result, err := r.bus.DispatchNextOutbox(ctx, r.ownerID+".outbox")
 		if ctx.Err() != nil {
-			return
+			return nil
+		}
+		if errors.Is(err, persistence.ErrClosed) || fault.IsKind(err, fault.CorruptState) {
+			return err
 		}
 		if err == nil && !result.Idle {
 			continue
 		}
 		if !waitForWork(ctx, pollInterval) {
-			return
+			return nil
 		}
 	}
 }
 
-func (r *Runtime) serveEffects(ctx context.Context, pollInterval time.Duration) {
+func (r *Runtime) serveEffects(ctx context.Context, pollInterval time.Duration) error {
 	for {
 		result, err := r.effects.DispatchNext(ctx, r.ownerID+".effect")
 		if ctx.Err() != nil {
-			return
+			return nil
+		}
+		if errors.Is(err, persistence.ErrClosed) || fault.IsKind(err, fault.CorruptState) {
+			return err
 		}
 		if err == nil && !result.Idle {
 			continue
 		}
 		if !waitForWork(ctx, pollInterval) {
-			return
+			return nil
 		}
 	}
 }

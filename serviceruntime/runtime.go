@@ -3,6 +3,7 @@ package serviceruntime
 import (
 	"agent/serviceruntime/activation"
 	"agent/serviceruntime/building"
+	"agent/serviceruntime/connection"
 	"agent/serviceruntime/contract"
 	"agent/serviceruntime/effect"
 	"agent/serviceruntime/host"
@@ -31,7 +32,8 @@ const (
 
 type Runtime struct {
 	plan           *building.RuntimePlan
-	register       *building.Register
+	plans          *building.PlanCatalog
+	definitions    building.DefinitionResolver
 	storage        persistence.RuntimeStorage
 	ownsStorage    bool
 	directory      instance.InstanceDirectory
@@ -40,6 +42,7 @@ type Runtime struct {
 	host           host.Host
 	effects        effect.Worker
 	recovery       recovery.Manager
+	connections    *connection.Manager
 	requestClients *request.ClientFactory
 	ids            contract.IDGenerator
 	clock          contract.Clock
@@ -86,6 +89,15 @@ func (r *Runtime) Start(ctx context.Context) (recovery.Report, error) {
 		r.setStatus(RuntimeFailed)
 		return report, err
 	}
+	connectionReport, err := r.connections.Recover(ctx)
+	if err != nil {
+		_ = r.bus.Pause(context.Background())
+		r.setStatus(RuntimeFailed)
+		return report, err
+	}
+	report.ConnectionsRestored = connectionReport.Restored
+	report.ConnectionsFailed = connectionReport.Failed
+	report.Warnings = append(report.Warnings, connectionReport.Warnings...)
 	r.setStatus(RuntimeLive)
 	return report, nil
 }
@@ -172,7 +184,7 @@ func (r *Runtime) DeclareInstance(ctx context.Context, declaration InstanceDecla
 	if declaration.Address == "" || !declaration.Component.Valid() {
 		return instance.Record{}, fmt.Errorf("dynamic instance address and component are required")
 	}
-	definition, ok := r.register.ResolveDefinition(declaration.Component)
+	definition, ok := r.definitions.ResolveDefinition(declaration.Component)
 	if !ok {
 		return instance.Record{}, fmt.Errorf("service definition %q is not registered", declaration.Component.String())
 	}
@@ -270,12 +282,20 @@ func (r *Runtime) Close() error {
 	}
 	r.stopServing()
 	_ = r.host.Stop(context.Background())
+	activationErr := r.activator.PassivateAll(context.Background())
+	connectionErr := r.connections.Close()
 	busErr := r.bus.Close()
 	var storageErr error
 	if r.ownsStorage {
 		storageErr = r.storage.Close()
 	}
 	r.setStatus(RuntimeStopped)
+	if activationErr != nil {
+		return activationErr
+	}
+	if connectionErr != nil {
+		return connectionErr
+	}
 	if busErr != nil {
 		return busErr
 	}

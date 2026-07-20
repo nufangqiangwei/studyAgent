@@ -54,6 +54,9 @@ func (s *Store) enqueueInbox(ctx context.Context, target instance.DeliveryTarget
 	if message.RuntimeID != target.RuntimeID || message.PlanRevision != target.PlanRevision {
 		return persistence.InboxRecord{}, false, fmt.Errorf("message runtime or plan revision does not match inbox target")
 	}
+	if message.StreamID != "" && message.Sequence == 0 {
+		return persistence.InboxRecord{}, false, fmt.Errorf("ordered message stream %q requires a sequence", message.StreamID)
+	}
 	encoded, err := encodeJSON(message.Clone())
 	if err != nil {
 		return persistence.InboxRecord{}, false, err
@@ -61,9 +64,9 @@ func (s *Store) enqueueInbox(ctx context.Context, target instance.DeliveryTarget
 	now := s.now()
 	id := stableRecordID("inbox", string(target.MailboxID)+"\x00"+message.ID)
 	result, err := s.db.ExecContext(ctx, `INSERT INTO inbox(inbox_id, mailbox_id, instance_id, message_id, message,
-		status, attempt, available_at, received_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
+		stream_id, stream_sequence, status, attempt, available_at, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
 		ON CONFLICT(mailbox_id, message_id) DO NOTHING`, id, target.MailboxID, target.InstanceID, message.ID,
-		encoded, persistence.InboxPending, timeValue(now), timeValue(now))
+		encoded, message.StreamID, message.Sequence, persistence.InboxPending, timeValue(now), timeValue(now))
 	if err != nil {
 		return persistence.InboxRecord{}, false, fmt.Errorf("enqueue inbox message %q: %w", message.ID, err)
 	}
@@ -93,10 +96,14 @@ func (s *Store) claimNextInbox(ctx context.Context, mailboxID contract.MailboxID
 	row := s.db.QueryRowContext(ctx, `UPDATE inbox SET status = ?, attempt = attempt + 1,
 		lease_owner = ?, lease_token = ?, lease_until = ?
 		WHERE ordering_id = (
-			SELECT ordering_id FROM inbox WHERE mailbox_id = ? AND (
-				(status IN (?, ?) AND available_at <= ?) OR
-				(status = ? AND lease_until > 0 AND lease_until <= ?)
-			) ORDER BY ordering_id LIMIT 1
+			SELECT candidate.ordering_id FROM inbox AS candidate WHERE candidate.mailbox_id = ? AND (
+				(candidate.status IN (?, ?) AND candidate.available_at <= ?) OR
+				(candidate.status = ? AND candidate.lease_until > 0 AND candidate.lease_until <= ?)
+			) AND (
+				candidate.stream_id = '' OR candidate.stream_sequence = 0 OR
+				(NOT EXISTS (SELECT 1 FROM inbox_stream_heads AS head WHERE head.mailbox_id = candidate.mailbox_id AND head.stream_id = candidate.stream_id) AND candidate.stream_sequence = 1) OR
+				candidate.stream_sequence = (SELECT head.last_sequence + 1 FROM inbox_stream_heads AS head WHERE head.mailbox_id = candidate.mailbox_id AND head.stream_id = candidate.stream_id)
+			) ORDER BY candidate.ordering_id LIMIT 1
 		) RETURNING `+inboxColumns,
 		persistence.InboxClaimed, ownerID, token, timeValue(now.Add(lease)), mailboxID,
 		persistence.InboxPending, persistence.InboxRetry, timeValue(now), persistence.InboxClaimed, timeValue(now))
@@ -131,14 +138,54 @@ func (s *Store) finishInboxClaim(ctx context.Context, claim persistence.InboxCla
 	if status == persistence.InboxAcked {
 		ackedAt = timeValue(s.now())
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE inbox SET status = ?, available_at = ?, lease_owner = '',
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer rollback(tx)
+	if status == persistence.InboxDeadLetter {
+		if err := advanceInboxHeadTx(ctx, tx, claim.Record.MailboxID, claim.Record.Message); err != nil {
+			return err
+		}
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE inbox SET status = ?, available_at = ?, lease_owner = '',
 		lease_token = '', lease_until = 0, acked_at = CASE WHEN ? > 0 THEN ? ELSE acked_at END, last_error = ?
 		WHERE inbox_id = ? AND status = ? AND lease_token = ?`, status, timeValue(availableAt), ackedAt, ackedAt,
 		errorText(cause), claim.Record.InboxID, persistence.InboxClaimed, claim.LeaseToken)
 	if err != nil {
 		return err
 	}
-	return rowsChanged(result, persistence.ErrLeaseLost)
+	if err := rowsChanged(result, persistence.ErrLeaseLost); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func advanceInboxHeadTx(ctx context.Context, tx *sql.Tx, mailboxID contract.MailboxID, message contract.Message) error {
+	if message.StreamID == "" || message.Sequence == 0 {
+		return nil
+	}
+	var head uint64
+	err := tx.QueryRowContext(ctx, `SELECT last_sequence FROM inbox_stream_heads WHERE mailbox_id = ? AND stream_id = ?`, mailboxID, message.StreamID).Scan(&head)
+	if err == sql.ErrNoRows {
+		if message.Sequence != 1 {
+			return fmt.Errorf("inbox stream %q starts with sequence %d instead of 1", message.StreamID, message.Sequence)
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO inbox_stream_heads(mailbox_id, stream_id, last_sequence) VALUES (?, ?, ?)`, mailboxID, message.StreamID, message.Sequence)
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	if message.Sequence != head+1 {
+		return fmt.Errorf("inbox stream %q sequence %d is not next after %d", message.StreamID, message.Sequence, head)
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE inbox_stream_heads SET last_sequence = ? WHERE mailbox_id = ? AND stream_id = ? AND last_sequence = ?`,
+		message.Sequence, mailboxID, message.StreamID, head)
+	if err != nil {
+		return err
+	}
+	return rowsChanged(result, persistence.ErrSequenceConflict)
 }
 
 type inboxScanner interface {

@@ -1,9 +1,16 @@
 package contract
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"time"
 )
+
+func StateChecksum(value []byte) string {
+	sum := sha256.Sum256(value)
+	return hex.EncodeToString(sum[:])
+}
 
 type StoredEvent struct {
 	EventID        string            `json:"event_id"`

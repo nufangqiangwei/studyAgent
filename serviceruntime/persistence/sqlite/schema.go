@@ -21,9 +21,23 @@ func (s *Store) migrate(ctx context.Context) error {
 		return fmt.Errorf("begin sqlite runtime schema migration: %w", err)
 	}
 	defer rollback(tx)
-	for _, statement := range schemaStatements {
-		if _, err := tx.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("apply sqlite runtime schema: %w", err)
+	if version == 0 {
+		for _, statement := range schemaStatements {
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("apply sqlite runtime schema: %w", err)
+			}
+		}
+	} else {
+		for target := version + 1; target <= schemaVersion; target++ {
+			statements, ok := schemaMigrations[target]
+			if !ok {
+				return fmt.Errorf("sqlite runtime schema migration to version %d is not defined", target)
+			}
+			for _, statement := range statements {
+				if _, err := tx.ExecContext(ctx, statement); err != nil {
+					return fmt.Errorf("apply sqlite runtime schema migration %d: %w", target, err)
+				}
+			}
 		}
 	}
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
@@ -104,6 +118,8 @@ var schemaStatements = []string{
 		instance_id TEXT NOT NULL,
 		message_id TEXT NOT NULL,
 		message BLOB NOT NULL,
+		stream_id TEXT NOT NULL DEFAULT '',
+		stream_sequence INTEGER NOT NULL DEFAULT 0,
 		status TEXT NOT NULL,
 		attempt INTEGER NOT NULL DEFAULT 0,
 		available_at INTEGER NOT NULL,
@@ -116,6 +132,7 @@ var schemaStatements = []string{
 		UNIQUE(mailbox_id, message_id)
 	)`,
 	`CREATE INDEX inbox_claim_idx ON inbox(mailbox_id, status, available_at, lease_until, ordering_id)`,
+	`CREATE INDEX inbox_stream_idx ON inbox(mailbox_id, stream_id, stream_sequence)`,
 	`CREATE TABLE outbox (
 		ordering_id INTEGER PRIMARY KEY AUTOINCREMENT,
 		outbox_id TEXT NOT NULL UNIQUE,
@@ -150,6 +167,9 @@ var schemaStatements = []string{
 		available_at INTEGER NOT NULL,
 		payload BLOB,
 		result BLOB,
+		metadata BLOB,
+		result_metadata BLOB,
+		deadline INTEGER NOT NULL DEFAULT 0,
 		last_error TEXT NOT NULL DEFAULT '',
 		planned_at INTEGER NOT NULL,
 		started_at INTEGER NOT NULL DEFAULT 0,
@@ -159,4 +179,87 @@ var schemaStatements = []string{
 		lease_until INTEGER NOT NULL DEFAULT 0
 	)`,
 	`CREATE INDEX effects_claim_idx ON effects(runtime_id, status, available_at, lease_until, ordering_id)`,
+	`CREATE TABLE runtime_plans (
+		runtime_id TEXT NOT NULL,
+		plan_revision TEXT NOT NULL,
+		plan_hash TEXT NOT NULL,
+		manifest BLOB NOT NULL,
+		created_at INTEGER NOT NULL,
+		PRIMARY KEY(runtime_id, plan_revision)
+	)`,
+	`CREATE TABLE message_sequences (
+		scope TEXT NOT NULL,
+		message_id TEXT NOT NULL,
+		runtime_id TEXT NOT NULL,
+		stream_id TEXT NOT NULL,
+		sequence INTEGER NOT NULL,
+		PRIMARY KEY(scope, message_id),
+		UNIQUE(scope, runtime_id, stream_id, sequence)
+	)`,
+	`CREATE TABLE inbox_stream_heads (
+		mailbox_id TEXT NOT NULL,
+		stream_id TEXT NOT NULL,
+		last_sequence INTEGER NOT NULL,
+		PRIMARY KEY(mailbox_id, stream_id)
+	)`,
+	connectionTable,
+}
+
+const connectionTable = `CREATE TABLE connections (
+	connection_id TEXT PRIMARY KEY,
+	runtime_id TEXT NOT NULL,
+	plan_revision TEXT NOT NULL,
+	owner_instance_id TEXT NOT NULL,
+	owner_address TEXT NOT NULL,
+	connection_key TEXT NOT NULL,
+	driver TEXT NOT NULL,
+	config BLOB,
+	metadata BLOB,
+	desired_open INTEGER NOT NULL,
+	status TEXT NOT NULL,
+	last_error TEXT NOT NULL DEFAULT '',
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL,
+	opened_at INTEGER NOT NULL DEFAULT 0,
+	closed_at INTEGER NOT NULL DEFAULT 0,
+	UNIQUE(runtime_id, plan_revision, owner_instance_id, connection_key)
+)`
+
+var schemaMigrations = map[int][]string{
+	2: {
+		`ALTER TABLE effects ADD COLUMN metadata BLOB`,
+		`ALTER TABLE effects ADD COLUMN result_metadata BLOB`,
+		`ALTER TABLE effects ADD COLUMN deadline INTEGER NOT NULL DEFAULT 0`,
+	},
+	3: {
+		`CREATE TABLE runtime_plans (
+			runtime_id TEXT NOT NULL,
+			plan_revision TEXT NOT NULL,
+			plan_hash TEXT NOT NULL,
+			manifest BLOB NOT NULL,
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY(runtime_id, plan_revision)
+		)`,
+	},
+	4: {
+		`ALTER TABLE inbox ADD COLUMN stream_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE inbox ADD COLUMN stream_sequence INTEGER NOT NULL DEFAULT 0`,
+		`CREATE INDEX inbox_stream_idx ON inbox(mailbox_id, stream_id, stream_sequence)`,
+		`CREATE TABLE message_sequences (
+			scope TEXT NOT NULL,
+			message_id TEXT NOT NULL,
+			runtime_id TEXT NOT NULL,
+			stream_id TEXT NOT NULL,
+			sequence INTEGER NOT NULL,
+			PRIMARY KEY(scope, message_id),
+			UNIQUE(scope, runtime_id, stream_id, sequence)
+		)`,
+		`CREATE TABLE inbox_stream_heads (
+			mailbox_id TEXT NOT NULL,
+			stream_id TEXT NOT NULL,
+			last_sequence INTEGER NOT NULL,
+			PRIMARY KEY(mailbox_id, stream_id)
+		)`,
+	},
+	5: {connectionTable},
 }

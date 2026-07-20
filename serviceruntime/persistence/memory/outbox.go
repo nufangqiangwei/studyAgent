@@ -13,6 +13,10 @@ func (s *outboxStore) ClaimNext(ctx context.Context, runtimeID contract.RuntimeI
 	return s.owner.claimNextOutbox(ctx, runtimeID, ownerID, lease)
 }
 
+func (s *outboxStore) RenewClaim(ctx context.Context, claim persistence.OutboxClaim, lease time.Duration) error {
+	return s.owner.renewOutboxClaim(ctx, claim, lease)
+}
+
 func (s *outboxStore) MarkDelivered(ctx context.Context, claim persistence.OutboxClaim, result persistence.DeliverySummary) error {
 	return s.owner.markOutboxDelivered(ctx, claim, result)
 }
@@ -77,6 +81,25 @@ func (s *Store) markOutboxDelivered(ctx context.Context, claim persistence.Outbo
 	record.Status = persistence.OutboxDelivered
 	record.DeliveredAt = &now
 	record.LeaseOwner, record.LeaseToken, record.LeaseUntil = "", "", nil
+	s.outbox[record.OutboxID] = record
+	return nil
+}
+
+func (s *Store) renewOutboxClaim(ctx context.Context, claim persistence.OutboxClaim, lease time.Duration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.check(ctx); err != nil {
+		return err
+	}
+	record, ok := s.outbox[claim.Record.OutboxID]
+	if !ok || record.Status != persistence.OutboxClaimed || record.LeaseToken != claim.LeaseToken {
+		return persistence.ErrLeaseLost
+	}
+	if lease <= 0 {
+		lease = 30 * time.Second
+	}
+	until := s.now().Add(lease)
+	record.LeaseUntil = &until
 	s.outbox[record.OutboxID] = record
 	return nil
 }

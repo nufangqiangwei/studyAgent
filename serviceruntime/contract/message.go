@@ -75,6 +75,9 @@ func (m Message) Validate() error {
 	if strings.TrimSpace(string(m.PlanRevision)) == "" {
 		return fmt.Errorf("message plan revision is required")
 	}
+	if m.StreamID == "" && m.Sequence != 0 {
+		return fmt.Errorf("message sequence requires a stream id")
+	}
 	return nil
 }
 

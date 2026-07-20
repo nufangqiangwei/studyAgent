@@ -22,6 +22,13 @@ func (s *Store) CommitMessage(ctx context.Context, commit persistence.MessageCom
 	if inbox.Status != persistence.InboxClaimed || inbox.LeaseToken != commit.Ack.LeaseToken {
 		return persistence.CommitResult{}, persistence.ErrLeaseLost
 	}
+	inboxHeads := make(map[inboxStreamKey]uint64, len(s.inboxHeads))
+	for key, value := range s.inboxHeads {
+		inboxHeads[key] = value
+	}
+	if err := s.advanceInboxHead(inbox.Message, inbox.MailboxID, inboxHeads); err != nil {
+		return persistence.CommitResult{}, err
+	}
 	lease, leased := s.leases[commit.InstanceID]
 	if !leased || lease.Epoch != commit.ActivationEpoch || !lease.LeaseUntil.After(s.now()) {
 		return persistence.CommitResult{}, persistence.ErrStaleActivation
@@ -63,6 +70,7 @@ func (s *Store) CommitMessage(ctx context.Context, commit persistence.MessageCom
 	}
 
 	result := persistence.CommitResult{LastSequence: lastSequence}
+	s.inboxHeads = inboxHeads
 	for _, event := range commit.Events {
 		cloned := event.Clone()
 		s.events[commit.StreamID] = append(s.events[commit.StreamID], cloned)

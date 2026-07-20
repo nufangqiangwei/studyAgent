@@ -3,6 +3,8 @@ package effect
 import (
 	"agent/serviceruntime/building"
 	"agent/serviceruntime/contract"
+	"agent/serviceruntime/fault"
+	leaseguard "agent/serviceruntime/lease"
 	"agent/serviceruntime/persistence"
 	"context"
 	"errors"
@@ -33,6 +35,7 @@ type RuntimeWorker struct {
 	clock       contract.Clock
 	lease       time.Duration
 	maxAttempts int
+	retryPolicy fault.RetryPolicy
 }
 
 type WorkerOptions struct {
@@ -42,6 +45,7 @@ type WorkerOptions struct {
 	Clock       contract.Clock
 	Lease       time.Duration
 	MaxAttempts int
+	RetryPolicy fault.RetryPolicy
 }
 
 func NewWorker(options WorkerOptions) (*RuntimeWorker, error) {
@@ -55,7 +59,10 @@ func NewWorker(options WorkerOptions) (*RuntimeWorker, error) {
 	if options.MaxAttempts <= 0 {
 		options.MaxAttempts = policy.MaxDeliveryAttempts
 	}
-	return &RuntimeWorker{plan: options.Plan, store: options.Store, registry: options.Registry, clock: options.Clock, lease: options.Lease, maxAttempts: options.MaxAttempts}, nil
+	if options.RetryPolicy == nil {
+		options.RetryPolicy = fault.ExponentialRetryPolicy{}
+	}
+	return &RuntimeWorker{plan: options.Plan, store: options.Store, registry: options.Registry, clock: options.Clock, lease: options.Lease, maxAttempts: options.MaxAttempts, retryPolicy: options.RetryPolicy}, nil
 }
 
 func (w *RuntimeWorker) DispatchNext(ctx context.Context, ownerID string) (WorkResult, error) {
@@ -67,9 +74,22 @@ func (w *RuntimeWorker) DispatchNext(ctx context.Context, ownerID string) (WorkR
 	if err != nil || !ok {
 		return WorkResult{Idle: !ok}, err
 	}
+	heartbeat := leaseguard.Start(ctx, leaseguard.Interval(w.lease), func(renewCtx context.Context) error {
+		return w.store.RenewClaim(renewCtx, claim, w.lease)
+	})
+	defer heartbeat.Stop()
+	workCtx := heartbeat.Context()
 	if claim.Record.Status == persistence.EffectStarted || claim.Record.Status == persistence.EffectReconciliationRequired {
-		result, reconcileErr := w.reconcileClaim(ctx, claim)
+		result, reconcileErr := w.reconcileClaim(workCtx, claim)
+		if reconcileErr == nil && heartbeat.Err() != nil {
+			reconcileErr = fault.Wrap(fault.LeaseLost, "renew_effect_claim", heartbeat.Err())
+		}
 		return WorkResult{EffectID: claim.Record.EffectID, Status: reconciliationStatus(result.Action)}, reconcileErr
+	}
+	if claim.Record.Deadline != nil && !claim.Record.Deadline.After(w.now()) {
+		err = fault.Wrap(fault.Permanent, "execute_effect", fmt.Errorf("effect %q deadline has expired", claim.Record.EffectID))
+		storeErr := w.store.MarkTerminalFailed(ctx, claim, err)
+		return WorkResult{EffectID: claim.Record.EffectID, Status: persistence.EffectTerminalFailed}, firstError(err, storeErr)
 	}
 	executor, found := w.registry.ResolveExecutor(claim.Record.ExecutorRef)
 	if !found {
@@ -80,9 +100,12 @@ func (w *RuntimeWorker) DispatchNext(ctx context.Context, ownerID string) (WorkR
 	if err := w.store.MarkStarted(ctx, claim); err != nil {
 		return WorkResult{}, err
 	}
-	result, executeErr := executor.ExecuteEffect(ctx, claim.Record.Clone())
+	result, executeErr := executor.ExecuteEffect(workCtx, claim.Record.Clone())
+	if executeErr == nil && heartbeat.Err() != nil {
+		executeErr = fault.Wrap(fault.LeaseLost, "renew_effect_claim", heartbeat.Err())
+	}
 	if executeErr == nil {
-		err = w.store.MarkSucceeded(ctx, claim, result.Payload)
+		err = w.store.MarkSucceeded(ctx, claim, persistence.EffectResult{Payload: result.Payload, Metadata: result.Metadata})
 		return WorkResult{EffectID: claim.Record.EffectID, Status: persistence.EffectSucceeded}, err
 	}
 	var unknown UnknownOutcome
@@ -93,12 +116,12 @@ func (w *RuntimeWorker) DispatchNext(ctx context.Context, ownerID string) (WorkR
 		}
 		return WorkResult{EffectID: claim.Record.EffectID, Status: persistence.EffectReconciliationRequired}, executeErr
 	}
-	if claim.Record.Attempt >= w.maxAttempts {
+	retry := w.retryPolicy.DecideRetry(fault.RetryInput{Error: executeErr, Attempt: claim.Record.Attempt, MaxAttempts: w.maxAttempts, Now: w.now()})
+	if !retry.Retry {
 		err = w.store.MarkTerminalFailed(ctx, claim, executeErr)
 		return WorkResult{EffectID: claim.Record.EffectID, Status: persistence.EffectTerminalFailed}, firstError(executeErr, err)
 	}
-	retryAt := w.now().Add(time.Duration(claim.Record.Attempt) * time.Second)
-	err = w.store.MarkFailed(ctx, claim, executeErr, &retryAt)
+	err = w.store.MarkFailed(ctx, claim, executeErr, &retry.RetryAt)
 	return WorkResult{EffectID: claim.Record.EffectID, Status: persistence.EffectFailed}, firstError(executeErr, err)
 }
 
@@ -110,7 +133,15 @@ func (w *RuntimeWorker) Reconcile(ctx context.Context, record persistence.Effect
 	if err != nil {
 		return ReconciliationResult{}, err
 	}
-	return w.reconcileClaim(ctx, claim)
+	heartbeat := leaseguard.Start(ctx, leaseguard.Interval(w.lease), func(renewCtx context.Context) error {
+		return w.store.RenewClaim(renewCtx, claim, w.lease)
+	})
+	defer heartbeat.Stop()
+	result, reconcileErr := w.reconcileClaim(heartbeat.Context(), claim)
+	if reconcileErr == nil && heartbeat.Err() != nil {
+		reconcileErr = fault.Wrap(fault.LeaseLost, "renew_effect_claim", heartbeat.Err())
+	}
+	return result, reconcileErr
 }
 
 func (w *RuntimeWorker) reconcileClaim(ctx context.Context, claim persistence.EffectClaim) (ReconciliationResult, error) {
@@ -128,7 +159,7 @@ func (w *RuntimeWorker) reconcileClaim(ctx context.Context, claim persistence.Ef
 	var err error
 	switch result.Action {
 	case ReconcileComplete:
-		err = w.store.MarkSucceeded(ctx, claim, result.Result)
+		err = w.store.MarkSucceeded(ctx, claim, persistence.EffectResult{Payload: result.Result})
 	case ReconcileRetry:
 		err = w.store.MarkFailed(ctx, claim, fmt.Errorf("reconciliation requested retry: %s", result.Reason), result.RetryAt)
 	case ReconcileFail:

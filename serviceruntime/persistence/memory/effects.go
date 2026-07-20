@@ -4,7 +4,6 @@ import (
 	"agent/serviceruntime/contract"
 	"agent/serviceruntime/persistence"
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -50,6 +49,10 @@ func (s *effectStore) ClaimNext(ctx context.Context, runtimeID contract.RuntimeI
 
 type effectStore struct{ owner *Store }
 
+func (s *effectStore) RenewClaim(ctx context.Context, claim persistence.EffectClaim, lease time.Duration) error {
+	return s.owner.renewEffectClaim(ctx, claim, lease)
+}
+
 func (s *effectStore) Claim(ctx context.Context, effectID string, ownerID string, lease time.Duration) (persistence.EffectClaim, error) {
 	return s.owner.claimEffect(ctx, effectID, ownerID, lease)
 }
@@ -58,7 +61,7 @@ func (s *effectStore) MarkStarted(ctx context.Context, claim persistence.EffectC
 	return s.owner.markEffectStarted(ctx, claim)
 }
 
-func (s *effectStore) MarkSucceeded(ctx context.Context, claim persistence.EffectClaim, result json.RawMessage) error {
+func (s *effectStore) MarkSucceeded(ctx context.Context, claim persistence.EffectClaim, result persistence.EffectResult) error {
 	return s.owner.markEffectSucceeded(ctx, claim, result)
 }
 
@@ -95,7 +98,26 @@ func (s *Store) markEffectStarted(ctx context.Context, claim persistence.EffectC
 	return nil
 }
 
-func (s *Store) markEffectSucceeded(ctx context.Context, claim persistence.EffectClaim, result json.RawMessage) error {
+func (s *Store) renewEffectClaim(ctx context.Context, claim persistence.EffectClaim, lease time.Duration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.check(ctx); err != nil {
+		return err
+	}
+	record, err := s.claimedEffect(claim)
+	if err != nil {
+		return err
+	}
+	if lease <= 0 {
+		lease = time.Minute
+	}
+	until := s.now().Add(lease)
+	record.LeaseUntil = &until
+	s.effects[record.EffectID] = record
+	return nil
+}
+
+func (s *Store) markEffectSucceeded(ctx context.Context, claim persistence.EffectClaim, result persistence.EffectResult) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.check(ctx); err != nil {
@@ -107,7 +129,8 @@ func (s *Store) markEffectSucceeded(ctx context.Context, claim persistence.Effec
 	}
 	now := s.now()
 	record.Status = persistence.EffectSucceeded
-	record.Result = contract.CloneRaw(result)
+	record.Result = contract.CloneRaw(result.Payload)
+	record.ResultMetadata = contract.CloneStrings(result.Metadata)
 	record.CompletedAt = &now
 	record.LeaseOwner, record.LeaseToken, record.LeaseUntil = "", "", nil
 	s.effects[record.EffectID] = record

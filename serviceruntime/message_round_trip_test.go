@@ -294,8 +294,8 @@ func TestRequestRoundTripAcrossThreeServices(t *testing.T) {
 	})
 	if report, err := runtime.Start(ctx); err != nil {
 		t.Fatal(err)
-	} else if report.InstancesActivated != 3 {
-		t.Fatalf("activated instances = %d, want 3", report.InstancesActivated)
+	} else if report.InstancesActivated != 4 {
+		t.Fatalf("activated instances = %d, want 4", report.InstancesActivated)
 	}
 
 	serveCtx, stopServing := context.WithCancel(ctx)

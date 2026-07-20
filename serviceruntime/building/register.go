@@ -98,6 +98,15 @@ func (r *Register) ResolveDefinition(ref contract.ComponentRef) (ServiceDefiniti
 	return cloneDefinition(definition), ok
 }
 
+func (r *Register) FreezeDefinitions() *DefinitionCatalog {
+	if r == nil {
+		return newDefinitionCatalog(nil)
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return newDefinitionCatalog(r.definitions)
+}
+
 func (r *Register) Compile(ctx context.Context, manifest RuntimeManifest) (*RuntimePlan, error) {
 	if r == nil {
 		return nil, fmt.Errorf("register is nil")

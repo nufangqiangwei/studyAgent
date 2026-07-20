@@ -114,6 +114,7 @@ type DeliverySummary struct {
 
 type OutboxStore interface {
 	ClaimNext(ctx context.Context, runtimeID contract.RuntimeID, ownerID string, lease time.Duration) (OutboxClaim, bool, error)
+	RenewClaim(ctx context.Context, claim OutboxClaim, lease time.Duration) error
 	MarkDelivered(ctx context.Context, claim OutboxClaim, result DeliverySummary) error
 	MarkRetry(ctx context.Context, claim OutboxClaim, retryAt time.Time, cause error) error
 	MoveToDeadLetter(ctx context.Context, claim OutboxClaim, cause error) error
@@ -142,12 +143,15 @@ type EffectRecord struct {
 	ExecutorRef     string                     `json:"executor_ref"`
 	IdempotencyKey  string                     `json:"idempotency_key"`
 
-	Status      EffectStatus    `json:"status"`
-	Attempt     int             `json:"attempt"`
-	AvailableAt time.Time       `json:"available_at"`
-	Payload     json.RawMessage `json:"payload,omitempty"`
-	Result      json.RawMessage `json:"result,omitempty"`
-	LastError   string          `json:"last_error,omitempty"`
+	Status         EffectStatus      `json:"status"`
+	Attempt        int               `json:"attempt"`
+	AvailableAt    time.Time         `json:"available_at"`
+	Payload        json.RawMessage   `json:"payload,omitempty"`
+	Result         json.RawMessage   `json:"result,omitempty"`
+	Metadata       map[string]string `json:"metadata,omitempty"`
+	ResultMetadata map[string]string `json:"result_metadata,omitempty"`
+	Deadline       *time.Time        `json:"deadline,omitempty"`
+	LastError      string            `json:"last_error,omitempty"`
 
 	PlannedAt   time.Time  `json:"planned_at"`
 	StartedAt   *time.Time `json:"started_at,omitempty"`
@@ -160,6 +164,9 @@ type EffectRecord struct {
 func (r EffectRecord) Clone() EffectRecord {
 	r.Payload = contract.CloneRaw(r.Payload)
 	r.Result = contract.CloneRaw(r.Result)
+	r.Metadata = contract.CloneStrings(r.Metadata)
+	r.ResultMetadata = contract.CloneStrings(r.ResultMetadata)
+	r.Deadline = cloneTime(r.Deadline)
 	r.StartedAt = cloneTime(r.StartedAt)
 	r.CompletedAt = cloneTime(r.CompletedAt)
 	r.LeaseUntil = cloneTime(r.LeaseUntil)
@@ -171,11 +178,17 @@ type EffectClaim struct {
 	LeaseToken string       `json:"lease_token"`
 }
 
+type EffectResult struct {
+	Payload  json.RawMessage   `json:"payload,omitempty"`
+	Metadata map[string]string `json:"metadata,omitempty"`
+}
+
 type EffectStore interface {
 	ClaimNext(ctx context.Context, runtimeID contract.RuntimeID, ownerID string, lease time.Duration) (EffectClaim, bool, error)
 	Claim(ctx context.Context, effectID string, ownerID string, lease time.Duration) (EffectClaim, error)
+	RenewClaim(ctx context.Context, claim EffectClaim, lease time.Duration) error
 	MarkStarted(ctx context.Context, claim EffectClaim) error
-	MarkSucceeded(ctx context.Context, claim EffectClaim, result json.RawMessage) error
+	MarkSucceeded(ctx context.Context, claim EffectClaim, result EffectResult) error
 	MarkFailed(ctx context.Context, claim EffectClaim, cause error, retryAt *time.Time) error
 	MarkTerminalFailed(ctx context.Context, claim EffectClaim, cause error) error
 	RequireReconciliation(ctx context.Context, claim EffectClaim, cause error) error
@@ -215,6 +228,85 @@ type MessageCommitStore interface {
 	CommitMessage(ctx context.Context, commit MessageCommit) (CommitResult, error)
 }
 
+type PlanRecord struct {
+	RuntimeID    contract.RuntimeID    `json:"runtime_id"`
+	PlanRevision contract.PlanRevision `json:"plan_revision"`
+	PlanHash     string                `json:"plan_hash"`
+	Manifest     json.RawMessage       `json:"manifest"`
+	CreatedAt    time.Time             `json:"created_at"`
+}
+
+func (r PlanRecord) Clone() PlanRecord {
+	r.Manifest = contract.CloneRaw(r.Manifest)
+	return r
+}
+
+type PlanStore interface {
+	Put(ctx context.Context, record PlanRecord) (bool, error)
+	Get(ctx context.Context, runtimeID contract.RuntimeID, revision contract.PlanRevision) (PlanRecord, bool, error)
+	List(ctx context.Context, runtimeID contract.RuntimeID) ([]PlanRecord, error)
+}
+
+type MessageSequenceStore interface {
+	Assign(ctx context.Context, scope string, message contract.Message) (contract.Message, error)
+}
+
+type ConnectionStatus string
+
+const (
+	ConnectionOpening ConnectionStatus = "opening"
+	ConnectionOpen    ConnectionStatus = "open"
+	ConnectionClosed  ConnectionStatus = "closed"
+	ConnectionFailed  ConnectionStatus = "failed"
+)
+
+func (s ConnectionStatus) Valid() bool {
+	switch s {
+	case ConnectionOpening, ConnectionOpen, ConnectionClosed, ConnectionFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+// ConnectionRecord is the durable desired-state record for one externally
+// managed long-lived connection. Ownership is bound to both the service
+// address and its concrete instance ID so another service cannot reuse a
+// connection merely by learning its ID.
+type ConnectionRecord struct {
+	ConnectionID    string                     `json:"connection_id"`
+	RuntimeID       contract.RuntimeID         `json:"runtime_id"`
+	PlanRevision    contract.PlanRevision      `json:"plan_revision"`
+	OwnerInstanceID contract.ServiceInstanceID `json:"owner_instance_id"`
+	OwnerAddress    contract.ServiceAddress    `json:"owner_address"`
+	Key             string                     `json:"key"`
+	Driver          string                     `json:"driver"`
+	Config          json.RawMessage            `json:"config,omitempty"`
+	Metadata        map[string]string          `json:"metadata,omitempty"`
+	DesiredOpen     bool                       `json:"desired_open"`
+	Status          ConnectionStatus           `json:"status"`
+	LastError       string                     `json:"last_error,omitempty"`
+	CreatedAt       time.Time                  `json:"created_at"`
+	UpdatedAt       time.Time                  `json:"updated_at"`
+	OpenedAt        *time.Time                 `json:"opened_at,omitempty"`
+	ClosedAt        *time.Time                 `json:"closed_at,omitempty"`
+}
+
+func (r ConnectionRecord) Clone() ConnectionRecord {
+	r.Config = contract.CloneRaw(r.Config)
+	r.Metadata = contract.CloneStrings(r.Metadata)
+	r.OpenedAt = cloneTime(r.OpenedAt)
+	r.ClosedAt = cloneTime(r.ClosedAt)
+	return r
+}
+
+type ConnectionStore interface {
+	Create(ctx context.Context, record ConnectionRecord) error
+	Update(ctx context.Context, record ConnectionRecord) error
+	Get(ctx context.Context, runtimeID contract.RuntimeID, connectionID string) (ConnectionRecord, bool, error)
+	List(ctx context.Context, runtimeID contract.RuntimeID) ([]ConnectionRecord, error)
+}
+
 type RuntimeStorage interface {
 	Journal() JournalStore
 	Snapshots() SnapshotStore
@@ -224,6 +316,9 @@ type RuntimeStorage interface {
 	Instances() instance.Store
 	Leases() instance.ActivationLeaseStore
 	Committer() MessageCommitStore
+	Plans() PlanStore
+	Sequences() MessageSequenceStore
+	Connections() ConnectionStore
 	Close() error
 }
 

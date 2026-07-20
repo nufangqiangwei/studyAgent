@@ -115,6 +115,9 @@ func (t RoutingTable) Resolve(message contract.Message) ([]contract.ServiceAddre
 		}
 		return []contract.ServiceAddress{target}, nil
 	case contract.MessageEvent:
+		if message.To != "" {
+			return []contract.ServiceAddress{message.To}, nil
+		}
 		return append([]contract.ServiceAddress(nil), t.events[message.Type]...), nil
 	case contract.MessageReply:
 		if message.To == "" {

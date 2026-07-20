@@ -18,6 +18,19 @@ func (s *outboxStore) ClaimNext(ctx context.Context, runtimeID contract.RuntimeI
 	return s.owner.claimNextOutbox(ctx, runtimeID, ownerID, lease)
 }
 
+func (s *outboxStore) RenewClaim(ctx context.Context, claim persistence.OutboxClaim, lease time.Duration) error {
+	if lease <= 0 {
+		lease = 30 * time.Second
+	}
+	result, err := s.owner.db.ExecContext(ctx, `UPDATE outbox SET lease_until = ?
+		WHERE outbox_id = ? AND status = ? AND lease_token = ?`, timeValue(s.owner.now().Add(lease)),
+		claim.Record.OutboxID, persistence.OutboxClaimed, claim.LeaseToken)
+	if err != nil {
+		return err
+	}
+	return rowsChanged(result, persistence.ErrLeaseLost)
+}
+
 func (s *outboxStore) MarkDelivered(ctx context.Context, claim persistence.OutboxClaim, _ persistence.DeliverySummary) error {
 	return s.owner.finishOutbox(ctx, claim, persistence.OutboxDelivered, time.Time{}, nil)
 }

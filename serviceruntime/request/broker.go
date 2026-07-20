@@ -103,18 +103,11 @@ func (b *Broker) DeliverReply(ctx context.Context, message contract.Message) err
 	if message.To != b.address {
 		return fmt.Errorf("reply target %q does not match broker %q", message.To, b.address)
 	}
-	requestID := message.CausationID
-	if requestID == "" {
-		return fmt.Errorf("reply %q has no causation id", message.ID)
+	response, err := ResponseFromReply(message)
+	if err != nil {
+		return err
 	}
-	response := Response{RequestID: requestID, Message: message.Clone()}
-	if message.Metadata[contract.MetadataReplyError] == "true" {
-		var responseErr ResponseError
-		if err := json.Unmarshal(message.Payload, &responseErr); err != nil {
-			responseErr = ResponseError{Code: "invalid_reply_error", Message: err.Error()}
-		}
-		response.Error = &responseErr
-	}
+	requestID := response.RequestID
 
 	b.mu.Lock()
 	waiter, exists := b.waiters[requestID]
@@ -126,4 +119,25 @@ func (b *Broker) DeliverReply(ctx context.Context, message contract.Message) err
 		waiter <- response
 	}
 	return nil
+}
+
+// ResponseFromReply normalizes a durable reply for both the in-process broker
+// and workflow replay adapters.
+func ResponseFromReply(message contract.Message) (Response, error) {
+	if message.Kind != contract.MessageReply {
+		return Response{}, fmt.Errorf("message %q is not a reply", message.ID)
+	}
+	requestID := message.CausationID
+	if requestID == "" {
+		return Response{}, fmt.Errorf("reply %q has no causation id", message.ID)
+	}
+	response := Response{RequestID: requestID, Message: message.Clone()}
+	if message.Metadata[contract.MetadataReplyError] == "true" {
+		var responseErr ResponseError
+		if err := json.Unmarshal(message.Payload, &responseErr); err != nil {
+			responseErr = ResponseError{Code: "invalid_reply_error", Message: err.Error()}
+		}
+		response.Error = &responseErr
+	}
+	return response, nil
 }

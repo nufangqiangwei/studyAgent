@@ -20,7 +20,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 1
+const schemaVersion = 5
 
 var _ persistence.RuntimeStorage = (*Store)(nil)
 
@@ -111,14 +111,17 @@ func dataSource(path string, busyTimeout time.Duration) (string, error) {
 	return source + separator + parameters.Encode(), nil
 }
 
-func (s *Store) Journal() persistence.JournalStore         { return s }
-func (s *Store) Snapshots() persistence.SnapshotStore      { return s }
-func (s *Store) Inbox() persistence.InboxStore             { return &inboxStore{owner: s} }
-func (s *Store) Outbox() persistence.OutboxStore           { return &outboxStore{owner: s} }
-func (s *Store) Effects() persistence.EffectStore          { return &effectStore{owner: s} }
-func (s *Store) Instances() instance.Store                 { return s }
-func (s *Store) Leases() instance.ActivationLeaseStore     { return s }
-func (s *Store) Committer() persistence.MessageCommitStore { return s }
+func (s *Store) Journal() persistence.JournalStore           { return s }
+func (s *Store) Snapshots() persistence.SnapshotStore        { return s }
+func (s *Store) Inbox() persistence.InboxStore               { return &inboxStore{owner: s} }
+func (s *Store) Outbox() persistence.OutboxStore             { return &outboxStore{owner: s} }
+func (s *Store) Effects() persistence.EffectStore            { return &effectStore{owner: s} }
+func (s *Store) Instances() instance.Store                   { return s }
+func (s *Store) Leases() instance.ActivationLeaseStore       { return s }
+func (s *Store) Committer() persistence.MessageCommitStore   { return s }
+func (s *Store) Plans() persistence.PlanStore                { return &planStore{owner: s} }
+func (s *Store) Sequences() persistence.MessageSequenceStore { return &sequenceStore{owner: s} }
+func (s *Store) Connections() persistence.ConnectionStore    { return &connectionStore{owner: s} }
 
 func (s *Store) Close() error {
 	if s == nil || s.db == nil {

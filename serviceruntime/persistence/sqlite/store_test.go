@@ -7,6 +7,7 @@ import (
 	"agent/serviceruntime/instance"
 	"agent/serviceruntime/persistence"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -17,6 +18,82 @@ import (
 type testClock struct{ now time.Time }
 
 func (c *testClock) Now() time.Time { return c.now }
+
+func TestStoreMigratesSchemaFromVersionOne(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	dsn, err := dataSource(path, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyStatements := []string{
+		`CREATE TABLE effects (effect_id TEXT PRIMARY KEY)`,
+		`CREATE TABLE inbox (mailbox_id TEXT NOT NULL)`,
+		`PRAGMA user_version = 1`,
+	}
+	for _, statement := range legacyStatements {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := Open(ctx, path, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var version int
+	if err := store.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != schemaVersion {
+		t.Fatalf("schema version=%d want=%d", version, schemaVersion)
+	}
+	for _, column := range []string{"metadata", "result_metadata", "deadline"} {
+		assertSQLiteColumnExists(t, ctx, store.db, "effects", column)
+	}
+	for _, column := range []string{"stream_id", "stream_sequence"} {
+		assertSQLiteColumnExists(t, ctx, store.db, "inbox", column)
+	}
+	for _, table := range []string{"runtime_plans", "message_sequences", "inbox_stream_heads"} {
+		var name string
+		if err := store.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&name); err != nil {
+			t.Fatalf("table %s missing: %v", table, err)
+		}
+	}
+}
+
+func assertSQLiteColumnExists(t *testing.T, ctx context.Context, db *sql.DB, table, column string) {
+	t.Helper()
+	rows, err := db.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatal(err)
+		}
+		if name == column {
+			return
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	t.Fatalf("column %s.%s missing", table, column)
+}
 
 func TestStorePersistsAtomicCommitAcrossReopen(t *testing.T) {
 	ctx := context.Background()
@@ -52,7 +129,7 @@ func TestStorePersistsAtomicCommitAcrossReopen(t *testing.T) {
 		t.Fatalf("pending outbox=%d err=%v", pendingOutbox, err)
 	}
 	effects, err := store.Effects().ListUnfinished(ctx, fixture.record.RuntimeID)
-	if err != nil || len(effects) != 1 || effects[0].EffectID != "effect-1" {
+	if err != nil || len(effects) != 1 || effects[0].EffectID != "effect-1" || effects[0].Metadata["source"] != "test" || effects[0].Deadline == nil {
 		t.Fatalf("effects=%#v err=%v", effects, err)
 	}
 	restored, found, err := store.Instances().Get(ctx, fixture.record.InstanceID)
@@ -144,6 +221,54 @@ func TestExpiredStartedEffectIsReconciledInsteadOfExecuted(t *testing.T) {
 	}
 }
 
+func TestSQLiteInboxStreamRetryBlocksLaterSequence(t *testing.T) {
+	ctx := context.Background()
+	clock := &testClock{now: time.Date(2026, 7, 19, 10, 0, 0, 0, time.UTC)}
+	store := openTestStore(t, ctx, filepath.Join(t.TempDir(), "ordering.db"), clock)
+	defer store.Close()
+	target := instance.DeliveryTarget{RuntimeID: "runtime", PlanRevision: "v1", Address: "worker", InstanceID: "worker-1", MailboxID: "mailbox-1"}
+	first := contract.Message{ID: "message-1", Kind: contract.MessageCommand, Type: "work", Version: 1, RuntimeID: "runtime", PlanRevision: "v1", StreamID: "run/1"}
+	second := first.Clone()
+	second.ID = "message-2"
+	var err error
+	first, err = store.Sequences().Assign(ctx, "mailbox/mailbox-1", first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err = store.Sequences().Assign(ctx, "mailbox/mailbox-1", second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Inbox().Enqueue(ctx, target, first); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Inbox().Enqueue(ctx, target, second); err != nil {
+		t.Fatal(err)
+	}
+	claim, found, err := store.Inbox().ClaimNext(ctx, target.MailboxID, "host", time.Minute)
+	if err != nil || !found || claim.Record.Message.ID != first.ID {
+		t.Fatalf("first claim=%#v found=%v err=%v", claim, found, err)
+	}
+	if err := store.Inbox().ReleaseClaim(ctx, claim, clock.now.Add(time.Hour), context.DeadlineExceeded); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := store.Inbox().ClaimNext(ctx, target.MailboxID, "host", time.Minute); err != nil || found {
+		t.Fatalf("later sequence bypassed retry: found=%v err=%v", found, err)
+	}
+	clock.now = clock.now.Add(2 * time.Hour)
+	claim, found, err = store.Inbox().ClaimNext(ctx, target.MailboxID, "host", time.Minute)
+	if err != nil || !found || claim.Record.Message.ID != first.ID {
+		t.Fatalf("retry claim=%#v found=%v err=%v", claim, found, err)
+	}
+	if err := store.Inbox().MoveToDeadLetter(ctx, claim, context.DeadlineExceeded); err != nil {
+		t.Fatal(err)
+	}
+	claim, found, err = store.Inbox().ClaimNext(ctx, target.MailboxID, "host", time.Minute)
+	if err != nil || !found || claim.Record.Message.ID != second.ID {
+		t.Fatalf("second claim=%#v found=%v err=%v", claim, found, err)
+	}
+}
+
 type fixtureResult struct {
 	record instance.Record
 	lease  instance.ActivationLease
@@ -181,14 +306,21 @@ func commitFixture(t *testing.T, ctx context.Context, store *Store, clock *testC
 		RuntimeID: record.RuntimeID, PlanRevision: record.PlanRevision, InstanceID: record.InstanceID, ActivationEpoch: lease.Epoch,
 		Ack:      persistence.InboxAck{InboxID: claim.Record.InboxID, MessageID: message.ID, LeaseToken: claim.LeaseToken, AckedAt: clock.now},
 		StreamID: record.StateStreamID, Events: []contract.StoredEvent{event}, Snapshot: &snapshot,
-		Outbox:  []persistence.OutboxRecord{{OutboxID: "outbox-1", Message: outgoing, Status: persistence.OutboxPending, CreatedAt: clock.now}},
-		Effects: []persistence.EffectRecord{{EffectID: "effect-1", SourceMessageID: message.ID, Type: "audit.write", Version: 1, ExecutorRef: "audit.local", IdempotencyKey: "audit:" + message.ID, Status: persistence.EffectPlanned, PlannedAt: clock.now}},
+		Outbox: []persistence.OutboxRecord{{OutboxID: "outbox-1", Message: outgoing, Status: persistence.OutboxPending, CreatedAt: clock.now}},
+		Effects: []persistence.EffectRecord{{
+			EffectID: "effect-1", SourceMessageID: message.ID, Type: "audit.write", Version: 1,
+			ExecutorRef: "audit.local", IdempotencyKey: "audit:" + message.ID,
+			Status: persistence.EffectPlanned, PlannedAt: clock.now, Deadline: timePointerValue(clock.now.Add(time.Hour)),
+			Metadata: map[string]string{"source": "test"},
+		}},
 	}
 	if _, err := store.Committer().CommitMessage(ctx, commit); err != nil {
 		t.Fatal(err)
 	}
 	return fixtureResult{record: record, lease: lease, commit: commit}
 }
+
+func timePointerValue(value time.Time) *time.Time { return &value }
 
 func openTestStore(t *testing.T, ctx context.Context, path string, clock *testClock) *Store {
 	t.Helper()

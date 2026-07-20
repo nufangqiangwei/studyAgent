@@ -22,19 +22,59 @@ type Store struct {
 	closed bool
 	serial uint64
 
-	events      map[contract.StreamID][]contract.StoredEvent
-	eventIDs    map[string]contract.StreamID
-	snapshots   map[contract.StreamID]contract.Snapshot
-	inbox       map[string]persistence.InboxRecord
-	inboxOrder  map[contract.MailboxID][]string
-	inboxDedupe map[string]string
-	outbox      map[string]persistence.OutboxRecord
-	outboxOrder []string
-	effects     map[string]persistence.EffectRecord
-	effectOrder []string
-	instances   map[contract.ServiceInstanceID]instance.Record
-	addresses   map[addressKey]contract.ServiceInstanceID
-	leases      map[contract.ServiceInstanceID]instance.ActivationLease
+	events           map[contract.StreamID][]contract.StoredEvent
+	eventIDs         map[string]contract.StreamID
+	snapshots        map[contract.StreamID]contract.Snapshot
+	inbox            map[string]persistence.InboxRecord
+	inboxOrder       map[contract.MailboxID][]string
+	inboxDedupe      map[string]string
+	outbox           map[string]persistence.OutboxRecord
+	outboxOrder      []string
+	effects          map[string]persistence.EffectRecord
+	effectOrder      []string
+	instances        map[contract.ServiceInstanceID]instance.Record
+	addresses        map[addressKey]contract.ServiceInstanceID
+	leases           map[contract.ServiceInstanceID]instance.ActivationLease
+	plans            map[planKey]persistence.PlanRecord
+	connections      map[string]persistence.ConnectionRecord
+	connectionKeys   map[connectionKey]string
+	messageSequences map[messageSequenceKey]messageSequence
+	messageHeads     map[messageStreamKey]uint64
+	inboxHeads       map[inboxStreamKey]uint64
+}
+
+type messageSequence struct {
+	runtime  contract.RuntimeID
+	stream   contract.StreamID
+	sequence uint64
+}
+
+type messageSequenceKey struct {
+	scope   string
+	message string
+}
+
+type messageStreamKey struct {
+	scope   string
+	runtime contract.RuntimeID
+	stream  contract.StreamID
+}
+
+type inboxStreamKey struct {
+	mailbox contract.MailboxID
+	stream  contract.StreamID
+}
+
+type planKey struct {
+	runtime  contract.RuntimeID
+	revision contract.PlanRevision
+}
+
+type connectionKey struct {
+	runtime  contract.RuntimeID
+	revision contract.PlanRevision
+	owner    contract.ServiceInstanceID
+	key      string
 }
 
 type addressKey struct {
@@ -48,29 +88,38 @@ func New(clock contract.Clock) *Store {
 		clock = systemClock{}
 	}
 	return &Store{
-		clock:       clock,
-		events:      make(map[contract.StreamID][]contract.StoredEvent),
-		eventIDs:    make(map[string]contract.StreamID),
-		snapshots:   make(map[contract.StreamID]contract.Snapshot),
-		inbox:       make(map[string]persistence.InboxRecord),
-		inboxOrder:  make(map[contract.MailboxID][]string),
-		inboxDedupe: make(map[string]string),
-		outbox:      make(map[string]persistence.OutboxRecord),
-		effects:     make(map[string]persistence.EffectRecord),
-		instances:   make(map[contract.ServiceInstanceID]instance.Record),
-		addresses:   make(map[addressKey]contract.ServiceInstanceID),
-		leases:      make(map[contract.ServiceInstanceID]instance.ActivationLease),
+		clock:            clock,
+		events:           make(map[contract.StreamID][]contract.StoredEvent),
+		eventIDs:         make(map[string]contract.StreamID),
+		snapshots:        make(map[contract.StreamID]contract.Snapshot),
+		inbox:            make(map[string]persistence.InboxRecord),
+		inboxOrder:       make(map[contract.MailboxID][]string),
+		inboxDedupe:      make(map[string]string),
+		outbox:           make(map[string]persistence.OutboxRecord),
+		effects:          make(map[string]persistence.EffectRecord),
+		instances:        make(map[contract.ServiceInstanceID]instance.Record),
+		addresses:        make(map[addressKey]contract.ServiceInstanceID),
+		leases:           make(map[contract.ServiceInstanceID]instance.ActivationLease),
+		plans:            make(map[planKey]persistence.PlanRecord),
+		connections:      make(map[string]persistence.ConnectionRecord),
+		connectionKeys:   make(map[connectionKey]string),
+		messageSequences: make(map[messageSequenceKey]messageSequence),
+		messageHeads:     make(map[messageStreamKey]uint64),
+		inboxHeads:       make(map[inboxStreamKey]uint64),
 	}
 }
 
-func (s *Store) Journal() persistence.JournalStore         { return s }
-func (s *Store) Snapshots() persistence.SnapshotStore      { return s }
-func (s *Store) Inbox() persistence.InboxStore             { return &inboxStore{owner: s} }
-func (s *Store) Outbox() persistence.OutboxStore           { return &outboxStore{owner: s} }
-func (s *Store) Effects() persistence.EffectStore          { return &effectStore{owner: s} }
-func (s *Store) Instances() instance.Store                 { return s }
-func (s *Store) Leases() instance.ActivationLeaseStore     { return s }
-func (s *Store) Committer() persistence.MessageCommitStore { return s }
+func (s *Store) Journal() persistence.JournalStore           { return s }
+func (s *Store) Snapshots() persistence.SnapshotStore        { return s }
+func (s *Store) Inbox() persistence.InboxStore               { return &inboxStore{owner: s} }
+func (s *Store) Outbox() persistence.OutboxStore             { return &outboxStore{owner: s} }
+func (s *Store) Effects() persistence.EffectStore            { return &effectStore{owner: s} }
+func (s *Store) Instances() instance.Store                   { return s }
+func (s *Store) Leases() instance.ActivationLeaseStore       { return s }
+func (s *Store) Committer() persistence.MessageCommitStore   { return s }
+func (s *Store) Plans() persistence.PlanStore                { return &planStore{owner: s} }
+func (s *Store) Sequences() persistence.MessageSequenceStore { return &sequenceStore{owner: s} }
+func (s *Store) Connections() persistence.ConnectionStore    { return &connectionStore{owner: s} }
 
 func (s *Store) Close() error {
 	if s == nil {

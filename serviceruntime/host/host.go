@@ -4,12 +4,12 @@ import (
 	"agent/serviceruntime/activation"
 	"agent/serviceruntime/building"
 	"agent/serviceruntime/contract"
+	"agent/serviceruntime/fault"
+	leaseguard "agent/serviceruntime/lease"
 	"agent/serviceruntime/persistence"
 	"agent/serviceruntime/request"
 	"agent/serviceruntime/service"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,18 +18,21 @@ import (
 )
 
 type ServiceHost struct {
-	plan        *building.RuntimePlan
-	definitions building.DefinitionResolver
-	activator   activation.Activator
-	storage     persistence.RuntimeStorage
-	ids         contract.IDGenerator
-	clock       contract.Clock
-	snapshots   SnapshotPolicy
-	observer    contract.RuntimeEventRecorder
-	ownerID     string
-	inboxLease  time.Duration
-	maxAttempts int
-	locks       *lockPool
+	plan            *building.RuntimePlan
+	plans           building.PlanResolver
+	definitions     building.DefinitionResolver
+	activator       activation.Activator
+	storage         persistence.RuntimeStorage
+	ids             contract.IDGenerator
+	clock           contract.Clock
+	snapshots       SnapshotPolicy
+	observer        contract.RuntimeEventRecorder
+	ownerID         string
+	inboxLease      time.Duration
+	activationLease time.Duration
+	maxAttempts     int
+	retryPolicy     fault.RetryPolicy
+	locks           *lockPool
 
 	mu       sync.RWMutex
 	started  bool
@@ -38,17 +41,20 @@ type ServiceHost struct {
 }
 
 type Options struct {
-	Plan        *building.RuntimePlan
-	Definitions building.DefinitionResolver
-	Activator   activation.Activator
-	Storage     persistence.RuntimeStorage
-	IDs         contract.IDGenerator
-	Clock       contract.Clock
-	Snapshots   SnapshotPolicy
-	Observer    contract.RuntimeEventRecorder
-	OwnerID     string
-	InboxLease  time.Duration
-	MaxAttempts int
+	Plan            *building.RuntimePlan
+	Plans           building.PlanResolver
+	Definitions     building.DefinitionResolver
+	Activator       activation.Activator
+	Storage         persistence.RuntimeStorage
+	IDs             contract.IDGenerator
+	Clock           contract.Clock
+	Snapshots       SnapshotPolicy
+	Observer        contract.RuntimeEventRecorder
+	OwnerID         string
+	InboxLease      time.Duration
+	ActivationLease time.Duration
+	MaxAttempts     int
+	RetryPolicy     fault.RetryPolicy
 }
 
 func New(options Options) (*ServiceHost, error) {
@@ -58,9 +64,15 @@ func New(options Options) (*ServiceHost, error) {
 	if options.OwnerID == "" {
 		return nil, fmt.Errorf("service host owner id is required")
 	}
+	if options.Plans == nil {
+		options.Plans = building.NewPlanCatalog(options.Plan)
+	}
 	policy := options.Plan.Recovery()
 	if options.InboxLease <= 0 {
 		options.InboxLease = policy.InboxLease
+	}
+	if options.ActivationLease <= 0 {
+		options.ActivationLease = policy.ActivationLease
 	}
 	if options.MaxAttempts <= 0 {
 		options.MaxAttempts = policy.MaxDeliveryAttempts
@@ -68,11 +80,15 @@ func New(options Options) (*ServiceHost, error) {
 	if options.Snapshots == nil {
 		options.Snapshots = EveryNEvents{N: policy.SnapshotEveryEvents}
 	}
+	if options.RetryPolicy == nil {
+		options.RetryPolicy = fault.ExponentialRetryPolicy{}
+	}
 	return &ServiceHost{
-		plan: options.Plan, definitions: options.Definitions, activator: options.Activator, storage: options.Storage,
+		plan: options.Plan, plans: options.Plans, definitions: options.Definitions, activator: options.Activator, storage: options.Storage,
 		ids: options.IDs, clock: options.Clock, snapshots: options.Snapshots,
 		observer: options.Observer, ownerID: options.OwnerID,
-		inboxLease: options.InboxLease, maxAttempts: options.MaxAttempts,
+		inboxLease: options.InboxLease, activationLease: options.ActivationLease,
+		maxAttempts: options.MaxAttempts, retryPolicy: options.RetryPolicy,
 		locks: newLockPool(),
 	}, nil
 }
@@ -162,6 +178,12 @@ func (h *ServiceHost) handleClaim(ctx context.Context, claim persistence.InboxCl
 	defer unlock()
 	message := claim.Record.Message
 	result := HandleResult{InstanceID: instanceID, MessageID: message.ID}
+	if message.Deadline != nil && !message.Deadline.After(h.now()) {
+		err := h.runtimeError(fault.Permanent, "handle_message", result, fmt.Errorf("message deadline has expired"))
+		_ = h.storage.Inbox().MoveToDeadLetter(ctx, claim, err)
+		result.Status = HandleDeadLetter
+		return result, err
+	}
 	active, err := h.activator.Activate(ctx, instanceID)
 	if err != nil {
 		return h.failClaim(ctx, claim, result, err)
@@ -169,17 +191,25 @@ func (h *ServiceHost) handleClaim(ctx context.Context, claim persistence.InboxCl
 	if active.Instance.RuntimeID != message.RuntimeID || active.Instance.PlanRevision != message.PlanRevision || active.Instance.MailboxID != claim.Record.MailboxID {
 		return h.failClaim(ctx, claim, result, fmt.Errorf("claimed message does not match the active service instance"))
 	}
+	heartbeat := leaseguard.Start(ctx, leaseguard.Interval(h.inboxLease, h.activationLease), func(renewCtx context.Context) error {
+		if renewErr := h.storage.Inbox().RenewClaim(renewCtx, claim, h.inboxLease); renewErr != nil {
+			return renewErr
+		}
+		return h.activator.Renew(renewCtx, instanceID)
+	})
+	defer heartbeat.Stop()
 	state, sequence := active.Current()
 	definition, found := h.definitions.ResolveDefinition(active.Instance.DefinitionRef)
 	if !found {
 		return h.failClaim(ctx, claim, result, fmt.Errorf("service definition %q not found", active.Instance.DefinitionRef.String()))
 	}
 	if err := validateConsumed(definition, message); err != nil {
+		err = h.runtimeError(fault.Validation, "validate_consumed", result, err)
 		_ = h.storage.Inbox().MoveToDeadLetter(ctx, claim, err)
 		result.Status = HandleDeadLetter
 		return result, err
 	}
-	handleCtx, cancelHandle := messageContext(ctx, message)
+	handleCtx, cancelHandle := messageContext(heartbeat.Context(), message)
 	defer cancelHandle()
 	handleCtx = request.WithMessageContext(handleCtx, message)
 	handleCtx = request.WithClient(handleCtx, active.Requests)
@@ -187,12 +217,23 @@ func (h *ServiceHost) handleClaim(ctx context.Context, claim persistence.InboxCl
 	if err != nil {
 		return h.failClaim(ctx, claim, result, err)
 	}
-	if err := decision.Validate(message, h.plan.KnowsEffect); err != nil {
+	if err := heartbeat.Err(); err != nil {
+		_ = h.activator.Passivate(ctx, instanceID)
+		result.Status = HandleStale
+		return h.failClaim(ctx, claim, result, fault.Wrap(fault.LeaseLost, "renew_handle_lease", err))
+	}
+	messagePlan, found := h.plans.ResolvePlan(message.RuntimeID, message.PlanRevision)
+	if !found {
+		return h.failClaim(ctx, claim, result, h.runtimeError(fault.Permanent, "resolve_message_plan", result, fmt.Errorf("plan revision %q is not available", message.PlanRevision)))
+	}
+	if err := decision.ValidateAt(message, messagePlan.KnowsEffect, h.now()); err != nil {
+		err = h.runtimeError(fault.Validation, "validate_decision", result, err)
 		_ = h.storage.Inbox().MoveToDeadLetter(ctx, claim, err)
 		result.Status = HandleDeadLetter
 		return result, err
 	}
 	if err := validateProduced(definition, decision); err != nil {
+		err = h.runtimeError(fault.Validation, "validate_produced", result, err)
 		_ = h.storage.Inbox().MoveToDeadLetter(ctx, claim, err)
 		result.Status = HandleDeadLetter
 		return result, err
@@ -215,11 +256,11 @@ func (h *ServiceHost) handleClaim(ctx context.Context, claim persistence.InboxCl
 			StreamID: active.Instance.StateStreamID, AggregateType: string(active.Instance.DefinitionRef.Type),
 			OwnerService: active.Instance.Address, PlanRevision: active.Instance.PlanRevision,
 			SchemaVersion: nextState.SchemaVersion, LastSequence: lastSequence,
-			State: contract.CloneRaw(nextState.Data), Checksum: checksum(nextState.Data), CreatedAt: now,
+			State: contract.CloneRaw(nextState.Data), Checksum: contract.StateChecksum(nextState.Data), CreatedAt: now,
 		}
 		snapshot = &value
 	}
-	commit, err := h.storage.Committer().CommitMessage(ctx, persistence.MessageCommit{
+	commit, err := h.storage.Committer().CommitMessage(heartbeat.Context(), persistence.MessageCommit{
 		RuntimeID: active.Instance.RuntimeID, PlanRevision: active.Instance.PlanRevision,
 		InstanceID: instanceID, ActivationEpoch: active.CurrentLease().Epoch,
 		Ack:      persistence.InboxAck{InboxID: claim.Record.InboxID, MessageID: message.ID, LeaseToken: claim.LeaseToken, AckedAt: now},
@@ -227,14 +268,17 @@ func (h *ServiceHost) handleClaim(ctx context.Context, claim persistence.InboxCl
 		Events: events, Snapshot: snapshot, Outbox: outbox, Effects: effects,
 	})
 	if err != nil {
-		if errors.Is(err, persistence.ErrStaleActivation) || errors.Is(err, persistence.ErrLeaseLost) {
+		err = h.classifyPersistenceError("commit_message", result, err)
+		kind := fault.KindOf(err)
+		if kind == fault.Conflict || kind == fault.StaleActivation || kind == fault.LeaseLost {
 			_ = h.activator.Passivate(ctx, instanceID)
+		}
+		if kind == fault.StaleActivation || kind == fault.LeaseLost {
 			result.Status = HandleStale
 		} else {
 			result.Status = HandleRetry
 		}
-		_ = h.storage.Inbox().ReleaseClaim(ctx, claim, now.Add(time.Second), err)
-		return result, err
+		return h.failClaim(ctx, claim, result, err)
 	}
 	if commit.Duplicate {
 		result.Status = HandleDuplicate
@@ -290,12 +334,20 @@ func (h *ServiceHost) materializeOutgoing(active *activation.Activation, input c
 		if streamID == "" {
 			streamID = input.StreamID
 		}
+		outgoingCorrelationID := outgoing.CorrelationID
+		if outgoingCorrelationID == "" {
+			outgoingCorrelationID = correlationID
+		}
+		outgoingCausationID := outgoing.CausationID
+		if outgoingCausationID == "" {
+			outgoingCausationID = input.ID
+		}
 		message := contract.Message{
 			ID: h.ids.Derive("message", input.ID, outgoing.Key), Kind: outgoing.Kind, Type: outgoing.Type, Version: outgoing.Version,
 			From: active.Instance.Address, To: outgoing.To, ReplyTo: outgoing.ReplyTo,
 			RuntimeID: input.RuntimeID, PlanRevision: input.PlanRevision,
 			UserID: input.UserID, GoalID: input.GoalID, RunID: input.RunID,
-			CorrelationID: correlationID, CausationID: input.ID, StreamID: streamID,
+			CorrelationID: outgoingCorrelationID, CausationID: outgoingCausationID, StreamID: streamID,
 			Deadline: cloneTime(outgoing.Deadline), Payload: contract.CloneRaw(outgoing.Payload), Metadata: contract.CloneStrings(outgoing.Metadata),
 		}
 		result = append(result, persistence.OutboxRecord{
@@ -339,20 +391,58 @@ func (h *ServiceHost) materializeEffects(active *activation.Activation, input co
 			SourceMessageID: input.ID, Type: decided.Type, Version: decided.Version,
 			ExecutorRef: decided.ExecutorRef, IdempotencyKey: decided.IdempotencyKey,
 			Status: persistence.EffectPlanned, Payload: contract.CloneRaw(decided.Payload), PlannedAt: now,
+			Deadline: cloneTime(decided.Deadline), Metadata: contract.CloneStrings(decided.Metadata),
 		})
 	}
 	return result
 }
 
 func (h *ServiceHost) failClaim(ctx context.Context, claim persistence.InboxClaim, result HandleResult, cause error) (HandleResult, error) {
-	result.Status = HandleRetry
-	if claim.Record.Attempt >= h.maxAttempts {
+	cause = h.classifyPersistenceError("handle_message", result, cause)
+	if fault.KindOf(cause) == fault.CorruptState {
+		_ = h.storage.Inbox().ReleaseClaim(ctx, claim, h.now(), cause)
+		result.Status = HandleCorrupt
+		return result, cause
+	}
+	decision := h.retryPolicy.DecideRetry(fault.RetryInput{
+		Error: cause, Attempt: claim.Record.Attempt, MaxAttempts: h.maxAttempts, Now: h.now(),
+	})
+	if !decision.Retry {
 		_ = h.storage.Inbox().MoveToDeadLetter(ctx, claim, cause)
 		result.Status = HandleDeadLetter
 	} else {
-		_ = h.storage.Inbox().ReleaseClaim(ctx, claim, h.now().Add(time.Duration(claim.Record.Attempt)*time.Second), cause)
+		_ = h.storage.Inbox().ReleaseClaim(ctx, claim, decision.RetryAt, cause)
+		if result.Status != HandleStale {
+			result.Status = HandleRetry
+		}
 	}
 	return result, cause
+}
+
+func (h *ServiceHost) classifyPersistenceError(operation string, result HandleResult, cause error) error {
+	var runtimeErr *fault.RuntimeError
+	if errors.As(cause, &runtimeErr) {
+		return cause
+	}
+	kind := fault.Retryable
+	switch {
+	case errors.Is(cause, persistence.ErrSequenceConflict), errors.Is(cause, persistence.ErrDuplicateID):
+		kind = fault.Conflict
+	case errors.Is(cause, persistence.ErrStaleActivation):
+		kind = fault.StaleActivation
+	case errors.Is(cause, persistence.ErrLeaseLost):
+		kind = fault.LeaseLost
+	}
+	return h.runtimeError(kind, operation, result, cause)
+}
+
+func (h *ServiceHost) runtimeError(kind fault.Kind, operation string, result HandleResult, cause error) error {
+	spec := h.plan.Runtime()
+	value := fault.New(kind, operation, cause)
+	value.RuntimeID = spec.ID
+	value.InstanceID = result.InstanceID
+	value.MessageID = result.MessageID
+	return value
 }
 
 func (h *ServiceHost) now() time.Time {
@@ -375,11 +465,6 @@ func (h *ServiceHost) record(ctx context.Context, eventType contract.RuntimeEven
 		InstanceID: active.Instance.InstanceID, ServiceAddress: active.Instance.Address,
 		MessageID: message.ID, StreamID: active.Instance.StateStreamID, Sequence: sequence, OccurredAt: h.now(),
 	})
-}
-
-func checksum(value []byte) string {
-	sum := sha256.Sum256(value)
-	return hex.EncodeToString(sum[:])
 }
 
 func cloneTime(value *time.Time) *time.Time {

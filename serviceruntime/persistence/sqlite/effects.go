@@ -5,16 +5,28 @@ import (
 	"agent/serviceruntime/persistence"
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"time"
 )
 
 const effectColumns = `effect_id, runtime_id, plan_revision, instance_id, source_message_id,
 	effect_type, version, executor_ref, idempotency_key, status, attempt, available_at,
-	payload, result, last_error, planned_at, started_at, completed_at, lease_owner, lease_token, lease_until`
+	payload, result, metadata, result_metadata, deadline, last_error, planned_at, started_at, completed_at,
+	lease_owner, lease_token, lease_until`
 
 type effectStore struct{ owner *Store }
+
+func (s *effectStore) RenewClaim(ctx context.Context, claim persistence.EffectClaim, lease time.Duration) error {
+	if lease <= 0 {
+		lease = time.Minute
+	}
+	result, err := s.owner.db.ExecContext(ctx, `UPDATE effects SET lease_until = ?
+		WHERE effect_id = ? AND lease_token = ?`, timeValue(s.owner.now().Add(lease)), claim.Record.EffectID, claim.LeaseToken)
+	if err != nil {
+		return err
+	}
+	return rowsChanged(result, persistence.ErrLeaseLost)
+}
 
 func (s *effectStore) ClaimNext(ctx context.Context, runtimeID contract.RuntimeID, ownerID string, lease time.Duration) (persistence.EffectClaim, bool, error) {
 	return s.owner.claimNextEffect(ctx, runtimeID, ownerID, lease)
@@ -34,11 +46,15 @@ func (s *effectStore) MarkStarted(ctx context.Context, claim persistence.EffectC
 	return rowsChanged(result, persistence.ErrLeaseLost)
 }
 
-func (s *effectStore) MarkSucceeded(ctx context.Context, claim persistence.EffectClaim, resultPayload json.RawMessage) error {
+func (s *effectStore) MarkSucceeded(ctx context.Context, claim persistence.EffectClaim, completion persistence.EffectResult) error {
 	now := s.owner.now()
-	result, err := s.owner.db.ExecContext(ctx, `UPDATE effects SET status = ?, result = ?, completed_at = ?,
+	metadata, err := encodeJSON(completion.Metadata)
+	if err != nil {
+		return err
+	}
+	result, err := s.owner.db.ExecContext(ctx, `UPDATE effects SET status = ?, result = ?, result_metadata = ?, completed_at = ?,
 		lease_owner = '', lease_token = '', lease_until = 0 WHERE effect_id = ? AND lease_token = ?`,
-		persistence.EffectSucceeded, []byte(resultPayload), timeValue(now), claim.Record.EffectID, claim.LeaseToken)
+		persistence.EffectSucceeded, []byte(completion.Payload), metadata, timeValue(now), claim.Record.EffectID, claim.LeaseToken)
 	if err != nil {
 		return err
 	}
@@ -163,17 +179,24 @@ type effectScanner interface {
 
 func scanEffect(scanner effectScanner) (persistence.EffectRecord, error) {
 	var record persistence.EffectRecord
-	var availableAt, plannedAt, startedAt, completedAt, leaseUntil int64
-	var payload, result []byte
+	var availableAt, deadline, plannedAt, startedAt, completedAt, leaseUntil int64
+	var payload, result, metadata, resultMetadata []byte
 	err := scanner.Scan(&record.EffectID, &record.RuntimeID, &record.PlanRevision, &record.InstanceID,
 		&record.SourceMessageID, &record.Type, &record.Version, &record.ExecutorRef, &record.IdempotencyKey,
-		&record.Status, &record.Attempt, &availableAt, &payload, &result, &record.LastError,
+		&record.Status, &record.Attempt, &availableAt, &payload, &result, &metadata, &resultMetadata, &deadline, &record.LastError,
 		&plannedAt, &startedAt, &completedAt, &record.LeaseOwner, &record.LeaseToken, &leaseUntil)
 	if err != nil {
 		return persistence.EffectRecord{}, err
 	}
 	record.AvailableAt, record.PlannedAt = timeFromValue(availableAt), timeFromValue(plannedAt)
 	record.StartedAt, record.CompletedAt, record.LeaseUntil = timePointer(startedAt), timePointer(completedAt), timePointer(leaseUntil)
+	record.Deadline = timePointer(deadline)
 	record.Payload, record.Result = contract.CloneRaw(payload), contract.CloneRaw(result)
+	if err := decodeJSON(metadata, &record.Metadata); err != nil {
+		return persistence.EffectRecord{}, err
+	}
+	if err := decodeJSON(resultMetadata, &record.ResultMetadata); err != nil {
+		return persistence.EffectRecord{}, err
+	}
 	return record.Clone(), nil
 }

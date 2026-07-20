@@ -8,4 +8,5 @@ var (
 	ErrLeaseLost        = errors.New("lease lost")
 	ErrDuplicateID      = errors.New("durable id conflict")
 	ErrClosed           = errors.New("runtime storage is closed")
+	ErrPlanConflict     = errors.New("runtime plan revision conflict")
 )

@@ -3,7 +3,9 @@ package transport
 import (
 	"agent/serviceruntime/building"
 	"agent/serviceruntime/contract"
+	"agent/serviceruntime/fault"
 	"agent/serviceruntime/instance"
+	leaseguard "agent/serviceruntime/lease"
 	"agent/serviceruntime/persistence"
 	"context"
 	"errors"
@@ -64,15 +66,17 @@ type ReplySink interface {
 
 type Bus struct {
 	plan        *building.RuntimePlan
-	router      building.RoutingTable
+	plans       building.PlanResolver
 	resolver    instance.AddressResolver
 	inbox       persistence.InboxStore
 	outbox      persistence.OutboxStore
+	sequences   persistence.MessageSequenceStore
 	clock       contract.Clock
 	observer    contract.RuntimeEventRecorder
 	ids         contract.IDGenerator
 	outboxLease time.Duration
 	maxAttempts int
+	retryPolicy fault.RetryPolicy
 	replySink   ReplySink
 
 	mu   sync.RWMutex
@@ -81,20 +85,26 @@ type Bus struct {
 
 type Options struct {
 	Plan        *building.RuntimePlan
+	Plans       building.PlanResolver
 	Resolver    instance.AddressResolver
 	Inbox       persistence.InboxStore
 	Outbox      persistence.OutboxStore
+	Sequences   persistence.MessageSequenceStore
 	Clock       contract.Clock
 	Observer    contract.RuntimeEventRecorder
 	IDs         contract.IDGenerator
 	OutboxLease time.Duration
 	MaxAttempts int
+	RetryPolicy fault.RetryPolicy
 	ReplySink   ReplySink
 }
 
 func New(options Options) (*Bus, error) {
-	if options.Plan == nil || options.Resolver == nil || options.Inbox == nil || options.Outbox == nil {
+	if options.Plan == nil || options.Resolver == nil || options.Inbox == nil || options.Outbox == nil || options.Sequences == nil {
 		return nil, fmt.Errorf("event bus requires plan, resolver, inbox and outbox")
+	}
+	if options.Plans == nil {
+		options.Plans = building.NewPlanCatalog(options.Plan)
 	}
 	policy := options.Plan.Recovery()
 	if options.OutboxLease <= 0 {
@@ -103,11 +113,14 @@ func New(options Options) (*Bus, error) {
 	if options.MaxAttempts <= 0 {
 		options.MaxAttempts = policy.MaxDeliveryAttempts
 	}
+	if options.RetryPolicy == nil {
+		options.RetryPolicy = fault.ExponentialRetryPolicy{}
+	}
 	return &Bus{
-		plan: options.Plan, router: options.Plan.Routing(), resolver: options.Resolver,
-		inbox: options.Inbox, outbox: options.Outbox, clock: options.Clock,
+		plan: options.Plan, plans: options.Plans, resolver: options.Resolver,
+		inbox: options.Inbox, outbox: options.Outbox, sequences: options.Sequences, clock: options.Clock,
 		observer: options.Observer, ids: options.IDs,
-		outboxLease: options.OutboxLease, maxAttempts: options.MaxAttempts,
+		outboxLease: options.OutboxLease, maxAttempts: options.MaxAttempts, retryPolicy: options.RetryPolicy,
 		replySink: options.ReplySink,
 		mode:      DeliveryPaused,
 	}, nil
@@ -156,34 +169,46 @@ func (b *Bus) Publish(ctx context.Context, message contract.Message) (PublishRes
 		return PublishResult{}, ErrDeliveryPaused
 	}
 	if err := message.Validate(); err != nil {
-		return PublishResult{}, err
+		return PublishResult{}, fault.Wrap(fault.Validation, "validate_message", err)
 	}
 	spec := b.plan.Runtime()
-	if message.RuntimeID != spec.ID || message.PlanRevision != spec.Revision {
-		return PublishResult{}, fmt.Errorf("message runtime or plan revision does not match the event bus plan")
+	if message.RuntimeID != spec.ID {
+		return PublishResult{}, fault.Wrap(fault.Validation, "validate_message_runtime", fmt.Errorf("message runtime does not match the event bus runtime"))
+	}
+	messagePlan, found := b.plans.ResolvePlan(message.RuntimeID, message.PlanRevision)
+	if !found {
+		return PublishResult{}, fault.Wrap(fault.Permanent, "resolve_message_plan", fmt.Errorf("message plan revision %q is not available", message.PlanRevision))
 	}
 	if message.Kind == contract.MessageReply && b.replySink != nil && message.To == b.replySink.Address() {
-		if err := b.replySink.DeliverReply(ctx, message); err != nil {
+		assigned, assignErr := b.sequences.Assign(ctx, "reply/"+string(message.To), message)
+		if assignErr != nil {
+			return PublishResult{}, fault.Wrap(fault.Conflict, "assign_reply_sequence", assignErr)
+		}
+		if err := b.replySink.DeliverReply(ctx, assigned); err != nil {
 			return PublishResult{MessageID: message.ID}, err
 		}
-		b.record(ctx, contract.RuntimeDeliveryCompleted, message, map[string]string{"reply_sink": string(message.To)})
+		b.record(ctx, contract.RuntimeDeliveryCompleted, assigned, map[string]string{"reply_sink": string(message.To)})
 		return PublishResult{MessageID: message.ID, Targets: []DeliveryReceipt{{Address: message.To, Accepted: true}}}, nil
 	}
-	addresses, err := b.router.Resolve(message)
+	addresses, err := messagePlan.Routing().Resolve(message)
 	if err != nil {
-		return PublishResult{}, err
+		return PublishResult{}, fault.Wrap(fault.Permanent, "resolve_message_route", err)
 	}
 	targets := make([]instance.DeliveryTarget, 0, len(addresses))
 	for _, address := range addresses {
 		target, resolveErr := b.resolver.ResolveAddress(ctx, message.RuntimeID, message.PlanRevision, address)
 		if resolveErr != nil {
-			return PublishResult{}, resolveErr
+			return PublishResult{}, fault.Wrap(fault.NotFound, "resolve_delivery_target", resolveErr)
 		}
 		targets = append(targets, target)
 	}
 	result := PublishResult{MessageID: message.ID, Targets: make([]DeliveryReceipt, 0, len(targets))}
 	for _, target := range targets {
-		_, duplicate, enqueueErr := b.inbox.Enqueue(ctx, target, message)
+		assigned, assignErr := b.sequences.Assign(ctx, "mailbox/"+string(target.MailboxID), message)
+		if assignErr != nil {
+			return result, fault.Wrap(fault.Conflict, "assign_message_sequence", fmt.Errorf("target %q: %w", target.Address, assignErr))
+		}
+		_, duplicate, enqueueErr := b.inbox.Enqueue(ctx, target, assigned)
 		receipt := DeliveryReceipt{Address: target.Address, InstanceID: target.InstanceID, MailboxID: target.MailboxID, Accepted: enqueueErr == nil, Duplicate: duplicate}
 		result.Targets = append(result.Targets, receipt)
 		if duplicate {
@@ -209,7 +234,14 @@ func (b *Bus) DispatchNextOutbox(ctx context.Context, ownerID string) (DispatchR
 	if err != nil || !ok {
 		return DispatchResult{Idle: !ok}, err
 	}
-	published, publishErr := b.Publish(ctx, claim.Record.Message)
+	heartbeat := leaseguard.Start(ctx, leaseguard.Interval(b.outboxLease), func(renewCtx context.Context) error {
+		return b.outbox.RenewClaim(renewCtx, claim, b.outboxLease)
+	})
+	defer heartbeat.Stop()
+	published, publishErr := b.Publish(heartbeat.Context(), claim.Record.Message)
+	if publishErr == nil && heartbeat.Err() != nil {
+		publishErr = fmt.Errorf("renew outbox claim: %w", heartbeat.Err())
+	}
 	result := DispatchResult{OutboxID: claim.Record.OutboxID, MessageID: claim.Record.Message.ID}
 	for _, receipt := range published.Targets {
 		if !receipt.Accepted {
@@ -224,11 +256,11 @@ func (b *Bus) DispatchNextOutbox(ctx context.Context, ownerID string) (DispatchR
 		err = b.outbox.MarkDelivered(ctx, claim, persistence.DeliverySummary{MessageID: result.MessageID, Delivered: result.Delivered, Duplicate: result.Duplicate, Failed: result.Failed})
 		return result, err
 	}
-	if claim.Record.Attempt >= b.maxAttempts {
+	retry := b.retryPolicy.DecideRetry(fault.RetryInput{Error: publishErr, Attempt: claim.Record.Attempt, MaxAttempts: b.maxAttempts, Now: b.now()})
+	if !retry.Retry {
 		err = b.outbox.MoveToDeadLetter(ctx, claim, publishErr)
 	} else {
-		retryAt := b.now().Add(time.Duration(claim.Record.Attempt) * time.Second)
-		err = b.outbox.MarkRetry(ctx, claim, retryAt, publishErr)
+		err = b.outbox.MarkRetry(ctx, claim, retry.RetryAt, publishErr)
 	}
 	if err != nil {
 		return result, err

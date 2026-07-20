@@ -4,16 +4,34 @@ import (
 	"agent/serviceruntime/building"
 	"agent/serviceruntime/contract"
 	"agent/serviceruntime/effect"
+	"agent/serviceruntime/host"
+	"agent/serviceruntime/instance"
 	"agent/serviceruntime/persistence"
 	"agent/serviceruntime/persistence/memory"
 	"agent/serviceruntime/service"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
 	"time"
 )
+
+type conflictOnceStore struct {
+	persistence.RuntimeStorage
+	failed bool
+}
+
+func (s *conflictOnceStore) Committer() persistence.MessageCommitStore { return s }
+
+func (s *conflictOnceStore) CommitMessage(ctx context.Context, commit persistence.MessageCommit) (persistence.CommitResult, error) {
+	if !s.failed {
+		s.failed = true
+		return persistence.CommitResult{}, persistence.ErrSequenceConflict
+	}
+	return s.RuntimeStorage.Committer().CommitMessage(ctx, commit)
+}
 
 var (
 	counterRef = contract.ComponentRef{Type: "test.counter", Version: "v1"}
@@ -139,7 +157,7 @@ func TestRuntimeEndToEndAndRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.InstancesActivated != 2 || first.Status() != RuntimeLive {
+	if report.InstancesActivated != 3 || first.Status() != RuntimeLive {
 		t.Fatalf("recovery report=%#v status=%q", report, first.Status())
 	}
 	payload := json.RawMessage(`{"amount":2}`)
@@ -192,7 +210,7 @@ func TestRuntimeEndToEndAndRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if recovered.StreamsRestored != 2 {
+	if recovered.StreamsRestored != 3 {
 		t.Fatalf("recovered = %#v", recovered)
 	}
 	if _, err := second.Publish(ctx, contract.Message{Kind: contract.MessageCommand, Type: "counter.increment", Version: 1, Payload: json.RawMessage(`{"amount":3}`)}); err != nil {
@@ -266,6 +284,160 @@ func TestRuntimeDeclaresAndAddressesVirtualInstances(t *testing.T) {
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSequenceConflictPassivatesAndRestoresBeforeRetry(t *testing.T) {
+	ctx := context.Background()
+	clock := &fixedClock{now: time.Date(2026, 7, 19, 10, 0, 0, 0, time.UTC)}
+	store := &conflictOnceStore{RuntimeStorage: memory.New(clock)}
+	var auditCalls int
+	builder := newTestBuilder(t, store, clock, &auditCalls)
+	runtime, err := builder.Build(ctx, testManifest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	if _, err := runtime.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Publish(ctx, contract.Message{Kind: contract.MessageCommand, Type: "counter.increment", Version: 1, Payload: json.RawMessage(`{"amount":1}`)}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := runtime.HandleNext(ctx, "counter.main")
+	if !errors.Is(err, persistence.ErrSequenceConflict) || first.Status != host.HandleRetry {
+		t.Fatalf("first result=%#v err=%v", first, err)
+	}
+	if _, active := runtime.activator.Lookup(first.InstanceID); active {
+		t.Fatal("conflicting activation must be passivated before retry")
+	}
+	second, err := runtime.HandleNext(ctx, "counter.main")
+	if err != nil || second.Status != host.HandleCommitted || second.LastSequence != 1 {
+		t.Fatalf("second result=%#v err=%v", second, err)
+	}
+}
+
+func TestRuntimeClosePassivatesActivationsAndReleasesLeases(t *testing.T) {
+	ctx := context.Background()
+	clock := &fixedClock{now: time.Date(2026, 7, 19, 10, 0, 0, 0, time.UTC)}
+	store := memory.New(clock)
+	var auditCalls int
+	builder := newTestBuilder(t, store, clock, &auditCalls)
+	runtime, err := builder.Build(ctx, testManifest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	record, found, err := store.Instances().GetByAddress(ctx, "test-runtime", "v1", "counter.main")
+	if err != nil || !found {
+		t.Fatalf("record found=%v err=%v", found, err)
+	}
+	if _, found, err := store.Leases().Current(ctx, record.InstanceID); err != nil || !found {
+		t.Fatalf("active lease found=%v err=%v", found, err)
+	}
+	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := store.Leases().Current(ctx, record.InstanceID); err != nil || found {
+		t.Fatalf("lease remains after close: found=%v err=%v", found, err)
+	}
+	record, _, _ = store.Instances().Get(ctx, record.InstanceID)
+	if record.Lifecycle != instance.Passivated {
+		t.Fatalf("lifecycle=%q, want passivated", record.Lifecycle)
+	}
+}
+
+func TestRuntimeRejectsChangedManifestForExistingRevision(t *testing.T) {
+	ctx := context.Background()
+	clock := &fixedClock{now: time.Date(2026, 7, 19, 10, 0, 0, 0, time.UTC)}
+	store := memory.New(clock)
+	var auditCalls int
+	firstBuilder := newTestBuilder(t, store, clock, &auditCalls)
+	first, err := firstBuilder.Build(ctx, testManifest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	changed := testManifest()
+	changed.Recovery.MaxDeliveryAttempts++
+	secondBuilder := newTestBuilder(t, store, clock, &auditCalls)
+	if _, err := secondBuilder.Build(ctx, changed); !errors.Is(err, persistence.ErrPlanConflict) {
+		t.Fatalf("error=%v, want plan revision conflict", err)
+	}
+}
+
+func TestRuntimeRecoversOldRevisionOutboxWithOldRouting(t *testing.T) {
+	ctx := context.Background()
+	clock := &fixedClock{now: time.Date(2026, 7, 19, 10, 0, 0, 0, time.UTC)}
+	store := memory.New(clock)
+	var auditCalls int
+	firstBuilder := newTestBuilder(t, store, clock, &auditCalls)
+	first, err := firstBuilder.Build(ctx, testManifest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.Publish(ctx, contract.Message{Kind: contract.MessageCommand, Type: "counter.increment", Version: 1, Payload: json.RawMessage(`{"amount":2}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.HandleNext(ctx, "counter.main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	manifestV2 := testManifest()
+	manifestV2.Runtime.Revision = "v2"
+	secondBuilder := newTestBuilder(t, store, clock, &auditCalls)
+	second, err := secondBuilder.Build(ctx, manifestV2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if _, err := second.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	dispatched, err := second.DispatchNextOutbox(ctx)
+	if err != nil || dispatched.Delivered != 1 {
+		t.Fatalf("dispatch=%#v err=%v", dispatched, err)
+	}
+	oldSink, found, err := store.Instances().GetByAddress(ctx, "test-runtime", "v1", "sink.main")
+	if err != nil || !found {
+		t.Fatalf("old sink found=%v err=%v", found, err)
+	}
+	result, err := second.host.HandleNext(ctx, oldSink.InstanceID)
+	if err != nil || result.Status != host.HandleCommitted {
+		t.Fatalf("old revision sink result=%#v err=%v", result, err)
+	}
+}
+
+func TestRuntimeUsesFrozenDefinitionCatalog(t *testing.T) {
+	ctx := context.Background()
+	clock := &fixedClock{now: time.Date(2026, 7, 19, 10, 0, 0, 0, time.UTC)}
+	store := memory.New(clock)
+	var auditCalls int
+	builder := newTestBuilder(t, store, clock, &auditCalls)
+	runtime, err := builder.Build(ctx, testManifest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	lateRef := contract.ComponentRef{Type: "late", Version: "v1"}
+	if err := builder.RegisterService(building.ServiceDefinition{
+		Component: lateRef, Factory: service.FactoryFunc(func(context.Context, service.CreateRequest) (service.Service, error) { return virtualService{}, nil }),
+		Scope: building.ScopeVirtual,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.DeclareInstance(ctx, InstanceDeclaration{Address: "late.1", Component: lateRef}); err == nil {
+		t.Fatal("runtime accepted a definition registered after plan compilation")
 	}
 }
 

@@ -80,9 +80,22 @@ type Client struct {
 	sender         Sender
 	broker         *Broker
 	defaultTimeout time.Duration
+	driverOnly     bool
+}
+
+// NewDriverClient returns a client that can only operate through a request
+// driver installed in the call context. It has no Sender, ID generator, or
+// Reply broker, so a wrapped service cannot bypass its adapter and publish
+// directly by retaining the injected client.
+func NewDriverClient() *Client {
+	return &Client{driverOnly: true}
 }
 
 type CallSpec struct {
+	// Key is a stable name for this call inside a durable workflow. Ordinary
+	// in-process clients may leave it empty; a workflow driver then assigns a
+	// deterministic call-order key.
+	Key      string
 	Kind     contract.MessageKind
 	Type     contract.MessageType
 	Version  int
@@ -109,10 +122,28 @@ func (c *Client) CommandVersion(ctx context.Context, target contract.ServiceAddr
 	return c.callValue(ctx, contract.MessageCommand, target, messageType, version, input, output)
 }
 
+// QueryKey is the durable-workflow form of Query. Key must remain stable
+// across retries and replays of the same service message.
+func (c *Client) QueryKey(ctx context.Context, key string, target contract.ServiceAddress, messageType contract.MessageType, input, output interface{}) error {
+	return c.callValueKey(ctx, key, contract.MessageQuery, target, messageType, 1, input, output)
+}
+
+// CommandKey is the durable-workflow form of Command. Key must remain stable
+// across retries and replays of the same service message.
+func (c *Client) CommandKey(ctx context.Context, key string, target contract.ServiceAddress, messageType contract.MessageType, input, output interface{}) error {
+	return c.callValueKey(ctx, key, contract.MessageCommand, target, messageType, 1, input, output)
+}
+
 // Call sends a prepared command/query and waits for a reply.
 func (c *Client) Call(ctx context.Context, spec CallSpec, output interface{}) error {
 	if spec.Kind != contract.MessageCommand && spec.Kind != contract.MessageQuery {
 		return fmt.Errorf("synchronous request kind must be command or query")
+	}
+	if handled, err := awaitCall(ctx, spec, output); handled {
+		return err
+	}
+	if c != nil && c.driverOnly {
+		return fmt.Errorf("request driver is not available in this context")
 	}
 	ctx, cancel := c.callContext(ctx)
 	defer cancel()
@@ -171,6 +202,9 @@ func (c *Client) Dispatch(ctx context.Context, spec CallSpec) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if c != nil && c.driverOnly {
+		return fmt.Errorf("direct dispatch is disabled; return service.Decision.Outgoing")
+	}
 	message, err := c.newMessage(ctx, spec)
 	if err != nil {
 		return err
@@ -190,11 +224,15 @@ func (c *Client) callContext(ctx context.Context) (context.Context, context.Canc
 }
 
 func (c *Client) callValue(ctx context.Context, kind contract.MessageKind, target contract.ServiceAddress, messageType contract.MessageType, version int, input, output interface{}) error {
+	return c.callValueKey(ctx, "", kind, target, messageType, version, input, output)
+}
+
+func (c *Client) callValueKey(ctx context.Context, key string, kind contract.MessageKind, target contract.ServiceAddress, messageType contract.MessageType, version int, input, output interface{}) error {
 	payload, err := encodePayload(input)
 	if err != nil {
 		return err
 	}
-	return c.Call(ctx, CallSpec{Kind: kind, Type: messageType, Version: version, To: target, Payload: payload}, output)
+	return c.Call(ctx, CallSpec{Key: key, Kind: kind, Type: messageType, Version: version, To: target, Payload: payload}, output)
 }
 
 func (c *Client) dispatchValue(ctx context.Context, kind contract.MessageKind, target contract.ServiceAddress, messageType contract.MessageType, version int, input interface{}) error {
@@ -206,9 +244,6 @@ func (c *Client) dispatchValue(ctx context.Context, kind contract.MessageKind, t
 }
 
 func (c *Client) dispatchReply(ctx context.Context, original contract.Message, messageType contract.MessageType, version int, payload json.RawMessage) error {
-	if c == nil || c.ids == nil || c.sender == nil {
-		return fmt.Errorf("request client is not configured")
-	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -220,6 +255,12 @@ func (c *Client) dispatchReply(ctx context.Context, original contract.Message, m
 	}
 	if messageType == "" || version <= 0 {
 		return fmt.Errorf("reply type and positive version are required")
+	}
+	if c != nil && c.driverOnly {
+		return fmt.Errorf("immediate reply is disabled; return service.Decision.Reply")
+	}
+	if c == nil || c.ids == nil || c.sender == nil {
+		return fmt.Errorf("request client is not configured")
 	}
 	id, err := c.ids.New("reply")
 	if err != nil {
@@ -347,6 +388,22 @@ func Command(ctx context.Context, target contract.ServiceAddress, messageType co
 		return fmt.Errorf("request client is not available in the service context")
 	}
 	return client.Command(ctx, target, messageType, input, output)
+}
+
+func QueryKey(ctx context.Context, key string, target contract.ServiceAddress, messageType contract.MessageType, input, output interface{}) error {
+	client, ok := FromContext(ctx)
+	if !ok {
+		return fmt.Errorf("request client is not available in the service context")
+	}
+	return client.QueryKey(ctx, key, target, messageType, input, output)
+}
+
+func CommandKey(ctx context.Context, key string, target contract.ServiceAddress, messageType contract.MessageType, input, output interface{}) error {
+	client, ok := FromContext(ctx)
+	if !ok {
+		return fmt.Errorf("request client is not available in the service context")
+	}
+	return client.CommandKey(ctx, key, target, messageType, input, output)
 }
 
 func Event(ctx context.Context, messageType contract.MessageType, input interface{}) error {

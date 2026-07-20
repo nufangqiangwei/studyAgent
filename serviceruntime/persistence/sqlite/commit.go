@@ -21,11 +21,12 @@ func (s *Store) CommitMessage(ctx context.Context, commit persistence.MessageCom
 
 	var storedMessageID string
 	var storedInstanceID contract.ServiceInstanceID
+	var storedMailboxID contract.MailboxID
 	var inboxStatus persistence.InboxStatus
 	var inboxLeaseToken string
 	var storedMessage []byte
-	err = tx.QueryRowContext(ctx, `SELECT instance_id, message_id, message, status, lease_token FROM inbox WHERE inbox_id = ?`, commit.Ack.InboxID).
-		Scan(&storedInstanceID, &storedMessageID, &storedMessage, &inboxStatus, &inboxLeaseToken)
+	err = tx.QueryRowContext(ctx, `SELECT instance_id, mailbox_id, message_id, message, status, lease_token FROM inbox WHERE inbox_id = ?`, commit.Ack.InboxID).
+		Scan(&storedInstanceID, &storedMailboxID, &storedMessageID, &storedMessage, &inboxStatus, &inboxLeaseToken)
 	if err == sql.ErrNoRows || storedMessageID != commit.Ack.MessageID || storedInstanceID != commit.InstanceID {
 		return persistence.CommitResult{}, fmt.Errorf("inbox acknowledgement does not match a stored message")
 	}
@@ -48,6 +49,9 @@ func (s *Store) CommitMessage(ctx context.Context, commit persistence.MessageCom
 	}
 	if inboxStatus != persistence.InboxClaimed || inboxLeaseToken != commit.Ack.LeaseToken {
 		return persistence.CommitResult{}, persistence.ErrLeaseLost
+	}
+	if err := advanceInboxHeadTx(ctx, tx, storedMailboxID, inboxMessage); err != nil {
+		return persistence.CommitResult{}, err
 	}
 
 	var runtimeID contract.RuntimeID
@@ -171,13 +175,22 @@ func (s *Store) CommitMessage(ctx context.Context, commit persistence.MessageCom
 		if record.PlannedAt.IsZero() {
 			record.PlannedAt = now
 		}
+		metadata, err := encodeJSON(record.Metadata)
+		if err != nil {
+			return persistence.CommitResult{}, err
+		}
+		resultMetadata, err := encodeJSON(record.ResultMetadata)
+		if err != nil {
+			return persistence.CommitResult{}, err
+		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO effects(effect_id, runtime_id, plan_revision, instance_id,
 			source_message_id, effect_type, version, executor_ref, idempotency_key, status, attempt,
-			available_at, payload, result, last_error, planned_at, started_at, completed_at,
-			lease_owner, lease_token, lease_until) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			available_at, payload, result, metadata, result_metadata, deadline, last_error, planned_at, started_at, completed_at,
+			lease_owner, lease_token, lease_until) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			record.EffectID, commit.RuntimeID, commit.PlanRevision, commit.InstanceID, record.SourceMessageID,
 			record.Type, record.Version, record.ExecutorRef, record.IdempotencyKey, record.Status, record.Attempt,
-			timeValue(record.AvailableAt), []byte(record.Payload), []byte(record.Result), record.LastError,
+			timeValue(record.AvailableAt), []byte(record.Payload), []byte(record.Result), metadata, resultMetadata,
+			timeValuePointer(record.Deadline), record.LastError,
 			timeValue(record.PlannedAt), timeValuePointer(record.StartedAt), timeValuePointer(record.CompletedAt),
 			record.LeaseOwner, record.LeaseToken, timeValuePointer(record.LeaseUntil)); err != nil {
 			return persistence.CommitResult{}, fmt.Errorf("insert effect %q: %w", record.EffectID, err)

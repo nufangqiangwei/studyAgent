@@ -14,6 +14,7 @@ const (
 	HandleRetry      HandleStatus = "retry"
 	HandleDeadLetter HandleStatus = "dead_letter"
 	HandleStale      HandleStatus = "stale_activation"
+	HandleCorrupt    HandleStatus = "corrupt_state"
 )
 
 type HandleResult struct {

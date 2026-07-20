@@ -29,18 +29,20 @@ const (
 )
 
 type Report struct {
-	RuntimeID          contract.RuntimeID
-	PlanRevision       contract.PlanRevision
-	InstancesLoaded    int
-	StreamsRestored    int
-	EventsReplayed     int
-	PendingInbox       int
-	PendingOutbox      int
-	EffectsReconciled  int
-	InstancesActivated int
-	StartedAt          time.Time
-	CompletedAt        time.Time
-	Warnings           []string
+	RuntimeID           contract.RuntimeID
+	PlanRevision        contract.PlanRevision
+	InstancesLoaded     int
+	StreamsRestored     int
+	EventsReplayed      int
+	PendingInbox        int
+	PendingOutbox       int
+	EffectsReconciled   int
+	InstancesActivated  int
+	ConnectionsRestored int
+	ConnectionsFailed   int
+	StartedAt           time.Time
+	CompletedAt         time.Time
+	Warnings            []string
 }
 
 type Manager interface {
@@ -49,6 +51,7 @@ type Manager interface {
 
 type Coordinator struct {
 	storage   persistence.RuntimeStorage
+	plans     building.PlanResolver
 	directory instance.InstanceDirectory
 	activator activation.Activator
 	effects   effect.Worker
@@ -61,6 +64,7 @@ type Coordinator struct {
 
 type Options struct {
 	Storage   persistence.RuntimeStorage
+	Plans     building.PlanResolver
 	Directory instance.InstanceDirectory
 	Activator activation.Activator
 	Effects   effect.Worker
@@ -75,11 +79,14 @@ func New(options Options) (*Coordinator, error) {
 	if options.Storage == nil || options.Directory == nil || options.Activator == nil || options.Effects == nil || options.Bus == nil {
 		return nil, fmt.Errorf("recovery coordinator requires storage, directory, activator, effect worker and event bus")
 	}
+	if options.Plans == nil {
+		return nil, fmt.Errorf("recovery coordinator requires a runtime plan catalog")
+	}
 	if options.OwnerID == "" {
 		return nil, fmt.Errorf("recovery owner id is required")
 	}
 	return &Coordinator{
-		storage: options.Storage, directory: options.Directory, activator: options.Activator,
+		storage: options.Storage, plans: options.Plans, directory: options.Directory, activator: options.Activator,
 		effects: options.Effects, bus: options.Bus, observer: options.Observer,
 		ids: options.IDs, clock: options.Clock, ownerID: options.OwnerID,
 	}, nil
@@ -94,11 +101,16 @@ func (c *Coordinator) Recover(ctx context.Context, plan *building.RuntimePlan) (
 	if err := c.bus.Pause(ctx); err != nil {
 		return report, err
 	}
-	records, err := c.storage.Instances().List(ctx, instance.Query{RuntimeID: spec.ID, PlanRevision: spec.Revision})
+	records, err := c.storage.Instances().List(ctx, instance.Query{RuntimeID: spec.ID})
 	if err != nil {
 		return report, err
 	}
 	report.InstancesLoaded = len(records)
+	for _, record := range records {
+		if _, found := c.plans.ResolvePlan(record.RuntimeID, record.PlanRevision); !found {
+			return report, fmt.Errorf("service instance %q references unavailable plan revision %q", record.InstanceID, record.PlanRevision)
+		}
+	}
 	for index := range records {
 		if records[index].Lifecycle != instance.Active {
 			continue

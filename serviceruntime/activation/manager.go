@@ -3,10 +3,14 @@ package activation
 import (
 	"agent/serviceruntime/building"
 	"agent/serviceruntime/contract"
+	"agent/serviceruntime/fault"
 	"agent/serviceruntime/instance"
+	leaseguard "agent/serviceruntime/lease"
+	"agent/serviceruntime/persistence"
 	"agent/serviceruntime/request"
 	"agent/serviceruntime/service"
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -68,12 +72,15 @@ func (a *Activation) CommitState(state service.State, sequence uint64) {
 type Activator interface {
 	Activate(ctx context.Context, instanceID contract.ServiceInstanceID) (*Activation, error)
 	Lookup(instanceID contract.ServiceInstanceID) (*Activation, bool)
+	Renew(ctx context.Context, instanceID contract.ServiceInstanceID) error
 	Passivate(ctx context.Context, instanceID contract.ServiceInstanceID) error
+	PassivateAll(ctx context.Context) error
 	Terminate(ctx context.Context, instanceID contract.ServiceInstanceID) error
 }
 
 type Manager struct {
 	plan        *building.RuntimePlan
+	plans       building.PlanResolver
 	definitions building.DefinitionResolver
 	instances   instance.Store
 	leases      instance.ActivationLeaseStore
@@ -81,15 +88,20 @@ type Manager struct {
 	ownerID     string
 	leaseTTL    time.Duration
 	clock       contract.Clock
-	requests    *request.ClientFactory
+	requests    RequestClientResolver
 	opMu        sync.Mutex
 
 	mu     sync.RWMutex
 	active map[contract.ServiceInstanceID]*Activation
 }
 
+type RequestClientResolver interface {
+	ClientFor(revision contract.PlanRevision, address contract.ServiceAddress) *request.Client
+}
+
 type Options struct {
 	Plan        *building.RuntimePlan
+	Plans       building.PlanResolver
 	Definitions building.DefinitionResolver
 	Instances   instance.Store
 	Leases      instance.ActivationLeaseStore
@@ -97,7 +109,7 @@ type Options struct {
 	OwnerID     string
 	LeaseTTL    time.Duration
 	Clock       contract.Clock
-	Requests    *request.ClientFactory
+	Requests    RequestClientResolver
 }
 
 func NewManager(options Options) (*Manager, error) {
@@ -107,11 +119,14 @@ func NewManager(options Options) (*Manager, error) {
 	if options.OwnerID == "" {
 		return nil, fmt.Errorf("activation manager owner id is required")
 	}
+	if options.Plans == nil {
+		options.Plans = building.NewPlanCatalog(options.Plan)
+	}
 	if options.LeaseTTL <= 0 {
 		options.LeaseTTL = options.Plan.Recovery().ActivationLease
 	}
 	return &Manager{
-		plan: options.Plan, definitions: options.Definitions,
+		plan: options.Plan, plans: options.Plans, definitions: options.Definitions,
 		instances: options.Instances, leases: options.Leases, restorer: options.Restorer,
 		ownerID: options.OwnerID, leaseTTL: options.LeaseTTL, clock: options.Clock,
 		requests: options.Requests,
@@ -155,12 +170,18 @@ func (m *Manager) Activate(ctx context.Context, instanceID contract.ServiceInsta
 	if record.Lifecycle == instance.Terminated || record.Lifecycle == instance.Draining {
 		return nil, fmt.Errorf("service instance %q cannot activate from %q", instanceID, record.Lifecycle)
 	}
-	lease, err := m.leases.Acquire(ctx, instanceID, m.ownerID, m.leaseTTL)
+	lease, err := m.acquireLease(ctx, instanceID)
 	if err != nil {
 		return nil, err
 	}
+	heartbeat := leaseguard.Start(ctx, leaseguard.Interval(m.leaseTTL), func(renewCtx context.Context) error {
+		_, renewErr := m.leases.Renew(renewCtx, lease, m.leaseTTL)
+		return renewErr
+	})
+	stopHeartbeat := func() error { return heartbeat.Stop() }
 	record, found, err = m.instances.Get(ctx, instanceID)
 	if err != nil || !found {
+		_ = stopHeartbeat()
 		_ = m.leases.Release(ctx, lease)
 		if err != nil {
 			return nil, err
@@ -174,22 +195,31 @@ func (m *Manager) Activate(ctx context.Context, instanceID contract.ServiceInsta
 		starting.Lifecycle = instance.Starting
 	}
 	if err := m.instances.CompareAndSwap(ctx, starting, record.RecordVersion); err != nil {
+		_ = stopHeartbeat()
 		_ = m.leases.Release(ctx, lease)
 		return nil, err
 	}
 	record, _, _ = m.instances.Get(ctx, instanceID)
 	definition, ok := m.definitions.ResolveDefinition(record.DefinitionRef)
 	if !ok {
+		_ = stopHeartbeat()
 		m.fail(ctx, record, lease, fmt.Errorf("service definition %q not found", record.DefinitionRef.String()))
 		return nil, fmt.Errorf("service definition %q not found", record.DefinitionRef.String())
 	}
-	mount, mounted := m.plan.Service(record.Address)
+	instancePlan, planFound := m.plans.ResolvePlan(record.RuntimeID, record.PlanRevision)
+	if !planFound {
+		_ = stopHeartbeat()
+		err = fmt.Errorf("runtime plan %q revision %q is not available", record.RuntimeID, record.PlanRevision)
+		m.fail(ctx, record, lease, err)
+		return nil, err
+	}
+	mount, mounted := instancePlan.Service(record.Address)
 	var config []byte
 	if mounted {
 		config = mount.Config
 	}
-	requestClient := m.requestClient(record.Address)
-	target, err := definition.Factory.Create(ctx, service.CreateRequest{
+	requestClient := m.requestClient(record.PlanRevision, record.Address)
+	target, err := definition.Factory.Create(heartbeat.Context(), service.CreateRequest{
 		RuntimeID: record.RuntimeID, PlanRevision: record.PlanRevision,
 		InstanceID: record.InstanceID, Address: record.Address,
 		Component: record.DefinitionRef, Config: contract.CloneRaw(config),
@@ -197,18 +227,40 @@ func (m *Manager) Activate(ctx context.Context, instanceID contract.ServiceInsta
 		Requests: requestClient,
 	})
 	if err != nil {
+		_ = stopHeartbeat()
 		m.fail(ctx, record, lease, err)
 		return nil, err
 	}
 	if descriptor := target.Descriptor(); descriptor.Component != record.DefinitionRef {
 		err = fmt.Errorf("factory returned component %q for instance definition %q", descriptor.Component.String(), record.DefinitionRef.String())
+		_ = stopHeartbeat()
+		m.fail(ctx, record, lease, err)
+		return nil, err
+	} else if !definition.StateSchema.Empty() && descriptor.StateSchema != definition.StateSchema {
+		err = fault.Wrap(fault.CorruptState, "validate_service_descriptor", fmt.Errorf("factory returned state schema %v for definition schema %v", descriptor.StateSchema, definition.StateSchema))
+		_ = stopHeartbeat()
 		m.fail(ctx, record, lease, err)
 		return nil, err
 	}
-	restored, err := m.restorer.Restore(ctx, target, record, config)
+	restored, err := m.restorer.Restore(heartbeat.Context(), target, record, config)
 	if err != nil {
+		_ = stopHeartbeat()
 		m.fail(ctx, record, lease, err)
 		return nil, err
+	}
+	if heartbeatErr := stopHeartbeat(); heartbeatErr != nil {
+		m.fail(ctx, record, lease, heartbeatErr)
+		return nil, fault.Wrap(fault.LeaseLost, "activate_service", heartbeatErr)
+	}
+	if current, currentFound, currentErr := m.leases.Current(ctx, instanceID); currentErr != nil {
+		m.fail(ctx, record, lease, currentErr)
+		return nil, currentErr
+	} else if !currentFound || current.Epoch != lease.Epoch || current.LeaseToken != lease.LeaseToken {
+		err = persistence.ErrLeaseLost
+		m.fail(ctx, record, lease, err)
+		return nil, fault.Wrap(fault.LeaseLost, "activate_service", err)
+	} else {
+		lease = current
 	}
 	latest, found, err := m.instances.Get(ctx, instanceID)
 	if err != nil || !found {
@@ -235,11 +287,38 @@ func (m *Manager) Activate(ctx context.Context, instanceID contract.ServiceInsta
 	return activation, nil
 }
 
-func (m *Manager) requestClient(address contract.ServiceAddress) *request.Client {
+func (m *Manager) requestClient(revision contract.PlanRevision, address contract.ServiceAddress) *request.Client {
 	if m.requests == nil {
 		return nil
 	}
-	return m.requests.ForSource(address)
+	return m.requests.ClientFor(revision, address)
+}
+
+func (m *Manager) acquireLease(ctx context.Context, instanceID contract.ServiceInstanceID) (instance.ActivationLease, error) {
+	for {
+		acquired, err := m.leases.Acquire(ctx, instanceID, m.ownerID, m.leaseTTL)
+		if err == nil {
+			return acquired, nil
+		}
+		if !errors.Is(err, persistence.ErrLeaseLost) {
+			return instance.ActivationLease{}, err
+		}
+		current, found, currentErr := m.leases.Current(ctx, instanceID)
+		if currentErr != nil {
+			return instance.ActivationLease{}, currentErr
+		}
+		if !found || !current.LeaseUntil.After(m.now()) {
+			continue
+		}
+		delay := current.LeaseUntil.Sub(m.now())
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return instance.ActivationLease{}, fault.Wrap(fault.LeaseLost, "acquire_activation", ctx.Err())
+		case <-timer.C:
+		}
+	}
 }
 
 func (m *Manager) Passivate(ctx context.Context, instanceID contract.ServiceInstanceID) error {
@@ -249,6 +328,43 @@ func (m *Manager) Passivate(ctx context.Context, instanceID contract.ServiceInst
 	m.opMu.Lock()
 	defer m.opMu.Unlock()
 	return m.passivate(ctx, instanceID)
+}
+
+func (m *Manager) Renew(ctx context.Context, instanceID contract.ServiceInstanceID) error {
+	if m == nil {
+		return fmt.Errorf("activation manager is nil")
+	}
+	active, ok := m.Lookup(instanceID)
+	if !ok {
+		return persistence.ErrLeaseLost
+	}
+	renewed, err := m.leases.Renew(ctx, active.CurrentLease(), m.leaseTTL)
+	if err != nil {
+		return err
+	}
+	active.updateLease(renewed)
+	return nil
+}
+
+func (m *Manager) PassivateAll(ctx context.Context) error {
+	if m == nil {
+		return nil
+	}
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
+	m.mu.RLock()
+	ids := make([]contract.ServiceInstanceID, 0, len(m.active))
+	for id := range m.active {
+		ids = append(ids, id)
+	}
+	m.mu.RUnlock()
+	var first error
+	for _, id := range ids {
+		if err := m.passivate(ctx, id); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
 }
 
 func (m *Manager) passivate(ctx context.Context, instanceID contract.ServiceInstanceID) error {
@@ -269,9 +385,12 @@ func (m *Manager) passivate(ctx context.Context, instanceID contract.ServiceInst
 		record.Lifecycle = instance.Passivated
 		now := m.now()
 		record.PassivatedAt = &now
-		if err := m.instances.CompareAndSwap(ctx, record, record.RecordVersion); err != nil {
-			return err
+		transitionErr := m.instances.CompareAndSwap(ctx, record, record.RecordVersion)
+		releaseErr := m.leases.Release(ctx, active.CurrentLease())
+		if transitionErr != nil {
+			return transitionErr
 		}
+		return releaseErr
 	}
 	return m.leases.Release(ctx, active.CurrentLease())
 }
