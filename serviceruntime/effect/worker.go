@@ -30,6 +30,7 @@ type Worker interface {
 
 type RuntimeWorker struct {
 	plan        *building.RuntimePlan
+	plans       building.PlanResolver
 	store       persistence.EffectStore
 	registry    *Registry
 	clock       contract.Clock
@@ -40,6 +41,7 @@ type RuntimeWorker struct {
 
 type WorkerOptions struct {
 	Plan        *building.RuntimePlan
+	Plans       building.PlanResolver
 	Store       persistence.EffectStore
 	Registry    *Registry
 	Clock       contract.Clock
@@ -52,6 +54,9 @@ func NewWorker(options WorkerOptions) (*RuntimeWorker, error) {
 	if options.Plan == nil || options.Store == nil || options.Registry == nil {
 		return nil, fmt.Errorf("effect worker requires plan, store and registry")
 	}
+	if options.Plans == nil {
+		options.Plans = building.NewPlanCatalog(options.Plan)
+	}
 	policy := options.Plan.Recovery()
 	if options.Lease <= 0 {
 		options.Lease = policy.EffectLease
@@ -62,7 +67,7 @@ func NewWorker(options WorkerOptions) (*RuntimeWorker, error) {
 	if options.RetryPolicy == nil {
 		options.RetryPolicy = fault.ExponentialRetryPolicy{}
 	}
-	return &RuntimeWorker{plan: options.Plan, store: options.Store, registry: options.Registry, clock: options.Clock, lease: options.Lease, maxAttempts: options.MaxAttempts, retryPolicy: options.RetryPolicy}, nil
+	return &RuntimeWorker{plan: options.Plan, plans: options.Plans, store: options.Store, registry: options.Registry, clock: options.Clock, lease: options.Lease, maxAttempts: options.MaxAttempts, retryPolicy: options.RetryPolicy}, nil
 }
 
 func (w *RuntimeWorker) DispatchNext(ctx context.Context, ownerID string) (WorkResult, error) {
@@ -101,6 +106,9 @@ func (w *RuntimeWorker) DispatchNext(ctx context.Context, ownerID string) (WorkR
 		return WorkResult{}, err
 	}
 	result, executeErr := executor.ExecuteEffect(workCtx, claim.Record.Clone())
+	if executeErr == nil {
+		executeErr = validateEffectResultPayload(w.payloadPolicy(claim.Record), result.Payload)
+	}
 	if executeErr == nil && heartbeat.Err() != nil {
 		executeErr = fault.Wrap(fault.LeaseLost, "renew_effect_claim", heartbeat.Err())
 	}
@@ -159,6 +167,10 @@ func (w *RuntimeWorker) reconcileClaim(ctx context.Context, claim persistence.Ef
 	var err error
 	switch result.Action {
 	case ReconcileComplete:
+		if payloadErr := validateEffectResultPayload(w.payloadPolicy(claim.Record), result.Result); payloadErr != nil {
+			err = w.store.MarkTerminalFailed(ctx, claim, payloadErr)
+			return result, firstError(payloadErr, err)
+		}
 		err = w.store.MarkSucceeded(ctx, claim, persistence.EffectResult{Payload: result.Result})
 	case ReconcileRetry:
 		err = w.store.MarkFailed(ctx, claim, fmt.Errorf("reconciliation requested retry: %s", result.Reason), result.RetryAt)
@@ -171,6 +183,19 @@ func (w *RuntimeWorker) reconcileClaim(ctx context.Context, claim persistence.Ef
 		_ = w.store.RequireReconciliation(ctx, claim, err)
 	}
 	return result, err
+}
+
+func (w *RuntimeWorker) payloadPolicy(record persistence.EffectRecord) building.InlinePayloadPolicy {
+	if plan, found := w.plans.ResolvePlan(record.RuntimeID, record.PlanRevision); found {
+		return plan.Payloads()
+	}
+	return w.plan.Payloads()
+}
+func validateEffectResultPayload(policy building.InlinePayloadPolicy, payload []byte) error {
+	if len(payload) <= policy.MaxEffectBytes {
+		return nil
+	}
+	return fault.Wrap(fault.Permanent, "validate_effect_result_payload", fmt.Errorf("effect result payload is %d bytes; maximum inline size is %d bytes; store the content as an artifact and return ArtifactRef", len(payload), policy.MaxEffectBytes))
 }
 
 func reconciliationStatus(action ReconciliationAction) persistence.EffectStatus {

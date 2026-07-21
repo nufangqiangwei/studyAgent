@@ -92,7 +92,7 @@ func TestRuntimeRecoversFromReopenedSQLiteStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer second.Close()
-	if report.EventsReplayed != 1 || report.PendingInbox != 1 || report.PendingOutbox != 1 || report.StreamsRestored != 2 {
+	if report.EventsReplayed != 1 || report.PendingInbox != 1 || report.PendingOutbox != 1 || report.StreamsRestored != 3 {
 		t.Fatalf("recovery report=%#v", report)
 	}
 	if effectResult, err := second.DispatchNextEffect(ctx); err != nil || effectResult.Status != persistence.EffectSucceeded || auditCalls != 1 {

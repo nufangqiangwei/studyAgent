@@ -108,7 +108,7 @@ func TestConnectionModuleUsesEffectsAndDeliversTargetedEvents(t *testing.T) {
 		"owner.a": make(chan connection.InboundEvent, 4),
 		"owner.b": make(chan connection.InboundEvent, 4),
 	}
-	runtime := newConnectionTestRuntime(t, ctx, store, driver, inbound, "connection-owner-node-1")
+	runtime := newConnectionTestRuntime(t, ctx, store, driver, inbound, &clock, "connection-owner-node-1")
 	if mounted, found := runtime.Plan().Service(connection.DefaultAddress); !found || mounted.Component != connection.ManagerComponent {
 		t.Fatalf("explicit connection service mount = %#v, found=%v", mounted, found)
 	}
@@ -211,7 +211,7 @@ func TestConnectionModuleRestoresActivationResourcesFromJournal(t *testing.T) {
 		"owner.b": make(chan connection.InboundEvent, 4),
 	}
 	firstDriver := newTestManagedDriver()
-	first := newConnectionTestRuntime(t, ctx, store, firstDriver, inbound, "connection-recovery-node-1")
+	first := newConnectionTestRuntime(t, ctx, store, firstDriver, inbound, &clock, "connection-recovery-node-1")
 	if _, err := first.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +231,7 @@ func TestConnectionModuleRestoresActivationResourcesFromJournal(t *testing.T) {
 	}
 
 	secondDriver := newTestManagedDriver()
-	second := newConnectionTestRuntime(t, ctx, store, secondDriver, inbound, "connection-recovery-node-2")
+	second := newConnectionTestRuntime(t, ctx, store, secondDriver, inbound, &clock, "connection-recovery-node-2")
 	report, err := second.Start(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -316,10 +316,11 @@ func newConnectionTestRuntime(
 	store persistence.RuntimeStorage,
 	driver connection.Driver,
 	inbound map[contract.ServiceAddress]chan connection.InboundEvent,
+	clock contract.Clock,
 	ownerID string,
 ) *Runtime {
 	t.Helper()
-	builder, err := NewBuilder(BuilderOptions{Storage: store, IDs: StableIDs{}, OwnerID: ownerID})
+	builder, err := NewBuilder(BuilderOptions{Storage: store, Clock: clock, IDs: StableIDs{}, OwnerID: ownerID})
 	if err != nil {
 		t.Fatal(err)
 	}

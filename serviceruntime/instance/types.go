@@ -57,6 +57,17 @@ type Record struct {
 	Metadata  map[string]string `json:"metadata,omitempty"`
 }
 
+// Declaration describes a durable virtual Service instance requested through
+// the Runtime control plane. Runtime infrastructure derives any omitted stable
+// identifiers and never trusts callers to provide RootID or Depth.
+type Declaration struct {
+	InstanceID contract.ServiceInstanceID `json:"instance_id,omitempty"`
+	Address    contract.ServiceAddress    `json:"address"`
+	Component  contract.ComponentRef      `json:"component"`
+	ParentID   contract.ServiceInstanceID `json:"parent_id,omitempty"`
+	Metadata   map[string]string          `json:"metadata,omitempty"`
+}
+
 func (r Record) Clone() Record {
 	r.Metadata = contract.CloneStrings(r.Metadata)
 	r.ActivatedAt = cloneTime(r.ActivatedAt)

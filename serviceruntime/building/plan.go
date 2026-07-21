@@ -35,6 +35,7 @@ type RuntimePlan struct {
 	services map[contract.ServiceAddress]PlannedService
 	routing  RoutingTable
 	recovery RecoveryPolicy
+	payloads InlinePayloadPolicy
 	effects  map[string]struct{}
 }
 
@@ -81,6 +82,13 @@ func (p *RuntimePlan) Recovery() RecoveryPolicy {
 		return RecoveryPolicy{}
 	}
 	return p.recovery
+}
+
+func (p *RuntimePlan) Payloads() InlinePayloadPolicy {
+	if p == nil {
+		return InlinePayloadPolicy{}
+	}
+	return p.payloads
 }
 
 func (p *RuntimePlan) KnowsEffect(ref string) bool {

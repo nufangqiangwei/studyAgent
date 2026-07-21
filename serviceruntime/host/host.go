@@ -229,6 +229,12 @@ func (h *ServiceHost) handleClaim(ctx context.Context, claim persistence.InboxCl
 		result.Status = HandleDeadLetter
 		return result, err
 	}
+	if err := validateInlineDecisionPayloads(messagePlan.Payloads(), decision); err != nil {
+		err = h.runtimeError(fault.Validation, "validate_decision_payload", result, err)
+		_ = h.storage.Inbox().MoveToDeadLetter(ctx, claim, err)
+		result.Status = HandleDeadLetter
+		return result, err
+	}
 	if err := validateProduced(definition, decision); err != nil {
 		err = h.runtimeError(fault.Validation, "validate_produced", result, err)
 		_ = h.storage.Inbox().MoveToDeadLetter(ctx, claim, err)
@@ -489,6 +495,42 @@ func validateConsumed(definition building.ServiceDefinition, message contract.Me
 		}
 	}
 	return fmt.Errorf("service %q does not consume %s %q version %d", definition.Component.String(), message.Kind, message.Type, message.Version)
+}
+
+func validateInlineDecisionPayloads(policy building.InlinePayloadPolicy, decision service.Decision) error {
+	for _, event := range decision.Events {
+		if len(event.Payload) > policy.MaxEventBytes {
+			return inlinePayloadError("event "+event.Key, len(event.Payload), policy.MaxEventBytes)
+		}
+	}
+	for _, outgoing := range decision.Outgoing {
+		if len(outgoing.Payload) > policy.MaxMessageBytes {
+			return inlinePayloadError("outgoing message "+outgoing.Key, len(outgoing.Payload), policy.MaxMessageBytes)
+		}
+	}
+	for _, planned := range decision.Effects {
+		if len(planned.Payload) > policy.MaxEffectBytes {
+			return inlinePayloadError("effect "+planned.Key, len(planned.Payload), policy.MaxEffectBytes)
+		}
+	}
+	if decision.Reply != nil {
+		payload := decision.Reply.Payload
+		if decision.Reply.Error != nil {
+			encoded, err := json.Marshal(decision.Reply.Error)
+			if err != nil {
+				return fmt.Errorf("encode reply error for payload validation: %w", err)
+			}
+			payload = encoded
+		}
+		if len(payload) > policy.MaxReplyBytes {
+			return inlinePayloadError("reply "+decision.Reply.Key, len(payload), policy.MaxReplyBytes)
+		}
+	}
+	return nil
+}
+
+func inlinePayloadError(kind string, size, limit int) error {
+	return fmt.Errorf("%s payload is %d bytes; maximum inline size is %d bytes; store the content as an artifact and send ArtifactRef", kind, size, limit)
 }
 
 func validateProduced(definition building.ServiceDefinition, decision service.Decision) error {

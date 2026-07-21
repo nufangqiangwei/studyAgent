@@ -38,15 +38,16 @@ type MessageContract struct {
 }
 
 type ServiceDefinition struct {
-	Component       contract.ComponentRef
-	Factory         service.Factory
-	Consumes        []MessageContract
-	Produces        []MessageContract
-	Dependencies    []ServiceDependency
-	EffectExecutors []string
-	StateSchema     contract.SchemaRef
-	ConfigSchema    contract.SchemaRef
-	Scope           ServiceScope
+	Component        contract.ComponentRef
+	Factory          service.Factory
+	Consumes         []MessageContract
+	Produces         []MessageContract
+	Dependencies     []ServiceDependency
+	EffectExecutors  []string
+	SystemOperations []string
+	StateSchema      contract.SchemaRef
+	ConfigSchema     contract.SchemaRef
+	Scope            ServiceScope
 }
 
 type RuntimeSpec struct {
@@ -99,11 +100,47 @@ func (p RecoveryPolicy) WithDefaults() RecoveryPolicy {
 	return p
 }
 
+const DefaultMaxInlinePayloadBytes = 64 * 1024
+
+type InlinePayloadPolicy struct {
+	MaxMessageBytes int `json:"max_message_bytes,omitempty" yaml:"max_message_bytes,omitempty"`
+	MaxEventBytes   int `json:"max_event_bytes,omitempty" yaml:"max_event_bytes,omitempty"`
+	MaxReplyBytes   int `json:"max_reply_bytes,omitempty" yaml:"max_reply_bytes,omitempty"`
+	MaxEffectBytes  int `json:"max_effect_bytes,omitempty" yaml:"max_effect_bytes,omitempty"`
+}
+
+func (p InlinePayloadPolicy) WithDefaults() InlinePayloadPolicy {
+	if p.MaxMessageBytes == 0 {
+		p.MaxMessageBytes = DefaultMaxInlinePayloadBytes
+	}
+	if p.MaxEventBytes == 0 {
+		p.MaxEventBytes = DefaultMaxInlinePayloadBytes
+	}
+	if p.MaxReplyBytes == 0 {
+		p.MaxReplyBytes = DefaultMaxInlinePayloadBytes
+	}
+	if p.MaxEffectBytes == 0 {
+		p.MaxEffectBytes = DefaultMaxInlinePayloadBytes
+	}
+	return p
+}
+
+func UnlimitedInlinePayloadPolicy() InlinePayloadPolicy {
+	maximum := int(^uint(0) >> 1)
+	return InlinePayloadPolicy{
+		MaxMessageBytes: maximum,
+		MaxEventBytes:   maximum,
+		MaxReplyBytes:   maximum,
+		MaxEffectBytes:  maximum,
+	}
+}
+
 type RuntimeManifest struct {
-	Runtime  RuntimeSpec    `json:"runtime" yaml:"runtime"`
-	Services []ServiceMount `json:"services" yaml:"services"`
-	Routes   RouteManifest  `json:"routes" yaml:"routes"`
-	Recovery RecoveryPolicy `json:"recovery" yaml:"recovery"`
+	Runtime  RuntimeSpec         `json:"runtime" yaml:"runtime"`
+	Services []ServiceMount      `json:"services" yaml:"services"`
+	Routes   RouteManifest       `json:"routes" yaml:"routes"`
+	Recovery RecoveryPolicy      `json:"recovery" yaml:"recovery"`
+	Payloads InlinePayloadPolicy `json:"payloads,omitempty" yaml:"payloads,omitempty"`
 }
 
 type SchemaValidator interface {

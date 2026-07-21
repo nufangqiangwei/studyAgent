@@ -157,7 +157,7 @@ func TestRuntimeEndToEndAndRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.InstancesActivated != 2 || first.Status() != RuntimeLive {
+	if report.InstancesActivated != 3 || first.Status() != RuntimeLive {
 		t.Fatalf("recovery report=%#v status=%q", report, first.Status())
 	}
 	payload := json.RawMessage(`{"amount":2}`)
@@ -210,7 +210,7 @@ func TestRuntimeEndToEndAndRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if recovered.StreamsRestored != 2 {
+	if recovered.StreamsRestored != 3 {
 		t.Fatalf("recovered = %#v", recovered)
 	}
 	if _, err := second.Publish(ctx, contract.Message{Kind: contract.MessageCommand, Type: "counter.increment", Version: 1, Payload: json.RawMessage(`{"amount":3}`)}); err != nil {

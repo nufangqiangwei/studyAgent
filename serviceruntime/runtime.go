@@ -2,6 +2,8 @@ package serviceruntime
 
 import (
 	"agent/serviceruntime/activation"
+	"agent/serviceruntime/artifact"
+	"agent/serviceruntime/assembly"
 	"agent/serviceruntime/building"
 	"agent/serviceruntime/contract"
 	"agent/serviceruntime/effect"
@@ -12,6 +14,7 @@ import (
 	"agent/serviceruntime/transport"
 	"context"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 )
@@ -34,6 +37,7 @@ type Runtime struct {
 	definitions building.DefinitionResolver
 	storage     persistence.RuntimeStorage
 	ownsStorage bool
+	artifacts   artifact.Store
 	directory   instance.InstanceDirectory
 	activator   activation.Activator
 	bus         transport.EventBus
@@ -43,6 +47,7 @@ type Runtime struct {
 	ids         contract.IDGenerator
 	clock       contract.Clock
 	ownerID     string
+	instances   assembly.InstanceControl
 
 	mu     sync.RWMutex
 	status RuntimeStatus
@@ -58,6 +63,34 @@ func (r *Runtime) Plan() *building.RuntimePlan {
 		return nil
 	}
 	return r.plan
+}
+
+func (r *Runtime) BeginArtifact(ctx context.Context, request artifact.WriteRequest) (artifact.WriteSession, error) {
+	if r == nil || r.artifacts == nil {
+		return nil, artifact.ErrUnavailable
+	}
+	return r.artifacts.Begin(ctx, request)
+}
+
+func (r *Runtime) WriteArtifact(ctx context.Context, request artifact.WriteRequest, source io.Reader) (contract.ArtifactRef, error) {
+	if r == nil || r.artifacts == nil {
+		return contract.ArtifactRef{}, artifact.ErrUnavailable
+	}
+	return artifact.WriteAll(ctx, r.artifacts, request, source)
+}
+
+func (r *Runtime) OpenArtifact(ctx context.Context, ref contract.ArtifactRef) (io.ReadCloser, artifact.Info, error) {
+	if r == nil || r.artifacts == nil {
+		return nil, artifact.Info{}, artifact.ErrUnavailable
+	}
+	return r.artifacts.Open(ctx, ref)
+}
+
+func (r *Runtime) StatArtifact(ctx context.Context, ref contract.ArtifactRef) (artifact.Info, error) {
+	if r == nil || r.artifacts == nil {
+		return artifact.Info{}, artifact.ErrUnavailable
+	}
+	return r.artifacts.Stat(ctx, ref)
 }
 
 func (r *Runtime) Status() RuntimeStatus {
@@ -143,13 +176,7 @@ func (r *Runtime) DispatchNextEffect(ctx context.Context) (effect.WorkResult, er
 	return r.effects.DispatchNext(ctx, r.ownerID+".effect")
 }
 
-type InstanceDeclaration struct {
-	InstanceID contract.ServiceInstanceID
-	Address    contract.ServiceAddress
-	Component  contract.ComponentRef
-	ParentID   contract.ServiceInstanceID
-	Metadata   map[string]string
-}
+type InstanceDeclaration = instance.Declaration
 
 func (r *Runtime) DeclareInstance(ctx context.Context, declaration InstanceDeclaration) (instance.Record, error) {
 	if r == nil {
@@ -159,71 +186,10 @@ func (r *Runtime) DeclareInstance(ctx context.Context, declaration InstanceDecla
 	if status == RuntimeDraining || status == RuntimeStopped || status == RuntimeFailed {
 		return instance.Record{}, fmt.Errorf("cannot declare an instance while runtime is %q", status)
 	}
-	if declaration.Address == "" || !declaration.Component.Valid() {
-		return instance.Record{}, fmt.Errorf("dynamic instance address and component are required")
+	if r.instances == nil {
+		return instance.Record{}, fmt.Errorf("instance controller is unavailable")
 	}
-	definition, ok := r.definitions.ResolveDefinition(declaration.Component)
-	if !ok {
-		return instance.Record{}, fmt.Errorf("service definition %q is not registered", declaration.Component.String())
-	}
-	if definition.Scope != building.ScopeVirtual {
-		return instance.Record{}, fmt.Errorf("service definition %q has scope %q, want %q", declaration.Component.String(), definition.Scope, building.ScopeVirtual)
-	}
-	spec := r.plan.Runtime()
-	existing, found, err := r.storage.Instances().GetByAddress(ctx, spec.ID, spec.Revision, declaration.Address)
-	if err != nil {
-		return instance.Record{}, err
-	}
-	if found {
-		if existing.DefinitionRef != declaration.Component {
-			return instance.Record{}, fmt.Errorf("dynamic address %q already uses component %q", declaration.Address, existing.DefinitionRef.String())
-		}
-		if existing.Lifecycle == instance.Terminated {
-			return instance.Record{}, fmt.Errorf("dynamic address %q is tombstoned", declaration.Address)
-		}
-		return existing, nil
-	}
-	instanceID := declaration.InstanceID
-	if instanceID == "" {
-		instanceID = contract.ServiceInstanceID(r.ids.Derive("service-instance", string(spec.ID), string(spec.Revision), string(declaration.Address)))
-	}
-	rootID := instanceID
-	depth := 0
-	if declaration.ParentID != "" {
-		parent, parentFound, parentErr := r.storage.Instances().Get(ctx, declaration.ParentID)
-		if parentErr != nil {
-			return instance.Record{}, parentErr
-		}
-		if !parentFound || parent.RuntimeID != spec.ID || parent.PlanRevision != spec.Revision || parent.Lifecycle == instance.Terminated {
-			return instance.Record{}, fmt.Errorf("parent instance %q is not available in the runtime plan", declaration.ParentID)
-		}
-		rootID = parent.RootID
-		if rootID == "" {
-			rootID = parent.InstanceID
-		}
-		depth = parent.Depth + 1
-	}
-	now := r.now()
-	record := instance.Record{
-		InstanceID: instanceID, Address: declaration.Address, Kind: instance.ServiceVirtual,
-		DefinitionRef: declaration.Component, RuntimeID: spec.ID, PlanRevision: spec.Revision,
-		ParentID: declaration.ParentID, RootID: rootID, Depth: depth,
-		MailboxID:     contract.MailboxID(r.ids.Derive("mailbox", string(instanceID))),
-		StateStreamID: contract.StreamID("service/" + string(instanceID)),
-		Lifecycle:     instance.Declared, CreatedAt: now, UpdatedAt: now,
-		Metadata: contract.CloneStrings(declaration.Metadata),
-	}
-	if err := r.storage.Instances().Create(ctx, record); err != nil {
-		return instance.Record{}, err
-	}
-	created, _, err := r.storage.Instances().Get(ctx, instanceID)
-	if err != nil {
-		return instance.Record{}, err
-	}
-	if err := r.directory.Register(ctx, created); err != nil {
-		return instance.Record{}, err
-	}
-	return created, nil
+	return r.instances.Declare(ctx, "", declaration)
 }
 
 func (r *Runtime) PassivateInstance(ctx context.Context, instanceID contract.ServiceInstanceID) error {

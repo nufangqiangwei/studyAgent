@@ -2,6 +2,7 @@ package serviceruntime
 
 import (
 	"agent/serviceruntime/activation"
+	"agent/serviceruntime/artifact"
 	"agent/serviceruntime/assembly"
 	"agent/serviceruntime/building"
 	"agent/serviceruntime/contract"
@@ -12,6 +13,7 @@ import (
 	"agent/serviceruntime/persistence"
 	"agent/serviceruntime/persistence/memory"
 	"agent/serviceruntime/recovery"
+	systemruntime "agent/serviceruntime/system"
 	"agent/serviceruntime/transport"
 	"context"
 	"crypto/sha256"
@@ -24,6 +26,7 @@ type BuilderOptions struct {
 	Register      *building.Register
 	Effects       *effect.Registry
 	Storage       persistence.RuntimeStorage
+	Artifacts     artifact.Store
 	Clock         contract.Clock
 	IDs           contract.IDGenerator
 	Observer      contract.RuntimeEventRecorder
@@ -37,6 +40,7 @@ type Builder struct {
 	register      *building.Register
 	effects       *effect.Registry
 	storage       persistence.RuntimeStorage
+	artifacts     artifact.Store
 	clock         contract.Clock
 	ids           contract.IDGenerator
 	observer      contract.RuntimeEventRecorder
@@ -45,6 +49,7 @@ type Builder struct {
 	stateMigrator activation.SnapshotMigrator
 	eventUpcaster activation.EventUpcaster
 	binders       []assembly.RuntimeBinder
+	systemRuntime *systemruntime.Module
 }
 
 func NewBuilder(options BuilderOptions) (*Builder, error) {
@@ -74,12 +79,18 @@ func NewBuilder(options BuilderOptions) (*Builder, error) {
 		options.RetryPolicy = fault.ExponentialRetryPolicy{}
 	}
 
-	return &Builder{
-		register: options.Register, effects: options.Effects, storage: options.Storage,
+	builder := &Builder{
+		register: options.Register, effects: options.Effects, storage: options.Storage, artifacts: options.Artifacts,
 		clock: options.Clock, ids: options.IDs, observer: options.Observer, ownerID: options.OwnerID,
 		retryPolicy:   options.RetryPolicy,
 		stateMigrator: options.StateMigrator, eventUpcaster: options.EventUpcaster,
-	}, nil
+	}
+	systemModule := systemruntime.NewModule()
+	if err := systemModule.Register(builder); err != nil {
+		return nil, fmt.Errorf("register built-in system runtime service: %w", err)
+	}
+	builder.systemRuntime = systemModule
+	return builder, nil
 }
 
 func (b *Builder) RegisterService(definition building.ServiceDefinition) error {
@@ -120,6 +131,11 @@ func (b *Builder) RegisterRuntimeBinder(binder assembly.RuntimeBinder) error {
 func (b *Builder) Build(ctx context.Context, manifest building.RuntimeManifest) (*Runtime, error) {
 	if b == nil {
 		return nil, fmt.Errorf("runtime builder is nil")
+	}
+	var err error
+	manifest, err = installSystemRuntime(manifest)
+	if err != nil {
+		return nil, err
 	}
 	plan, err := b.register.Compile(ctx, manifest)
 	if err != nil {
@@ -173,7 +189,13 @@ func (b *Builder) Build(ctx context.Context, manifest building.RuntimeManifest) 
 		}
 		return nil, err
 	}
+	instanceControl := &instanceController{
+		plan: plan, definitions: definitions, storage: storage, directory: directory,
+		ids: b.ids, clock: b.clock,
+	}
+	spec := plan.Runtime()
 	ports := assembly.RuntimePorts{
+		RuntimeID: spec.ID, PlanRevision: spec.Revision, Instances: instanceControl, Artifacts: b.artifacts,
 		Ingress: assembly.MessageIngressFunc(func(ctx context.Context, message contract.Message) error {
 			_, publishErr := bus.Publish(ctx, message)
 			return publishErr
@@ -189,9 +211,29 @@ func (b *Builder) Build(ctx context.Context, manifest building.RuntimeManifest) 
 			return nil, fmt.Errorf("bind runtime module: %w", err)
 		}
 	}
+	for _, historicalPlan := range plans.Plans() {
+		historicalSpec := historicalPlan.Runtime()
+		if historicalSpec.Revision == spec.Revision {
+			continue
+		}
+		historicalControl := &instanceController{
+			plan: historicalPlan, definitions: definitions, storage: storage, directory: directory,
+			ids: b.ids, clock: b.clock,
+		}
+		if err := b.systemRuntime.BindRuntime(assembly.RuntimePorts{
+			RuntimeID: historicalSpec.ID, PlanRevision: historicalSpec.Revision,
+			Ingress: ports.Ingress, Instances: historicalControl, Artifacts: b.artifacts, IDs: b.ids, Clock: b.clock,
+		}); err != nil {
+			_ = bus.Close()
+			if ownsStorage {
+				_ = storage.Close()
+			}
+			return nil, fmt.Errorf("bind historical system runtime: %w", err)
+		}
+	}
 	activator, err := activation.NewManager(activation.Options{
 		Plan: plan, Plans: plans, Definitions: definitions, Instances: storage.Instances(), Leases: storage.Leases(),
-		Restorer: restorer, OwnerID: b.ownerID + ".activation", LeaseTTL: plan.Recovery().ActivationLease, Clock: b.clock,
+		Restorer: restorer, Artifacts: b.artifacts, OwnerID: b.ownerID + ".activation", LeaseTTL: plan.Recovery().ActivationLease, Clock: b.clock,
 	})
 	if err != nil {
 		_ = bus.Close()
@@ -215,7 +257,7 @@ func (b *Builder) Build(ctx context.Context, manifest building.RuntimeManifest) 
 		return nil, err
 	}
 	effectWorker, err := effect.NewWorker(effect.WorkerOptions{
-		Plan: plan, Store: storage.Effects(), Registry: b.effects, Clock: b.clock,
+		Plan: plan, Plans: plans, Store: storage.Effects(), Registry: b.effects, Clock: b.clock,
 		Lease: plan.Recovery().EffectLease, MaxAttempts: plan.Recovery().MaxDeliveryAttempts, RetryPolicy: b.retryPolicy,
 	})
 	if err != nil {
@@ -237,10 +279,10 @@ func (b *Builder) Build(ctx context.Context, manifest building.RuntimeManifest) 
 		return nil, err
 	}
 	return &Runtime{
-		plan: plan, plans: plans, definitions: definitions, storage: storage, ownsStorage: ownsStorage,
+		plan: plan, plans: plans, definitions: definitions, storage: storage, ownsStorage: ownsStorage, artifacts: b.artifacts,
 		directory: directory, activator: activator, bus: bus, host: hostRuntime,
 		effects: effectWorker, recovery: recoveryRuntime,
-		ids: b.ids, clock: b.clock, ownerID: b.ownerID, status: RuntimeCreated,
+		ids: b.ids, clock: b.clock, ownerID: b.ownerID, instances: instanceControl, status: RuntimeCreated,
 	}, nil
 }
 
@@ -275,6 +317,17 @@ func (b *Builder) persistedPlanCatalog(ctx context.Context, storage persistence.
 		var storedManifest building.RuntimeManifest
 		if err := json.Unmarshal(record.Manifest, &storedManifest); err != nil {
 			return nil, fmt.Errorf("decode runtime plan %q: %w", record.PlanRevision, err)
+		}
+		var storedEnvelope struct {
+			Payloads json.RawMessage `json:"payloads"`
+		}
+		if err := json.Unmarshal(record.Manifest, &storedEnvelope); err != nil {
+			return nil, fmt.Errorf("inspect runtime plan %q payload policy: %w", record.PlanRevision, err)
+		}
+		if len(storedEnvelope.Payloads) == 0 {
+			// Revisions persisted before inline limits existed keep their original
+			// behavior so recovery cannot strand an already-durable large payload.
+			storedManifest.Payloads = building.UnlimitedInlinePayloadPolicy()
 		}
 		if storedManifest.Runtime.ID != record.RuntimeID || storedManifest.Runtime.Revision != record.PlanRevision {
 			return nil, fmt.Errorf("stored runtime plan %q identity does not match its record", record.PlanRevision)
@@ -324,4 +377,34 @@ func (b *Builder) ensureStaticInstances(ctx context.Context, plan *building.Runt
 		}
 	}
 	return nil
+}
+
+func installSystemRuntime(manifest building.RuntimeManifest) (building.RuntimeManifest, error) {
+	manifest.Services = append([]building.ServiceMount(nil), manifest.Services...)
+	found := false
+	for _, mount := range manifest.Services {
+		if mount.Address == systemruntime.Address {
+			if mount.Component != systemruntime.Component {
+				return building.RuntimeManifest{}, fmt.Errorf("reserved system address %q uses component %q", systemruntime.Address, mount.Component.String())
+			}
+			found = true
+			continue
+		}
+		if mount.Component == systemruntime.Component {
+			return building.RuntimeManifest{}, fmt.Errorf("built-in system component %q must use address %q", systemruntime.Component.String(), systemruntime.Address)
+		}
+	}
+	if !found {
+		manifest.Services = append(manifest.Services, systemruntime.Mount())
+	}
+	commands := make(map[contract.MessageType]contract.ServiceAddress, len(manifest.Routes.Commands)+1)
+	for messageType, address := range manifest.Routes.Commands {
+		commands[messageType] = address
+	}
+	if target := commands[systemruntime.CallMessageType]; target != "" && target != systemruntime.Address {
+		return building.RuntimeManifest{}, fmt.Errorf("reserved system call route targets %q", target)
+	}
+	commands[systemruntime.CallMessageType] = systemruntime.Address
+	manifest.Routes.Commands = commands
+	return manifest, nil
 }

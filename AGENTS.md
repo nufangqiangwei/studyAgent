@@ -39,6 +39,7 @@ Runtime 负责：
 - 托管通用服务实例、Mailbox、生命周期、Activation、Lease 和 Fencing。
 - 通过 EventBus 路由并可靠投递 Command、Query、Event 和 Reply。
 - 通过 Inbox、Journal、Snapshot、Outbox 和 Effect Store 保存运行事实。
+- 通过独立 Artifact Store 流式保存大文本、文件、模型输入输出和向量，可靠消息只传播不可变 ArtifactRef。
 - 在单条消息边界内原子提交 ACK、事件、快照、出站消息和副作用计划。
 - 从持久化 Plan、实例记录、Snapshot、Journal、Inbox、Outbox 和 Effect 恢复运行。
 - 提供结构化错误、重试、Dead Letter、Reconciliation 和可观测事件。
@@ -240,6 +241,7 @@ serviceruntime/
   service/              Service、Factory、State、Decision、ActivationResource
   building/             Register、Manifest、Plan、PlanCatalog、RoutingTable
   assembly/             模块装配期可用的通用 Runtime ports / binder
+  artifact/             大对象流式读写端口、内存与本地不可变文件实现
   persistence/          Journal、Snapshot、Inbox、Outbox、Effect、Plan、Commit 等端口
   persistence/memory/   内存事务实现，主要用于测试和临时运行
   persistence/sqlite/   SQLite/WAL 事务实现和 schema migration
@@ -274,10 +276,12 @@ docs/                   项目与架构文档
 - EventBus、ServiceHost、Effect Worker、Recovery 和持续运行的 `Runtime.Serve`。
 - 静态挂载与通用 Virtual Service 动态实例。
 - 跨重启持久化 PlanRevision，并在恢复旧消息时使用对应旧 Plan。
+- 独立 Artifact 数据平面、稳定 Key、checksum、流式 staging/commit，以及 Plan 级 inline Payload 限制。
 
 当前边界：
 
-- 未显式注入 Storage 时 Builder 使用内存实现；跨进程恢复必须注入 `persistence/sqlite`。
+- 未显式注入 Storage 时 Builder 使用内存实现；跨进程恢复必须注入 persistence/sqlite。
+- Artifact Store 必须显式注入；当前提供内存与单机本地文件实现，ACL、保留期、孤儿 GC 和远程对象存储 Router 尚未实现。
 - 当前没有远程 Transport。
 - 恢复旧 Revision 时仍需在当前进程注册对应 Factory、Effect Executor 和迁移器。
 - `serviceruntime` 不包含 Task、Agent、Policy、Capability、Model、Orchestrator、Memory 或 Knowledge 业务服务。
@@ -290,7 +294,7 @@ Builder.Build
   -> Register.Compile
   -> 持久化并加载 Plan Catalog
   -> 创建/恢复静态 ServiceInstanceRecord
-  -> 装配 Storage、Directory、Activation、Bus、Host、Effect、Recovery
+  -> 装配 Storage、ArtifactStore、Directory、Activation、Bus、Host、Effect、Recovery
 
 Runtime.Start
   -> 暂停 EventBus

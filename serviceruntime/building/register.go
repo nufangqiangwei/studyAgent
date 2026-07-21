@@ -150,6 +150,7 @@ func validateManifest(ctx context.Context, manifest RuntimeManifest, definitions
 	if strings.TrimSpace(string(manifest.Runtime.Revision)) == "" {
 		issues = appendIssue(issues, "runtime.revision", "required", "plan revision is required")
 	}
+	issues = append(issues, validateInlinePayloadPolicy(manifest.Payloads)...)
 	for ref, definition := range definitions {
 		if definition.Scope != ScopeVirtual {
 			continue
@@ -288,6 +289,25 @@ func validateRoute(prefix string, kind contract.MessageKind, messageType contrac
 	return []ValidationIssue{{Path: path, Code: "contract", Message: fmt.Sprintf("target %q does not declare consuming %s %q", address, kind, messageType)}}
 }
 
+func validateInlinePayloadPolicy(policy InlinePayloadPolicy) []ValidationIssue {
+	values := []struct {
+		path  string
+		value int
+	}{
+		{path: "payloads.max_message_bytes", value: policy.MaxMessageBytes},
+		{path: "payloads.max_event_bytes", value: policy.MaxEventBytes},
+		{path: "payloads.max_reply_bytes", value: policy.MaxReplyBytes},
+		{path: "payloads.max_effect_bytes", value: policy.MaxEffectBytes},
+	}
+	var issues []ValidationIssue
+	for _, candidate := range values {
+		if candidate.value < 0 {
+			issues = appendIssue(issues, candidate.path, "invalid", "inline payload limit cannot be negative")
+		}
+	}
+	return issues
+}
+
 func compilePlan(manifest RuntimeManifest, definitions map[contract.ComponentRef]ServiceDefinition, effects map[string]struct{}) *RuntimePlan {
 	services := make(map[contract.ServiceAddress]PlannedService, len(manifest.Services))
 	routing := RoutingTable{
@@ -318,13 +338,14 @@ func compilePlan(manifest RuntimeManifest, definitions map[contract.ComponentRef
 	for ref := range effects {
 		knownEffects[ref] = struct{}{}
 	}
-	return &RuntimePlan{runtime: manifest.Runtime, services: services, routing: routing, recovery: manifest.Recovery.WithDefaults(), effects: knownEffects}
+	return &RuntimePlan{runtime: manifest.Runtime, services: services, routing: routing, recovery: manifest.Recovery.WithDefaults(), payloads: manifest.Payloads.WithDefaults(), effects: knownEffects}
 }
 
 func cloneDefinition(definition ServiceDefinition) ServiceDefinition {
 	definition.Consumes = append([]MessageContract(nil), definition.Consumes...)
 	definition.Produces = append([]MessageContract(nil), definition.Produces...)
 	definition.EffectExecutors = append([]string(nil), definition.EffectExecutors...)
+	definition.SystemOperations = append([]string(nil), definition.SystemOperations...)
 	if len(definition.Dependencies) > 0 {
 		dependencies := make([]ServiceDependency, len(definition.Dependencies))
 		for index, dependency := range definition.Dependencies {

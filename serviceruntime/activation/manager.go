@@ -1,6 +1,7 @@
 package activation
 
 import (
+	"agent/serviceruntime/artifact"
 	"agent/serviceruntime/building"
 	"agent/serviceruntime/contract"
 	"agent/serviceruntime/fault"
@@ -83,6 +84,7 @@ type Manager struct {
 	instances   instance.Store
 	leases      instance.ActivationLeaseStore
 	restorer    StateRestorer
+	artifacts   artifact.Reader
 	ownerID     string
 	leaseTTL    time.Duration
 	clock       contract.Clock
@@ -99,6 +101,7 @@ type Options struct {
 	Instances   instance.Store
 	Leases      instance.ActivationLeaseStore
 	Restorer    StateRestorer
+	Artifacts   artifact.Reader
 	OwnerID     string
 	LeaseTTL    time.Duration
 	Clock       contract.Clock
@@ -119,7 +122,7 @@ func NewManager(options Options) (*Manager, error) {
 	}
 	return &Manager{
 		plan: options.Plan, plans: options.Plans, definitions: options.Definitions,
-		instances: options.Instances, leases: options.Leases, restorer: options.Restorer,
+		instances: options.Instances, leases: options.Leases, restorer: options.Restorer, artifacts: options.Artifacts,
 		ownerID: options.OwnerID, leaseTTL: options.LeaseTTL, clock: options.Clock,
 		active: make(map[contract.ServiceInstanceID]*Activation),
 	}, nil
@@ -213,7 +216,7 @@ func (m *Manager) Activate(ctx context.Context, instanceID contract.ServiceInsta
 		RuntimeID: record.RuntimeID, PlanRevision: record.PlanRevision,
 		InstanceID: record.InstanceID, Address: record.Address,
 		Component: record.DefinitionRef, Config: contract.CloneRaw(config),
-		Metadata: contract.CloneStrings(record.Metadata),
+		Metadata: contract.CloneStrings(record.Metadata), Artifacts: m.artifacts,
 	})
 	if err != nil {
 		_ = stopHeartbeat()

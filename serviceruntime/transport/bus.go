@@ -179,6 +179,9 @@ func (b *Bus) Publish(ctx context.Context, message contract.Message) (PublishRes
 	if !found {
 		return PublishResult{}, fault.Wrap(fault.Permanent, "resolve_message_plan", fmt.Errorf("message plan revision %q is not available", message.PlanRevision))
 	}
+	if err := validateInlineMessagePayload(messagePlan.Payloads(), message); err != nil {
+		return PublishResult{}, fault.Wrap(fault.Validation, "validate_message_payload", err)
+	}
 	if message.Kind == contract.MessageReply && b.replySink != nil && message.To == b.replySink.Address() {
 		assigned, assignErr := b.sequences.Assign(ctx, "reply/"+string(message.To), message)
 		if assignErr != nil {
@@ -220,6 +223,19 @@ func (b *Bus) Publish(ctx context.Context, message contract.Message) (PublishRes
 	}
 	b.record(ctx, contract.RuntimeDeliveryCompleted, message, map[string]string{"targets": fmt.Sprint(len(targets))})
 	return result, nil
+}
+
+func validateInlineMessagePayload(policy building.InlinePayloadPolicy, message contract.Message) error {
+	limit := policy.MaxMessageBytes
+	kind := "message"
+	if message.Kind == contract.MessageReply {
+		limit = policy.MaxReplyBytes
+		kind = "reply"
+	}
+	if len(message.Payload) > limit {
+		return fmt.Errorf("%s payload is %d bytes; maximum inline size is %d bytes; store the content as an artifact and send ArtifactRef", kind, len(message.Payload), limit)
+	}
+	return nil
 }
 
 func (b *Bus) DispatchNextOutbox(ctx context.Context, ownerID string) (DispatchResult, error) {
