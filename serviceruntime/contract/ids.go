@@ -61,10 +61,8 @@ const (
 	RuntimeDeliveryCompleted RuntimeEventType = "runtime.delivery_completed"
 	RuntimeEffectReconciled  RuntimeEventType = "runtime.effect_reconciled"
 	RuntimeRecoveryCompleted RuntimeEventType = "runtime.recovery_completed"
-	RuntimeConnectionOpened  RuntimeEventType = "runtime.connection_opened"
-	RuntimeConnectionClosed  RuntimeEventType = "runtime.connection_closed"
-	RuntimeConnectionFailed  RuntimeEventType = "runtime.connection_failed"
-	RuntimeOperationFailed   RuntimeEventType = "runtime.operation_failed"
+
+	RuntimeOperationFailed RuntimeEventType = "runtime.operation_failed"
 )
 
 type RuntimeEvent struct {

@@ -121,7 +121,6 @@ func (s *Store) Leases() instance.ActivationLeaseStore       { return s }
 func (s *Store) Committer() persistence.MessageCommitStore   { return s }
 func (s *Store) Plans() persistence.PlanStore                { return &planStore{owner: s} }
 func (s *Store) Sequences() persistence.MessageSequenceStore { return &sequenceStore{owner: s} }
-func (s *Store) Connections() persistence.ConnectionStore    { return &connectionStore{owner: s} }
 
 func (s *Store) Close() error {
 	if s == nil || s.db == nil {

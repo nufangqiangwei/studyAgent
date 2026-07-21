@@ -251,62 +251,6 @@ type MessageSequenceStore interface {
 	Assign(ctx context.Context, scope string, message contract.Message) (contract.Message, error)
 }
 
-type ConnectionStatus string
-
-const (
-	ConnectionOpening ConnectionStatus = "opening"
-	ConnectionOpen    ConnectionStatus = "open"
-	ConnectionClosed  ConnectionStatus = "closed"
-	ConnectionFailed  ConnectionStatus = "failed"
-)
-
-func (s ConnectionStatus) Valid() bool {
-	switch s {
-	case ConnectionOpening, ConnectionOpen, ConnectionClosed, ConnectionFailed:
-		return true
-	default:
-		return false
-	}
-}
-
-// ConnectionRecord is the durable desired-state record for one externally
-// managed long-lived connection. Ownership is bound to both the service
-// address and its concrete instance ID so another service cannot reuse a
-// connection merely by learning its ID.
-type ConnectionRecord struct {
-	ConnectionID    string                     `json:"connection_id"`
-	RuntimeID       contract.RuntimeID         `json:"runtime_id"`
-	PlanRevision    contract.PlanRevision      `json:"plan_revision"`
-	OwnerInstanceID contract.ServiceInstanceID `json:"owner_instance_id"`
-	OwnerAddress    contract.ServiceAddress    `json:"owner_address"`
-	Key             string                     `json:"key"`
-	Driver          string                     `json:"driver"`
-	Config          json.RawMessage            `json:"config,omitempty"`
-	Metadata        map[string]string          `json:"metadata,omitempty"`
-	DesiredOpen     bool                       `json:"desired_open"`
-	Status          ConnectionStatus           `json:"status"`
-	LastError       string                     `json:"last_error,omitempty"`
-	CreatedAt       time.Time                  `json:"created_at"`
-	UpdatedAt       time.Time                  `json:"updated_at"`
-	OpenedAt        *time.Time                 `json:"opened_at,omitempty"`
-	ClosedAt        *time.Time                 `json:"closed_at,omitempty"`
-}
-
-func (r ConnectionRecord) Clone() ConnectionRecord {
-	r.Config = contract.CloneRaw(r.Config)
-	r.Metadata = contract.CloneStrings(r.Metadata)
-	r.OpenedAt = cloneTime(r.OpenedAt)
-	r.ClosedAt = cloneTime(r.ClosedAt)
-	return r
-}
-
-type ConnectionStore interface {
-	Create(ctx context.Context, record ConnectionRecord) error
-	Update(ctx context.Context, record ConnectionRecord) error
-	Get(ctx context.Context, runtimeID contract.RuntimeID, connectionID string) (ConnectionRecord, bool, error)
-	List(ctx context.Context, runtimeID contract.RuntimeID) ([]ConnectionRecord, error)
-}
-
 type RuntimeStorage interface {
 	Journal() JournalStore
 	Snapshots() SnapshotStore
@@ -318,7 +262,6 @@ type RuntimeStorage interface {
 	Committer() MessageCommitStore
 	Plans() PlanStore
 	Sequences() MessageSequenceStore
-	Connections() ConnectionStore
 	Close() error
 }
 

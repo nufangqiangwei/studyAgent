@@ -6,45 +6,23 @@ import (
 	"agent/serviceruntime/service"
 	"context"
 	"fmt"
-	"sync"
 )
 
-type factoryKey struct {
-	runtime  contract.RuntimeID
-	revision contract.PlanRevision
-}
-
-// ServiceFactory is registered while the plan is compiled and is bound to the
-// concrete runtime-scoped Manager once Builder has assembled storage and bus.
-type ServiceFactory struct {
-	mu       sync.RWMutex
-	managers map[factoryKey]*Manager
-}
-
-func NewServiceFactory() *ServiceFactory {
-	return &ServiceFactory{managers: make(map[factoryKey]*Manager)}
-}
-
-func (f *ServiceFactory) Bind(runtimeID contract.RuntimeID, revision contract.PlanRevision, manager *Manager) {
-	if f == nil || manager == nil {
-		return
-	}
-	f.mu.Lock()
-	f.managers[factoryKey{runtime: runtimeID, revision: revision}] = manager
-	f.mu.Unlock()
-}
+type ServiceFactory struct{ module *Module }
 
 func (f *ServiceFactory) Create(_ context.Context, request service.CreateRequest) (service.Service, error) {
-	if f == nil {
-		return nil, fmt.Errorf("connection manager service factory is nil")
+	if f == nil || f.module == nil {
+		return nil, fmt.Errorf("connection service factory is not configured")
 	}
-	f.mu.RLock()
-	manager := f.managers[factoryKey{runtime: request.RuntimeID, revision: request.PlanRevision}]
-	f.mu.RUnlock()
-	if manager == nil {
-		return nil, fmt.Errorf("connection manager is not bound for runtime %q plan %q", request.RuntimeID, request.PlanRevision)
+	ingress, ids, clock, err := f.module.runtimeDependencies()
+	if err != nil {
+		return nil, err
 	}
-	return manager, nil
+	supervisor := newSupervisor(supervisorOptions{
+		Request: request, Drivers: f.module.drivers, Ingress: ingress,
+		IDs: ids, Clock: clock, Resources: f.module.resources,
+	})
+	return newManager(request, ids, clock, supervisor), nil
 }
 
 func Definition(factory service.Factory) building.ServiceDefinition {
@@ -58,7 +36,18 @@ func Definition(factory service.Factory) building.ServiceDefinition {
 			{Kind: contract.MessageCommand, Type: CloseMessageType, Version: 1},
 			{Kind: contract.MessageQuery, Type: GetMessageType, Version: 1},
 			{Kind: contract.MessageQuery, Type: ListMessageType, Version: 1},
+			{Kind: contract.MessageEvent, Type: DriverOpenedEventType, Version: 1},
+			{Kind: contract.MessageEvent, Type: DriverFrameEventType, Version: 1},
+			{Kind: contract.MessageEvent, Type: DriverClosedEventType, Version: 1},
+			{Kind: contract.MessageEvent, Type: DriverErrorEventType, Version: 1},
 		},
-		Produces: []building.MessageContract{{Kind: contract.MessageReply, Type: ReplyMessageType, Version: 1}},
+		Produces: []building.MessageContract{
+			{Kind: contract.MessageReply, Type: ReplyMessageType, Version: 1},
+			{Kind: contract.MessageEvent, Type: OpenedEventType, Version: 1},
+			{Kind: contract.MessageEvent, Type: MessageReceivedEventType, Version: 1},
+			{Kind: contract.MessageEvent, Type: ClosedEventType, Version: 1},
+			{Kind: contract.MessageEvent, Type: ErrorEventType, Version: 1},
+		},
+		EffectExecutors: []string{OpenExecutorRef, SendExecutorRef, CloseExecutorRef},
 	}
 }

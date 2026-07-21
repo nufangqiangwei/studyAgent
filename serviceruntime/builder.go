@@ -2,8 +2,8 @@ package serviceruntime
 
 import (
 	"agent/serviceruntime/activation"
+	"agent/serviceruntime/assembly"
 	"agent/serviceruntime/building"
-	"agent/serviceruntime/connection"
 	"agent/serviceruntime/contract"
 	"agent/serviceruntime/effect"
 	"agent/serviceruntime/fault"
@@ -21,32 +21,30 @@ import (
 )
 
 type BuilderOptions struct {
-	Register          *building.Register
-	Effects           *effect.Registry
-	Storage           persistence.RuntimeStorage
-	Clock             contract.Clock
-	IDs               contract.IDGenerator
-	Observer          contract.RuntimeEventRecorder
-	OwnerID           string
-	RetryPolicy       fault.RetryPolicy
-	StateMigrator     activation.SnapshotMigrator
-	EventUpcaster     activation.EventUpcaster
-	ConnectionDrivers *connection.Registry
+	Register      *building.Register
+	Effects       *effect.Registry
+	Storage       persistence.RuntimeStorage
+	Clock         contract.Clock
+	IDs           contract.IDGenerator
+	Observer      contract.RuntimeEventRecorder
+	OwnerID       string
+	RetryPolicy   fault.RetryPolicy
+	StateMigrator activation.SnapshotMigrator
+	EventUpcaster activation.EventUpcaster
 }
 
 type Builder struct {
-	register          *building.Register
-	effects           *effect.Registry
-	storage           persistence.RuntimeStorage
-	clock             contract.Clock
-	ids               contract.IDGenerator
-	observer          contract.RuntimeEventRecorder
-	ownerID           string
-	retryPolicy       fault.RetryPolicy
-	stateMigrator     activation.SnapshotMigrator
-	eventUpcaster     activation.EventUpcaster
-	connections       *connection.Registry
-	connectionFactory *connection.ServiceFactory
+	register      *building.Register
+	effects       *effect.Registry
+	storage       persistence.RuntimeStorage
+	clock         contract.Clock
+	ids           contract.IDGenerator
+	observer      contract.RuntimeEventRecorder
+	ownerID       string
+	retryPolicy   fault.RetryPolicy
+	stateMigrator activation.SnapshotMigrator
+	eventUpcaster activation.EventUpcaster
+	binders       []assembly.RuntimeBinder
 }
 
 func NewBuilder(options BuilderOptions) (*Builder, error) {
@@ -75,28 +73,12 @@ func NewBuilder(options BuilderOptions) (*Builder, error) {
 	if options.RetryPolicy == nil {
 		options.RetryPolicy = fault.ExponentialRetryPolicy{}
 	}
-	if options.ConnectionDrivers == nil {
-		options.ConnectionDrivers = connection.NewRegistry()
-	}
-	var connectionFactory *connection.ServiceFactory
-	if existing, found := options.Register.ResolveDefinition(connection.ManagerComponent); found {
-		var ok bool
-		connectionFactory, ok = existing.Factory.(*connection.ServiceFactory)
-		if !ok {
-			return nil, fmt.Errorf("service component %q is reserved for the runtime connection manager", connection.ManagerComponent.String())
-		}
-	} else {
-		connectionFactory = connection.NewServiceFactory()
-		if err := options.Register.RegisterService(connection.Definition(connectionFactory)); err != nil {
-			return nil, err
-		}
-	}
+
 	return &Builder{
 		register: options.Register, effects: options.Effects, storage: options.Storage,
 		clock: options.Clock, ids: options.IDs, observer: options.Observer, ownerID: options.OwnerID,
 		retryPolicy:   options.RetryPolicy,
 		stateMigrator: options.StateMigrator, eventUpcaster: options.EventUpcaster,
-		connections: options.ConnectionDrivers, connectionFactory: connectionFactory,
 	}, nil
 }
 
@@ -124,21 +106,20 @@ func (b *Builder) RegisterEffect(spec effect.Spec) error {
 	return b.register.RegisterEffectExecutor(spec.Ref)
 }
 
-func (b *Builder) RegisterConnectionDriver(name string, driver connection.Driver) error {
+func (b *Builder) RegisterRuntimeBinder(binder assembly.RuntimeBinder) error {
 	if b == nil {
 		return fmt.Errorf("runtime builder is nil")
 	}
-	return b.connections.Register(name, driver)
+	if binder == nil {
+		return fmt.Errorf("runtime binder is nil")
+	}
+	b.binders = append(b.binders, binder)
+	return nil
 }
 
 func (b *Builder) Build(ctx context.Context, manifest building.RuntimeManifest) (*Runtime, error) {
 	if b == nil {
 		return nil, fmt.Errorf("runtime builder is nil")
-	}
-	persistedManifest := manifest
-	manifest, err := withConnectionManager(manifest)
-	if err != nil {
-		return nil, err
 	}
 	plan, err := b.register.Compile(ctx, manifest)
 	if err != nil {
@@ -150,7 +131,7 @@ func (b *Builder) Build(ctx context.Context, manifest building.RuntimeManifest) 
 		storage = memory.New(b.clock)
 		ownsStorage = true
 	}
-	plans, err := b.persistedPlanCatalog(ctx, storage, persistedManifest, plan)
+	plans, err := b.persistedPlanCatalog(ctx, storage, manifest, plan)
 	if err != nil {
 		if ownsStorage {
 			_ = storage.Close()
@@ -192,25 +173,21 @@ func (b *Builder) Build(ctx context.Context, manifest building.RuntimeManifest) 
 		}
 		return nil, err
 	}
-	spec := plan.Runtime()
-	sender := connection.SenderFunc(func(ctx context.Context, message contract.Message) error {
-		_, publishErr := bus.Publish(ctx, message)
-		return publishErr
-	})
-	connectionManager, err := connection.NewManager(connection.Options{
-		RuntimeID: spec.ID, Store: storage.Connections(), Resolver: directory,
-		Drivers: b.connections, Sender: sender, IDs: b.ids, Clock: b.clock, Observer: b.observer,
-	})
-	if err != nil {
-		_ = bus.Close()
-		if ownsStorage {
-			_ = storage.Close()
-		}
-		return nil, err
+	ports := assembly.RuntimePorts{
+		Ingress: assembly.MessageIngressFunc(func(ctx context.Context, message contract.Message) error {
+			_, publishErr := bus.Publish(ctx, message)
+			return publishErr
+		}),
+		IDs: b.ids, Clock: b.clock,
 	}
-	for _, revisionPlan := range plans.Plans() {
-		revisionSpec := revisionPlan.Runtime()
-		b.connectionFactory.Bind(revisionSpec.ID, revisionSpec.Revision, connectionManager)
+	for _, binder := range b.binders {
+		if err := binder.BindRuntime(ports); err != nil {
+			_ = bus.Close()
+			if ownsStorage {
+				_ = storage.Close()
+			}
+			return nil, fmt.Errorf("bind runtime module: %w", err)
+		}
 	}
 	activator, err := activation.NewManager(activation.Options{
 		Plan: plan, Plans: plans, Definitions: definitions, Instances: storage.Instances(), Leases: storage.Leases(),
@@ -263,8 +240,7 @@ func (b *Builder) Build(ctx context.Context, manifest building.RuntimeManifest) 
 		plan: plan, plans: plans, definitions: definitions, storage: storage, ownsStorage: ownsStorage,
 		directory: directory, activator: activator, bus: bus, host: hostRuntime,
 		effects: effectWorker, recovery: recoveryRuntime,
-		connections: connectionManager,
-		ids:         b.ids, clock: b.clock, ownerID: b.ownerID, status: RuntimeCreated,
+		ids: b.ids, clock: b.clock, ownerID: b.ownerID, status: RuntimeCreated,
 	}, nil
 }
 
@@ -303,10 +279,6 @@ func (b *Builder) persistedPlanCatalog(ctx context.Context, storage persistence.
 		if storedManifest.Runtime.ID != record.RuntimeID || storedManifest.Runtime.Revision != record.PlanRevision {
 			return nil, fmt.Errorf("stored runtime plan %q identity does not match its record", record.PlanRevision)
 		}
-		storedManifest, err = withConnectionManager(storedManifest)
-		if err != nil {
-			return nil, fmt.Errorf("add runtime connection manager to stored plan %q: %w", record.PlanRevision, err)
-		}
 		storedPlan, err := b.register.Compile(ctx, storedManifest)
 		if err != nil {
 			return nil, fmt.Errorf("compile stored runtime plan %q: %w", record.PlanRevision, err)
@@ -314,25 +286,6 @@ func (b *Builder) persistedPlanCatalog(ctx context.Context, storage persistence.
 		compiled = append(compiled, storedPlan)
 	}
 	return building.NewPlanCatalog(current, compiled...), nil
-}
-
-func withConnectionManager(manifest building.RuntimeManifest) (building.RuntimeManifest, error) {
-	for _, mount := range manifest.Services {
-		if mount.Address == connection.ManagerAddress {
-			if mount.Component != connection.ManagerComponent {
-				return building.RuntimeManifest{}, fmt.Errorf("service address %q is reserved for component %q", connection.ManagerAddress, connection.ManagerComponent.String())
-			}
-			return manifest, nil
-		}
-		if mount.Component == connection.ManagerComponent {
-			return building.RuntimeManifest{}, fmt.Errorf("component %q must use reserved address %q", connection.ManagerComponent.String(), connection.ManagerAddress)
-		}
-	}
-	manifest.Services = append(manifest.Services, building.ServiceMount{
-		Address: connection.ManagerAddress, Component: connection.ManagerComponent,
-		Metadata: map[string]string{"runtime.system": "connection-manager"},
-	})
-	return manifest, nil
 }
 
 func (b *Builder) ensureStaticInstances(ctx context.Context, plan *building.RuntimePlan, storage persistence.RuntimeStorage, directory *instance.Directory) error {

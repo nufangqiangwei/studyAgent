@@ -3,7 +3,6 @@ package serviceruntime
 import (
 	"agent/serviceruntime/activation"
 	"agent/serviceruntime/building"
-	"agent/serviceruntime/connection"
 	"agent/serviceruntime/contract"
 	"agent/serviceruntime/effect"
 	"agent/serviceruntime/host"
@@ -41,7 +40,6 @@ type Runtime struct {
 	host        host.Host
 	effects     effect.Worker
 	recovery    recovery.Manager
-	connections *connection.Manager
 	ids         contract.IDGenerator
 	clock       contract.Clock
 	ownerID     string
@@ -87,15 +85,7 @@ func (r *Runtime) Start(ctx context.Context) (recovery.Report, error) {
 		r.setStatus(RuntimeFailed)
 		return report, err
 	}
-	connectionReport, err := r.connections.Recover(ctx)
-	if err != nil {
-		_ = r.bus.Pause(context.Background())
-		r.setStatus(RuntimeFailed)
-		return report, err
-	}
-	report.ConnectionsRestored = connectionReport.Restored
-	report.ConnectionsFailed = connectionReport.Failed
-	report.Warnings = append(report.Warnings, connectionReport.Warnings...)
+
 	r.setStatus(RuntimeLive)
 	return report, nil
 }
@@ -271,7 +261,6 @@ func (r *Runtime) Close() error {
 	r.stopServing()
 	_ = r.host.Stop(context.Background())
 	activationErr := r.activator.PassivateAll(context.Background())
-	connectionErr := r.connections.Close()
 	busErr := r.bus.Close()
 	var storageErr error
 	if r.ownsStorage {
@@ -281,9 +270,7 @@ func (r *Runtime) Close() error {
 	if activationErr != nil {
 		return activationErr
 	}
-	if connectionErr != nil {
-		return connectionErr
-	}
+
 	if busErr != nil {
 		return busErr
 	}

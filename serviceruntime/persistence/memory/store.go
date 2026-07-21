@@ -36,8 +36,6 @@ type Store struct {
 	addresses        map[addressKey]contract.ServiceInstanceID
 	leases           map[contract.ServiceInstanceID]instance.ActivationLease
 	plans            map[planKey]persistence.PlanRecord
-	connections      map[string]persistence.ConnectionRecord
-	connectionKeys   map[connectionKey]string
 	messageSequences map[messageSequenceKey]messageSequence
 	messageHeads     map[messageStreamKey]uint64
 	inboxHeads       map[inboxStreamKey]uint64
@@ -70,13 +68,6 @@ type planKey struct {
 	revision contract.PlanRevision
 }
 
-type connectionKey struct {
-	runtime  contract.RuntimeID
-	revision contract.PlanRevision
-	owner    contract.ServiceInstanceID
-	key      string
-}
-
 type addressKey struct {
 	runtime  contract.RuntimeID
 	revision contract.PlanRevision
@@ -101,8 +92,6 @@ func New(clock contract.Clock) *Store {
 		addresses:        make(map[addressKey]contract.ServiceInstanceID),
 		leases:           make(map[contract.ServiceInstanceID]instance.ActivationLease),
 		plans:            make(map[planKey]persistence.PlanRecord),
-		connections:      make(map[string]persistence.ConnectionRecord),
-		connectionKeys:   make(map[connectionKey]string),
 		messageSequences: make(map[messageSequenceKey]messageSequence),
 		messageHeads:     make(map[messageStreamKey]uint64),
 		inboxHeads:       make(map[inboxStreamKey]uint64),
@@ -119,7 +108,6 @@ func (s *Store) Leases() instance.ActivationLeaseStore       { return s }
 func (s *Store) Committer() persistence.MessageCommitStore   { return s }
 func (s *Store) Plans() persistence.PlanStore                { return &planStore{owner: s} }
 func (s *Store) Sequences() persistence.MessageSequenceStore { return &sequenceStore{owner: s} }
-func (s *Store) Connections() persistence.ConnectionStore    { return &connectionStore{owner: s} }
 
 func (s *Store) Close() error {
 	if s == nil {

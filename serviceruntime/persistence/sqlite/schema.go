@@ -202,28 +202,7 @@ var schemaStatements = []string{
 		last_sequence INTEGER NOT NULL,
 		PRIMARY KEY(mailbox_id, stream_id)
 	)`,
-	connectionTable,
 }
-
-const connectionTable = `CREATE TABLE connections (
-	connection_id TEXT PRIMARY KEY,
-	runtime_id TEXT NOT NULL,
-	plan_revision TEXT NOT NULL,
-	owner_instance_id TEXT NOT NULL,
-	owner_address TEXT NOT NULL,
-	connection_key TEXT NOT NULL,
-	driver TEXT NOT NULL,
-	config BLOB,
-	metadata BLOB,
-	desired_open INTEGER NOT NULL,
-	status TEXT NOT NULL,
-	last_error TEXT NOT NULL DEFAULT '',
-	created_at INTEGER NOT NULL,
-	updated_at INTEGER NOT NULL,
-	opened_at INTEGER NOT NULL DEFAULT 0,
-	closed_at INTEGER NOT NULL DEFAULT 0,
-	UNIQUE(runtime_id, plan_revision, owner_instance_id, connection_key)
-)`
 
 var schemaMigrations = map[int][]string{
 	2: {
@@ -261,5 +240,8 @@ var schemaMigrations = map[int][]string{
 			PRIMARY KEY(mailbox_id, stream_id)
 		)`,
 	},
-	5: {connectionTable},
+	// Version 5 used to add a connection-specific table. The version remains a
+	// tombstone so existing runtime databases stay readable after connection
+	// persistence moved out of the generic RuntimeStorage.
+	5: nil,
 }

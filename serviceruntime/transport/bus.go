@@ -165,9 +165,9 @@ func (b *Bus) Publish(ctx context.Context, message contract.Message) (PublishRes
 	if mode == DeliveryClosed {
 		return PublishResult{}, ErrBusClosed
 	}
-	if mode == DeliveryPaused {
-		return PublishResult{}, ErrDeliveryPaused
-	}
+	// Paused stops live dispatch and message handling during recovery. Durable
+	// ingress remains available so external sources cannot lose data while
+	// service resources are being restored.
 	if err := message.Validate(); err != nil {
 		return PublishResult{}, fault.Wrap(fault.Validation, "validate_message", err)
 	}

@@ -29,20 +29,18 @@ const (
 )
 
 type Report struct {
-	RuntimeID           contract.RuntimeID
-	PlanRevision        contract.PlanRevision
-	InstancesLoaded     int
-	StreamsRestored     int
-	EventsReplayed      int
-	PendingInbox        int
-	PendingOutbox       int
-	EffectsReconciled   int
-	InstancesActivated  int
-	ConnectionsRestored int
-	ConnectionsFailed   int
-	StartedAt           time.Time
-	CompletedAt         time.Time
-	Warnings            []string
+	RuntimeID          contract.RuntimeID
+	PlanRevision       contract.PlanRevision
+	InstancesLoaded    int
+	StreamsRestored    int
+	EventsReplayed     int
+	PendingInbox       int
+	PendingOutbox      int
+	EffectsReconciled  int
+	InstancesActivated int
+	StartedAt          time.Time
+	CompletedAt        time.Time
+	Warnings           []string
 }
 
 type Manager interface {

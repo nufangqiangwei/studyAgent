@@ -38,6 +38,19 @@ type Service interface {
 	Apply(state State, event contract.StoredEvent) (State, error)
 }
 
+// ActivationResource is an optional lifecycle implemented by Services that
+// own process-local resources such as clients, caches, goroutines, or network
+// connections. RestoreResources runs only after Snapshot + Journal replay and
+// before the Activation becomes visible. ReleaseResources runs during
+// passivation before the Activation lease is released.
+//
+// Implementations must not mutate durable Service state. Durable changes still
+// flow through Handle -> Decision -> CommitMessage.
+type ActivationResource interface {
+	RestoreResources(ctx context.Context, state State) error
+	ReleaseResources(ctx context.Context) error
+}
+
 type CreateRequest struct {
 	RuntimeID    contract.RuntimeID
 	PlanRevision contract.PlanRevision

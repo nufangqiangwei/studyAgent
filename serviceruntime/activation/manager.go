@@ -237,15 +237,26 @@ func (m *Manager) Activate(ctx context.Context, instanceID contract.ServiceInsta
 		m.fail(ctx, record, lease, err)
 		return nil, err
 	}
+	if resource, ok := target.(service.ActivationResource); ok {
+		if err := resource.RestoreResources(heartbeat.Context(), restored.State.Clone()); err != nil {
+			_ = resource.ReleaseResources(context.Background())
+			_ = stopHeartbeat()
+			m.fail(ctx, record, lease, err)
+			return nil, fmt.Errorf("restore service resources: %w", err)
+		}
+	}
 	if heartbeatErr := stopHeartbeat(); heartbeatErr != nil {
+		releaseServiceResources(target)
 		m.fail(ctx, record, lease, heartbeatErr)
 		return nil, fault.Wrap(fault.LeaseLost, "activate_service", heartbeatErr)
 	}
 	if current, currentFound, currentErr := m.leases.Current(ctx, instanceID); currentErr != nil {
+		releaseServiceResources(target)
 		m.fail(ctx, record, lease, currentErr)
 		return nil, currentErr
 	} else if !currentFound || current.Epoch != lease.Epoch || current.LeaseToken != lease.LeaseToken {
 		err = persistence.ErrLeaseLost
+		releaseServiceResources(target)
 		m.fail(ctx, record, lease, err)
 		return nil, fault.Wrap(fault.LeaseLost, "activate_service", err)
 	} else {
@@ -253,6 +264,7 @@ func (m *Manager) Activate(ctx context.Context, instanceID contract.ServiceInsta
 	}
 	latest, found, err := m.instances.Get(ctx, instanceID)
 	if err != nil || !found {
+		releaseServiceResources(target)
 		_ = m.leases.Release(ctx, lease)
 		return nil, fmt.Errorf("reload service instance after restore: %w", err)
 	}
@@ -260,6 +272,7 @@ func (m *Manager) Activate(ctx context.Context, instanceID contract.ServiceInsta
 	now := m.now()
 	latest.ActivatedAt = &now
 	if err := m.instances.CompareAndSwap(ctx, latest, latest.RecordVersion); err != nil {
+		releaseServiceResources(target)
 		_ = m.leases.Release(ctx, lease)
 		return nil, err
 	}
@@ -268,6 +281,7 @@ func (m *Manager) Activate(ctx context.Context, instanceID contract.ServiceInsta
 	m.mu.Lock()
 	if existing, ok := m.active[instanceID]; ok {
 		m.mu.Unlock()
+		releaseServiceResources(target)
 		_ = m.leases.Release(ctx, lease)
 		return existing, nil
 	}
@@ -359,9 +373,10 @@ func (m *Manager) passivate(ctx context.Context, instanceID contract.ServiceInst
 	if !ok {
 		return nil
 	}
+	resourceErr := releaseServiceResourcesWithContext(ctx, active.Service)
 	record, found, err := m.instances.Get(ctx, instanceID)
 	if err != nil {
-		return err
+		return firstError(resourceErr, err)
 	}
 	if found && record.Lifecycle != instance.Terminated {
 		record.Lifecycle = instance.Passivated
@@ -370,11 +385,30 @@ func (m *Manager) passivate(ctx context.Context, instanceID contract.ServiceInst
 		transitionErr := m.instances.CompareAndSwap(ctx, record, record.RecordVersion)
 		releaseErr := m.leases.Release(ctx, active.CurrentLease())
 		if transitionErr != nil {
-			return transitionErr
+			return firstError(resourceErr, transitionErr)
 		}
-		return releaseErr
+		return firstError(resourceErr, releaseErr)
 	}
-	return m.leases.Release(ctx, active.CurrentLease())
+	return firstError(resourceErr, m.leases.Release(ctx, active.CurrentLease()))
+}
+
+func releaseServiceResources(target service.Service) {
+	_ = releaseServiceResourcesWithContext(context.Background(), target)
+}
+
+func releaseServiceResourcesWithContext(ctx context.Context, target service.Service) error {
+	resource, ok := target.(service.ActivationResource)
+	if !ok {
+		return nil
+	}
+	return resource.ReleaseResources(ctx)
+}
+
+func firstError(primary, secondary error) error {
+	if primary != nil {
+		return primary
+	}
+	return secondary
 }
 
 func (m *Manager) Terminate(ctx context.Context, instanceID contract.ServiceInstanceID) error {

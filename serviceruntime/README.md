@@ -34,7 +34,7 @@ serviceruntime/
   instance/            实例记录、生命周期、Directory、Lease
   activation/          Factory 创建、Snapshot + Replay、Activation
   request/             待删除：旧的同步外观请求客户端与 Reply Broker
-  connection/          Runtime 长连接管理器、driver 注册表与 Bus 消息协议
+  connection/          可选连接模块、driver、Effect Executor 与 Bus 事件协议
   transport/           EventBus 和 Outbox 投递
   host/                单条 Inbox 消息处理闭环
   effect/              Executor、Reconciler、Effect Worker
@@ -96,19 +96,27 @@ go func() {
 }()
 ```
 
-## Runtime 长连接管理器
+## 可选 Connection 模块
 
-`Builder.Build` 会自动创建并挂载 `$runtime.connections` 系统单例。业务 Service 不直接持有 socket、WebSocket 或其他长连接；它通过当前 EventBus 向该管理器发送 open/send/close/get/list 消息。管理器将连接记录持久化，并在 `Runtime.Start` 恢复阶段重新调用对应 driver 建立所有 `desired_open=true` 的连接。
-
-先注册具体连接 driver：
+`connection` 是显式安装的业务模块，不是 Runtime 核心组件。通用 `Builder`、`Runtime` 和 `RuntimeStorage` 都不导入或自动挂载它。应用装配层负责注册模块、driver 和 Manifest mount：
 
 ```go
-if err := builder.RegisterConnectionDriver("websocket", websocketDriver); err != nil {
+connections := connection.NewModule(connection.ModuleOptions{})
+if err := connections.RegisterDriver("websocket", websocketDriver); err != nil {
     return err
 }
+if err := connections.Register(builder); err != nil {
+    return err
+}
+
+manifest.Services = append(
+    manifest.Services,
+    connections.Mount(connection.DefaultAddress),
+)
+runtime, err := builder.Build(ctx, manifest)
 ```
 
-Service 通过 `Decision.Outgoing` 显式构造发往连接管理器的 Bus Message：
+Service 通过 `Decision.Outgoing` 向 Connection Service 发送 open/send/close/get/list 消息：
 
 ```go
 payload, err := json.Marshal(connection.OpenRequest{
@@ -124,15 +132,39 @@ return service.Decision{Outgoing: []service.OutgoingMessage{{
     Kind:    contract.MessageCommand,
     Type:    connection.OpenMessageType,
     Version: 1,
-    To:      connection.ManagerAddress,
+    To:      connection.DefaultAddress,
     Payload: payload,
 }}}, nil
 ```
 
-`OutgoingMessage.Key` 在同一 Decision 中必须稳定且唯一。driver 通过 `EmitFunc` 发出的入站数据会以定向 `runtime.connection.data` Event 送回连接所有者；Service Definition 需要声明消费相应的 data/closed/error Event。
+Connection Service 的 `Handle` 只生成 Domain Event、Reply 和 `PlannedEffect`。实际 open/send/close 由注册的 Effect Executor 在 `CommitMessage` 成功后执行；`desired_open` 等业务状态保存在 Connection Service 的 Journal/Snapshot 中，不再使用独立的核心 `ConnectionStore`。
 
-每条记录同时绑定 `RuntimeID`、`PlanRevision`、所有者 `ServiceAddress` 和具体 `ServiceInstanceID`。管理器从框架写入的消息 `From` 解析调用者，发送、查询、关闭前都会重新校验所有权，因此其他 Service 即使知道 ConnectionID 也不能访问该连接。连接 ID 和 driver 收到的发送 Frame ID 都是稳定的，driver 可用 Frame ID 对外部协议发送做幂等处理。
+Driver 入站数据采用两级持久化事件链：
 
+```text
+Driver callback
+  -> connection.driver.* Event
+  -> Connection Service Inbox
+  -> Handle returns targeted Outgoing Event
+  -> atomic Outbox commit
+  -> connection.message_received / opened / closed / error
+  -> owner Service Inbox
+```
+
+连接所有者的 `ServiceDefinition.Consumes` 必须声明需要处理的公开事件，例如：
+
+```go
+Consumes: []building.MessageContract{
+    {Kind: contract.MessageEvent, Type: connection.OpenedEventType, Version: 1},
+    {Kind: contract.MessageEvent, Type: connection.MessageReceivedEventType, Version: 1},
+    {Kind: contract.MessageEvent, Type: connection.ClosedEventType, Version: 1},
+    {Kind: contract.MessageEvent, Type: connection.ErrorEventType, Version: 1},
+}
+```
+
+公开事件带有明确的 `To=OwnerAddress`，默认不会广播给其他 Service。Driver 应尽量为远端帧提供稳定 `Event.ID`；Runtime 使用 `ConnectionID + Generation + FrameID` 派生消息 ID，以便 Inbox 对重投帧去重。发送 Effect 同样把稳定 EffectID 放入 `Frame.ID`，由需要 exactly-once 语义的外部协议进行幂等处理。
+
+连接 Session、goroutine 和 cancel 只存在于 Service Activation。Activation 恢复后通过通用 `service.ActivationResource` 重建 `desired_open=true` 的连接，Passivate 时释放资源，但不会修改持久化的期望状态。
 ## 动态服务
 
 动态服务的定义必须使用 `building.ScopeVirtual`。通过 `Runtime.DeclareInstance` 创建逻辑实例后，调用方使用明确的 `Message.To` 定向发送：
