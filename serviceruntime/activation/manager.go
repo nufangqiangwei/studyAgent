@@ -209,14 +209,17 @@ func (m *Manager) Activate(ctx context.Context, instanceID contract.ServiceInsta
 	}
 	mount, mounted := instancePlan.Service(record.Address)
 	var config []byte
+	var dependencies map[string]contract.ServiceAddress
 	if mounted {
 		config = mount.Config
+		dependencies = mount.Dependencies
 	}
 	target, err := definition.Factory.Create(heartbeat.Context(), service.CreateRequest{
 		RuntimeID: record.RuntimeID, PlanRevision: record.PlanRevision,
 		InstanceID: record.InstanceID, Address: record.Address,
 		Component: record.DefinitionRef, Config: contract.CloneRaw(config),
-		Metadata: contract.CloneStrings(record.Metadata), Artifacts: m.artifacts,
+		Dependencies: dependencies,
+		Metadata:     contract.CloneStrings(record.Metadata), Artifacts: m.artifacts,
 	})
 	if err != nil {
 		_ = stopHeartbeat()

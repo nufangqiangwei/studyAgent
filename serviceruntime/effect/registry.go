@@ -42,6 +42,7 @@ type ReconciliationResult struct {
 	Result  json.RawMessage
 	RetryAt *time.Time
 	Reason  string
+	status  persistence.EffectStatus
 }
 
 type Reconciler interface {
@@ -54,11 +55,26 @@ func (f ReconcilerFunc) ReconcileEffect(ctx context.Context, effect persistence.
 	return f(ctx, effect)
 }
 
+// TerminalFailureNotifier lets an explicitly installed module turn a final
+// Effect failure into a durable business message. The notifier must be
+// idempotent because it can run again after a crash between notification and
+// the terminal Effect-store update.
+type TerminalFailureNotifier interface {
+	NotifyTerminalFailure(ctx context.Context, effect persistence.EffectRecord, cause error) error
+}
+
+type TerminalFailureNotifierFunc func(ctx context.Context, effect persistence.EffectRecord, cause error) error
+
+func (f TerminalFailureNotifierFunc) NotifyTerminalFailure(ctx context.Context, effect persistence.EffectRecord, cause error) error {
+	return f(ctx, effect, cause)
+}
+
 type Spec struct {
-	Ref        string
-	Type       contract.EffectType
-	Executor   Executor
-	Reconciler Reconciler
+	Ref             string
+	Type            contract.EffectType
+	Executor        Executor
+	Reconciler      Reconciler
+	TerminalFailure TerminalFailureNotifier
 }
 
 type Registry struct {
@@ -105,6 +121,16 @@ func (r *Registry) ResolveReconciler(ref string) (Reconciler, bool) {
 	spec, ok := r.specs[strings.TrimSpace(ref)]
 	r.mu.RUnlock()
 	return spec.Reconciler, ok && spec.Reconciler != nil
+}
+
+func (r *Registry) ResolveTerminalFailure(ref string) (TerminalFailureNotifier, bool) {
+	if r == nil {
+		return nil, false
+	}
+	r.mu.RLock()
+	spec, ok := r.specs[strings.TrimSpace(ref)]
+	r.mu.RUnlock()
+	return spec.TerminalFailure, ok && spec.TerminalFailure != nil
 }
 
 func (r *Registry) Refs() []string {

@@ -59,6 +59,7 @@ type CreateRequest struct {
 	Address      contract.ServiceAddress
 	Component    contract.ComponentRef
 	Config       json.RawMessage
+	Dependencies map[string]contract.ServiceAddress
 	Metadata     map[string]string
 	Artifacts    artifact.Reader
 }

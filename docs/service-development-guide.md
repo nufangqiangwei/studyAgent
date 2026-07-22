@@ -4,6 +4,8 @@
 >
 > 依据：当前 `serviceruntime` 代码、`runtime-framework-interface-design.md` 和 `event-sourced-service-runtime-architecture.md`
 
+开发 `CapabilityService` 或 `ApprovalService` 时，还必须遵守 [CapabilityService 与 ApprovalService 开发边界](capability-approval-service-development-guide.md)。
+
 ## 1. 目标与优先级
 
 本规范说明如何为新的事件溯源 Runtime 开发一个 Service。目标是让每个 Service 都可以独立注册、可靠投递、确定性 Replay、崩溃恢复和版本演进，同时不破坏 Runtime 的通用边界。

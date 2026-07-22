@@ -1,7 +1,7 @@
 # 事件溯源服务 Runtime 架构
 
 > 状态：目标架构草案  
-> 更新时间：2026-07-14  
+> 更新时间：2026-07-21
 > 对应图：`project-architecture.drawio` 第三页 `Event-Sourced Service Runtime`
 
 ## 1. 架构定位
@@ -10,7 +10,7 @@
 
 在这个模型里：
 
-- Agent、Capability、Policy、Orchestrator、Memory 和 Model 都是独立服务。
+- Agent、CapabilityService、ApprovalService、Orchestrator、Memory 和 Model 等按各自状态所有权挂载；Tool、MCP 和 HTTP Executor 不是业务 Service。
 - 服务拥有自己的状态，不直接读写其他服务的状态。
 - 服务之间不持有彼此的实际对象，只通过可序列化消息通信。
 - EventBus 是可靠的虚拟网络，负责持久化、路由、投递、确认和重试。
@@ -19,7 +19,7 @@
 - Journal 是服务恢复的事实来源，Snapshot 用于减少事件重放成本。
 - Orchestrator 是业务协调者；EventBus 不理解业务完成、重试策略和响应聚合。
 
-该架构首先以单 Go 进程实现，但消息、服务地址和配置都必须可序列化。未来如果某个 Capability、MCP 或 Memory 服务需要迁移到独立进程，可以增加远程 Transport，而不改变上层协议。
+该架构首先以单 Go 进程实现，但消息、服务地址和配置都必须可序列化。未来如果某个业务 Service 或 Capability Executor 需要迁移到独立进程，可以增加远程 Transport 或远程执行 Worker，而不改变上层协议。
 
 ## 2. 角色映射
 
@@ -40,9 +40,9 @@
 | `AgentInstanceStore` | 动态实例事实存储 | 保存 AgentInstanceRecord、父子关系、地址和生命周期 |
 | `InstanceDirectory` | 动态地址目录 | 将 Agent ServiceAddress 解析为 Durable Mailbox 投递目标 |
 | `ActivationManager` | 虚拟 Agent 激活器 | 根据 DefinitionRef、Snapshot 和 Mailbox 按需创建或释放内存 Agent |
-| `Capability Gateway` | Capability 调用协调器 | 调用校验、Policy 协调、Provider 路由、结果关联 |
-| `Policy Service` | 决策服务 | Allow、Ask、Deny，处理用户授权、敏感性和预算 |
-| `Capability Service` | 外部能力服务 | 持有真正的 Tool、MCP、HTTP Client 或本地执行器 |
+| `CapabilityService` | Capability 调用服务 | 统一入口、调用 Saga、内置权限判断、Provider 路由和结果关联 |
+| `ApprovalService` | 人工审批服务 | 审批请求、用户决议、过期、取消和审计 |
+| Capability Provider / Effect Executor | 非 Service 模块组件 | 描述能力、形成执行计划并执行 Tool、MCP、HTTP 或本地副作用 |
 | `Model Service` | 模型能力服务 | Provider 适配、模型请求和响应归一化 |
 | `Memory Service` | 长期记忆服务 | 用户档案、习惯、偏好、事件记忆的提取和维护 |
 | `Knowledge Gateway` | 知识能力入口 | 对 Agent 暴露统一的 Retrieve、Ingest、Delete 和 Reindex 能力 |
@@ -79,11 +79,11 @@ type ServiceDefinition struct {
 agent.personal
 agent.research
 
-policy.default
-policy.sensitive
+memory.personal
+memory.team
 
-capability.github.personal
-capability.github.work
+knowledge.workspace.personal
+knowledge.workspace.team
 ```
 
 ### 3.2 RuntimeManifest
@@ -104,19 +104,14 @@ services:
     config:
       agent_ref: personal-assistant
 
-  - address: policy.default
-    component: policy.rules@v1
+  - address: approval.main
+    component: approval.service@v1
 
-  - address: capability.gateway
-    component: capability.gateway@v1
-
-  - address: capability.filesystem
-    component: capability.local-filesystem@v1
-
-  - address: capability.github
-    component: capability.mcp@v1
+  - address: capability.main
+    component: capability.service@v1
     config:
-      server_ref: github
+      catalog_revision: builtin-v1
+      authorization_rules_revision: default-v1
 
   - address: model.default
     component: model.provider@v1
@@ -149,8 +144,9 @@ routes:
   commands:
     goal.submit: orchestrator.main
     agent.execute: agent.personal
-    policy.evaluate: policy.default
-    capability.invoke: capability.gateway
+    approval.request: approval.main
+    approval.resolve: approval.main
+    capability.invoke: capability.main
     model.complete: model.default
     knowledge.retrieve: knowledge.gateway
     knowledge.ingest: knowledge.gateway
@@ -676,7 +672,7 @@ Message{
 
 父 Agent 即使已经 Passivate，Reply 仍会进入它的 Durable Mailbox，并在下一次 Activation 时继续处理。
 
-CapabilityGateway 不查询 AgentInstanceRecord。它只使用调用消息中的 `Caller` 和 `ReplyTo`，将结果交给 EventBus。只有 EventBus 的 MessageRouter 通过 AddressResolver 查询投递目标。
+CapabilityService 不查询 AgentInstanceRecord。它只使用调用消息中的 `Caller` 和 `ReplyTo`，将结果交给 EventBus。只有 EventBus 的 MessageRouter 通过 AddressResolver 查询投递目标。
 
 ### 7.6 Virtual Actor 激活与消失
 
@@ -803,87 +799,82 @@ EventBus
   回答：这条消息应该投递到哪里？
 ```
 
-## 8. Capability 调用 Saga
+## 8. CapabilityService 调用 Saga
 
-Capability Gateway 是统一的调用协调服务。本地 Tool、MCP、HTTP 和内部服务只是不同的 Capability Service。
+`CapabilityService` 是 Agent 使用能力的统一入口，也是 Capability 调用 Saga 的状态所有者。权限规则作为其内部确定性组件执行；Tool、MCP、HTTP 和本地执行通过 Provider、Effect Executor 与 Reconciler 扩展，不为每个能力创建 Service。
 
 ```mermaid
 sequenceDiagram
     participant A as Agent Service
-    participant B as EventBus
-    participant G as Capability Gateway
-    participant P as Policy Service
-    participant C as Capability Service
+    participant C as CapabilityService
+    participant P as ApprovalService
+    participant U as User Interaction
+    participant E as Effect Executor
 
-    A->>B: capability.invoke Command
-    B->>G: Deliver to Gateway Inbox
-    G->>B: policy.evaluate Command
-    B->>P: Deliver
-    P->>B: policy.allowed Reply
-    B->>G: Deliver Reply
-    G->>B: capability.execute Command
-    B->>C: Deliver
-    C->>B: capability.succeeded Reply
-    B->>G: Deliver Reply
-    G->>B: capability.invoke.succeeded Reply
-    B->>A: Deliver to Agent Inbox
+    A->>C: capability.invoke Command
+    Note over C: 校验 Descriptor、参数和调用上下文
+    Note over C: AuthorizationEvaluator -> Allow / Ask / Deny
+    alt Ask
+        C->>P: approval.request Command
+        P->>U: approval.requested Event
+        U->>P: approval.resolve Command
+        P->>C: approval.resolved Event
+    end
+    C-->>C: 原子提交调用事件和 PlannedEffect
+    E->>C: capability.execution.completed Event
+    C->>A: capability.result Reply
 ```
 
-Gateway 至少保存：
+CapabilityService 至少保存：
 
 ```go
 type CapabilityCallState struct {
-    CallID        string
-    Caller        ServiceAddress
-    ReplyTo       ServiceAddress
-    CapabilityRef string
-    Provider      ServiceAddress
-    Phase         CapabilityCallPhase
-    Arguments     json.RawMessage
-    Result        json.RawMessage
-    Error         string
+    CallID              string
+    InvocationMessageID string
+    Caller              ServiceAddress
+    ReplyTo             ServiceAddress
+    CapabilityRef       string
+    DescriptorRevision  string
+    Phase               CapabilityCallPhase
+    AuthorizationRule   string
+    ApprovalID          string
+    ExecutionKey        string
+    ExecutorRef         string
+    ArgumentsRef        *ArtifactRef
+    ResultRef           *ArtifactRef
+    ErrorCode           string
 }
 ```
 
 调用步骤：
 
 1. Agent Service 发送 `capability.invoke` Command。
-2. Gateway 校验 CapabilityRef、调用参数和本次 Run 的 Capability Grant。
-3. Gateway 向 Policy Service 发送 `policy.evaluate`。
-4. Policy 返回 Allow、Ask 或 Deny。
-5. Allow 时 Gateway 将 `capability.execute` 发送到实际 Capability Service。
-6. Capability Service 执行真实副作用并返回 Reply。
-7. Gateway 使用 CorrelationID 找到原始调用，将统一结果返回 Agent Service。
-8. Agent Service 将 Capability Result 添加到 RunState，并决定继续调用模型或完成 Run。
+2. CapabilityService 校验 CapabilityRef、参数、Deadline、调用来源和本次调用上下文。
+3. 内部 `AuthorizationEvaluator` 根据固定规则版本返回 Allow、Ask 或 Deny。
+4. Ask 时 CapabilityService 创建稳定 ApprovalID，并向 ApprovalService 发送 `approval.request`。
+5. ApprovalService 独立等待用户决议，再把 `approval.resolved` 定向返回 CapabilityService。
+6. Allow 或批准后，Provider 形成 `PlannedEffect`；Tool、MCP、HTTP 或本地 Executor 执行真实副作用。
+7. Executor/Reconciler 通过稳定 Durable Message 把执行结果送回 CapabilityService。
+8. CapabilityService 使用 CallID 和 CorrelationID 找到原始调用，将统一结果发送给 Agent Service。
 
-EventBus 不保存该 Saga 的业务状态；Gateway 自己拥有状态。
+如果某项能力本身已经拥有独立业务状态或 Saga，例如 Knowledge Gateway，CapabilityService 可以向它发送 Outgoing Command 并等待 Reply。它作为 Service 的原因是自身状态所有权，而不是“一个 Capability 对应一个 Service”。
 
-## 9. Policy Service
+EventBus 不保存该 Saga 的业务状态；CapabilityService 自己拥有状态。`Handle` 不得直接执行 Tool/MCP，外部操作必须先持久化为 Effect。详细开发边界见 [CapabilityService 与 ApprovalService 开发边界](capability-approval-service-development-guide.md)。
 
-Policy 是独立服务，而不是 CapabilityManager 内部的同步函数。
+## 9. ApprovalService
 
-输入可以包含：
+`ApprovalService` 独立拥有人工审批请求及其生命周期。它不判断一次 CapabilityCall 是否需要审批；Allow、Ask、Deny 的规则判断属于 CapabilityService 内部的 `AuthorizationEvaluator`。
 
-- UserID 和 RunID。
-- CapabilityRef 和参数摘要。
-- Capability 风险标签。
-- AgentRef、SkillRef 和调用来源。
-- 用户授权状态。
-- 当前预算、频率和时间窗口。
+ApprovalService 的输入可以包含：
 
-输出：
+- ApprovalID、CallID 和 CapabilityRef。
+- Requester、UserID 和可信调用来源。
+- 脱敏参数摘要、风险说明和可选 ArtifactRef。
+- RequestedAt、ExpiresAt 和审批范围；第一阶段只支持单 Call 授权。
 
-```go
-type PolicyDecision struct {
-    Decision  string // allow, ask, deny
-    Reason    string
-    RequestID string
-    ExpiresAt *time.Time
-    Grant     *CapabilityGrant
-}
-```
+ApprovalService 保存 Pending、Approved、Denied、Cancelled 或 Expired 状态，验证谁有权响应审批，并记录必要审计事实。输出为显式定向到原 Requester 的 `approval.resolved`、`approval.cancelled` 或 `approval.expired` Event。
 
-当结果为 Ask 时，Gateway 进入等待状态，并由用户交互服务发送确认请求。确认结果仍通过 EventBus 返回，不能在 Policy Service 内同步阻塞。
+审批不能在 `Handle` 中同步阻塞。用户交互层消费 `approval.requested`，随后通过 Durable Command 提交决议；进程重启后 Pending Approval 仍从 Journal 恢复。审批结果只表示用户决定，不表示外部命令已经执行。
 
 ## 10. Orchestrator Service
 
@@ -1006,7 +997,7 @@ effect.reconciliation_required
 
 ## 15. TaskService 与任务状态机
 
-任务状态机本身也应当被设计成 EventBus 上的独立有状态服务。`TaskService` 是 TaskAggregate 的唯一所有者；Agent、Orchestrator、Capability、Policy 和其他服务不能直接修改 TaskState，只能向 TaskService 发送 Command 或生命周期报告。
+任务状态机本身也应当被设计成 EventBus 上的独立有状态服务。`TaskService` 是 TaskAggregate 的唯一所有者；Agent、Orchestrator、CapabilityService、ApprovalService 和其他服务不能直接修改 TaskState，只能向 TaskService 发送 Command 或生命周期报告。
 
 ### 15.1 状态所有权
 
@@ -1017,11 +1008,12 @@ effect.reconciliation_required
 | Task State | `TaskService` | 任务阶段、等待原因、执行者、尝试次数、最终结果 |
 | Goal State | `Orchestrator Service` | Goal 拆解、子任务依赖、聚合结果和替代策略 |
 | Agent Execution State | `Agent Service` | 消息、模型回合、Pending Capability、Pending Children |
-| Capability Call State | `Capability Gateway` | Policy、Provider、调用结果和补偿状态 |
+| Capability Call State | `CapabilityService` | 内置权限结果、Approval 引用、Provider、调用结果和补偿状态 |
+| Approval State | `ApprovalService` | 审批请求、用户决议、过期、取消和审计 |
 | Service Runtime State | `ServiceHost / Supervisor` | 服务实例地址、Mailbox、生命周期和激活租约 |
 | Transport State | `EventBus` | Inbox、Outbox、ACK、Retry 和 Dead Letter |
 
-TaskState 只表达任务级事实，不复制 Agent 消息历史、Capability 参数或 Policy Approval 详情。
+TaskState 只表达任务级事实，不复制 Agent 消息历史、Capability 参数或 Approval 详情。
 
 ### 15.2 通用 TaskState
 
@@ -1185,17 +1177,17 @@ AgentExecutionState
 
 CapabilityCallState
   CallID = call-123
-  Phase = WaitingPolicy
+  Phase = WaitingApproval
 ```
 
-这些状态不是重复：Task 表达任务为何不能继续；Agent 表达模型回合如何恢复；Capability Gateway 表达具体调用执行到哪一步。
+这些状态不是重复：Task 表达任务为何不能继续；Agent 表达模型回合如何恢复；CapabilityService 表达具体调用执行到哪一步；ApprovalService 表达用户审批请求的生命周期。
 
 用户可读状态由 Projection 聚合：
 
 ```text
 Task waiting for capability call-123
-  → Capability call waiting for policy approval
-  → Policy waiting for user confirmation
+  → Capability call waiting for approval
+  → ApprovalService waiting for user confirmation
 ```
 
 ## 16. Service Runtime 状态持久化与恢复
@@ -1283,15 +1275,15 @@ AgentExecutionState
 ```
 
 ```text
-Capability Gateway ServiceInstanceRecord
+CapabilityService ServiceInstanceRecord
   Address / DefinitionRef / MailboxID / Lifecycle
 
 CapabilityCallState
-  CallID / PolicyRequestID / Provider / Caller / Result
+  CallID / AuthorizationRule / ApprovalID / Provider / Caller / Result
 ```
 
 ```text
-Policy ServiceInstanceRecord
+ApprovalService ServiceInstanceRecord
   Address / DefinitionRef / MailboxID / Lifecycle
 
 ApprovalState
@@ -1574,7 +1566,7 @@ Rerank Service（可选）
 
 ```mermaid
 flowchart TD
-    Agent["Agent Service"] --> Gateway["Capability Gateway"]
+    Agent["Agent Service"] --> Gateway["CapabilityService"]
     Gateway --> Knowledge["Knowledge Gateway"]
 
     Knowledge -->|knowledge.retrieve| RAG["RAG / Retrieval Service"]
@@ -1631,7 +1623,7 @@ type KnowledgeIngestCall struct {
 }
 ```
 
-模型只创建这些声明式调用。Capability Gateway 根据 CapabilityRef 将请求送到 Knowledge Gateway，再由 Knowledge Gateway 路由到 Retrieval 或 Ingestion Service。
+模型只创建这些声明式调用。CapabilityService 根据 CapabilityRef 将请求送到 Knowledge Gateway，再由 Knowledge Gateway 路由到 Retrieval 或 Ingestion Service。Knowledge Gateway 独立存在是因为它拥有知识读写 Saga，而不是因为每个 Capability 都需要一个 Service。
 
 ### 17.3 RAG 读取流程
 
@@ -2068,8 +2060,8 @@ memory.updated
 9. 实现 Agent Service、Model Service、静态 AgentSpec 和 Agent 专属 Instance Metadata。
 10. 实现 AgentSupervisor，并使用相同 Spawn 协议创建 Root Agent 与 Child Agent。
 11. 验证四级深度、宽度、并发、预算、Attached/Detached 和结构化并发限制。
-12. 实现 Capability Gateway、Policy Service 和一个本地 Capability Service。
-13. 将 MCP 作为新的 Capability Service 接入，不修改 Agent。
+12. 实现 CapabilityService、内置 AuthorizationEvaluator、ApprovalService 和一个本地 Tool Effect Executor。
+13. 将 MCP 作为 Capability Provider、Effect Executor 和 Reconciler 接入，不修改 Agent。
 14. 实现 Orchestrator Service、Goal 状态、多任务依赖和多响应聚合。
 15. 实现 Document Store、Embedding Service 和一个本地 Vector Store Provider。
 16. 实现 Knowledge Ingestion Saga、确定性 ChunkID/VectorID、Revision 更新、Delete 和 Reindex。
@@ -2101,8 +2093,8 @@ memory.updated
 - Agent fork 必须由 AgentSupervisor 强制执行深度、宽度、并发和预算限制。
 - Attached 子 Agent 遵守结构化并发；Detached 子 Agent 必须将所有权转移给 Orchestrator。
 - Agent 不持有 Capability 实例。
-- Capability Gateway 负责调用 Saga，实际能力由 Capability Service 持有。
-- Policy、Orchestrator、Memory、Knowledge、Embedding 和 Vector Store 都是独立服务。
+- CapabilityService 负责调用 Saga 和内置权限判断；Tool、MCP、HTTP 与本地能力由 Provider、Effect Executor 和 Reconciler 扩展，不按 Tool 创建 Service。
+- Approval、Orchestrator、Memory、Knowledge、Embedding 和 Vector Store 按各自独立状态所有权建模为服务。
 - Knowledge Retrieval 与 Knowledge Ingestion 必须分离，读取流程不能承担写入 Saga。
 - Document Store 和结构化 Memory 是事实来源，Vector Index 只是可重建的检索投影。
 - Vector Store Service 是向量数据库 Client 的唯一持有者，其他服务只能通过消息访问。

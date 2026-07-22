@@ -8,6 +8,7 @@
 - [Runtime 框架接口设计](runtime-framework-interface-design.md)：Runtime 核心接口和架构不变量。
 - [事件溯源服务 Runtime 架构](event-sourced-service-runtime-architecture.md)：目标架构和业务服务边界。
 - [Service 开发规范](service-development-guide.md)：Service 的协议、状态、Decision、Replay、Effect、注册、版本和测试规范。
+- [CapabilityService 与 ApprovalService 开发边界](capability-approval-service-development-guide.md)：能力调用、内置权限判断、人工审批、Provider 和 Effect Executor 的职责与恢复边界。
 - [项目最新现状](current-status.md)：截至 2026-07-01 的当前实现快照，说明项目如何从 `tmp/` 历史材料演进到现在的事件驱动 runner。
 - [项目概览](project-overview.md)
 - [产品能力](product-goals.md)

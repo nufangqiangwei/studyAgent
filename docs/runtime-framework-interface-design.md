@@ -28,8 +28,8 @@ Runtime 在这里是通用的事件溯源服务运行平台，负责：
 
 - `TaskService`、Task 状态机和具体 Task 消息。
 - `Agent Service`、`AgentSupervisor`、Agent fork 策略和 Agent 业务状态。
-- `Capability Gateway`、`Capability Service` 和具体 Tool/MCP。
-- `Policy Service` 和审批业务规则。
+- `CapabilityService`、内部授权规则、Capability Provider 和具体 Tool/MCP Executor。
+- `ApprovalService` 和人工审批业务规则。
 - `Model Service` 和模型供应商协议。
 - `Orchestrator Service`、Goal、Saga 和多响应聚合。
 - `Memory Service`。

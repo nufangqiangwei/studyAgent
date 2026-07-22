@@ -207,9 +207,9 @@ Effect 必须先作为 `PlannedEffect` 与业务提交一起持久化，再由 R
 - `TaskService`：TaskState 的唯一写入者；其他服务只能通过 Message 报告进度。
 - `Agent Service`：单任务模型循环和可恢复 AgentState。
 - `AgentSupervisor`：统一创建 Root/Child Agent，强制深度、宽度、并发、预算和 Attached/Detached 规则。
-- `Capability Gateway`：Capability 调用 Saga、Policy 协调、Provider 路由和结果关联。
-- `Capability Service`：真正持有 Tool、MCP、HTTP Client 或本地执行器。
-- `Policy Service`：Allow / Ask / Deny 和用户审批状态。
+- `CapabilityService`：Agent 使用能力的统一入口，拥有 Capability 调用 Saga、内置确定性权限判断、Provider 路由和结果关联。
+- `ApprovalService`：独立拥有人工审批请求、决议、过期和审计状态；不重新计算 Capability 权限规则。
+- Capability Provider、Tool、MCP、HTTP Client 和本地执行器不是业务 Service；它们作为模块组件、Effect Executor 或 Reconciler 注册。只有本身拥有独立业务状态或 Saga 的能力才继续作为独立业务 Service。
 - `Model Service`：模型供应商适配和请求响应归一化。
 - `Orchestrator Service`：Goal 分解、任务协调、响应聚合、替代策略和补偿。
 - `Memory Service`：结构化用户档案、偏好、习惯和事件记忆。
@@ -370,6 +370,7 @@ go test ./serviceruntime/...
 - [Runtime 框架接口设计](docs/runtime-framework-interface-design.md)：Runtime 核心接口、对象关系、原子提交、Activation、Effect 和恢复设计。
 - [事件溯源服务 Runtime 架构](docs/event-sourced-service-runtime-architecture.md)：完整目标架构，以及 Task、Agent、Capability、Policy、Orchestrator、Memory 和 Knowledge 等业务服务边界。
 - [Service 开发规范](docs/service-development-guide.md)：业务 Service 的依赖边界、协议、状态、Decision、Replay、Effect、注册、版本和测试要求。
+- [CapabilityService 与 ApprovalService 开发边界](docs/capability-approval-service-development-guide.md)：两个服务的状态所有权、消息流程、权限/审批分工和 Provider/Executor 边界。
 - [文档索引](docs/README.md)：`docs/` 目录内文档清单和维护原则。
 - [项目概览](docs/project-overview.md)：项目目标、用户场景和非目标。
 - [产品能力](docs/product-goals.md)：CLI agent 核心能力和学习拆解。
@@ -381,9 +382,10 @@ go test ./serviceruntime/...
 1. 先读 [Service Runtime 实现说明](serviceruntime/README.md)，确认当前代码已经实现到哪一步。
 2. 再读 [Runtime 框架接口设计](docs/runtime-framework-interface-design.md)，理解核心接口和必须保持的不变量。
 3. 开发具体 Service 前读 [Service 开发规范](docs/service-development-guide.md)。
-4. 再读 [事件溯源服务 Runtime 架构](docs/event-sourced-service-runtime-architecture.md)，理解未来业务服务如何挂载到 Runtime。
-5. 按任务阅读 `serviceruntime` 对应包和测试；代码与设计稿不一致时，以代码和测试描述的已实现行为为准，并明确记录差异。
-6. 最后参考项目概览、产品能力和开发约定；旧 `internal/` 文档只用于历史追溯。
+4. 开发 CapabilityService 或 ApprovalService 时，再读 [CapabilityService 与 ApprovalService 开发边界](docs/capability-approval-service-development-guide.md)。
+5. 再读 [事件溯源服务 Runtime 架构](docs/event-sourced-service-runtime-architecture.md)，理解未来业务服务如何挂载到 Runtime。
+6. 按任务阅读 `serviceruntime` 对应包和测试；代码与设计稿不一致时，以代码和测试描述的已实现行为为准，并明确记录差异。
+7. 最后参考项目概览、产品能力和开发约定；旧 `internal/` 文档只用于历史追溯。
 
 ## 本地 Go 开发环境
 

@@ -89,12 +89,12 @@ func (w *RuntimeWorker) DispatchNext(ctx context.Context, ownerID string) (WorkR
 		if reconcileErr == nil && heartbeat.Err() != nil {
 			reconcileErr = fault.Wrap(fault.LeaseLost, "renew_effect_claim", heartbeat.Err())
 		}
-		return WorkResult{EffectID: claim.Record.EffectID, Status: reconciliationStatus(result.Action)}, reconcileErr
+		return WorkResult{EffectID: claim.Record.EffectID, Status: reconciliationStatus(result)}, reconcileErr
 	}
 	if claim.Record.Deadline != nil && !claim.Record.Deadline.After(w.now()) {
 		err = fault.Wrap(fault.Permanent, "execute_effect", fmt.Errorf("effect %q deadline has expired", claim.Record.EffectID))
-		storeErr := w.store.MarkTerminalFailed(ctx, claim, err)
-		return WorkResult{EffectID: claim.Record.EffectID, Status: persistence.EffectTerminalFailed}, firstError(err, storeErr)
+		status, storeErr := w.markTerminalFailed(ctx, claim, err)
+		return WorkResult{EffectID: claim.Record.EffectID, Status: status}, firstError(err, storeErr)
 	}
 	executor, found := w.registry.ResolveExecutor(claim.Record.ExecutorRef)
 	if !found {
@@ -126,8 +126,8 @@ func (w *RuntimeWorker) DispatchNext(ctx context.Context, ownerID string) (WorkR
 	}
 	retry := w.retryPolicy.DecideRetry(fault.RetryInput{Error: executeErr, Attempt: claim.Record.Attempt, MaxAttempts: w.maxAttempts, Now: w.now()})
 	if !retry.Retry {
-		err = w.store.MarkTerminalFailed(ctx, claim, executeErr)
-		return WorkResult{EffectID: claim.Record.EffectID, Status: persistence.EffectTerminalFailed}, firstError(executeErr, err)
+		status, terminalErr := w.markTerminalFailed(ctx, claim, executeErr)
+		return WorkResult{EffectID: claim.Record.EffectID, Status: status}, firstError(executeErr, terminalErr)
 	}
 	err = w.store.MarkFailed(ctx, claim, executeErr, &retry.RetryAt)
 	return WorkResult{EffectID: claim.Record.EffectID, Status: persistence.EffectFailed}, firstError(executeErr, err)
@@ -168,21 +168,38 @@ func (w *RuntimeWorker) reconcileClaim(ctx context.Context, claim persistence.Ef
 	switch result.Action {
 	case ReconcileComplete:
 		if payloadErr := validateEffectResultPayload(w.payloadPolicy(claim.Record), result.Result); payloadErr != nil {
-			err = w.store.MarkTerminalFailed(ctx, claim, payloadErr)
+			result.status, err = w.markTerminalFailed(ctx, claim, payloadErr)
 			return result, firstError(payloadErr, err)
 		}
 		err = w.store.MarkSucceeded(ctx, claim, persistence.EffectResult{Payload: result.Result})
+		result.status = persistence.EffectSucceeded
 	case ReconcileRetry:
 		err = w.store.MarkFailed(ctx, claim, fmt.Errorf("reconciliation requested retry: %s", result.Reason), result.RetryAt)
+		result.status = persistence.EffectFailed
 	case ReconcileFail:
-		err = w.store.MarkTerminalFailed(ctx, claim, fmt.Errorf("reconciliation failed: %s", result.Reason))
+		result.status, err = w.markTerminalFailed(ctx, claim, fmt.Errorf("reconciliation failed: %s", result.Reason))
 	case ReconcileAskUser, ReconcileCompensate:
 		err = w.store.RequireReconciliation(ctx, claim, fmt.Errorf("reconciliation requires %s: %s", result.Action, result.Reason))
+		result.status = persistence.EffectReconciliationRequired
 	default:
 		err = fmt.Errorf("unsupported reconciliation action %q", result.Action)
 		_ = w.store.RequireReconciliation(ctx, claim, err)
+		result.status = persistence.EffectReconciliationRequired
 	}
 	return result, err
+}
+
+func (w *RuntimeWorker) markTerminalFailed(ctx context.Context, claim persistence.EffectClaim, cause error) (persistence.EffectStatus, error) {
+	if notifier, found := w.registry.ResolveTerminalFailure(claim.Record.ExecutorRef); found {
+		if notifyErr := notifier.NotifyTerminalFailure(ctx, claim.Record.Clone(), cause); notifyErr != nil {
+			storeErr := w.store.RequireReconciliation(ctx, claim, notifyErr)
+			return persistence.EffectReconciliationRequired, firstError(notifyErr, storeErr)
+		}
+	}
+	if err := w.store.MarkTerminalFailed(ctx, claim, cause); err != nil {
+		return persistence.EffectTerminalFailed, err
+	}
+	return persistence.EffectTerminalFailed, nil
 }
 
 func (w *RuntimeWorker) payloadPolicy(record persistence.EffectRecord) building.InlinePayloadPolicy {
@@ -198,8 +215,11 @@ func validateEffectResultPayload(policy building.InlinePayloadPolicy, payload []
 	return fault.Wrap(fault.Permanent, "validate_effect_result_payload", fmt.Errorf("effect result payload is %d bytes; maximum inline size is %d bytes; store the content as an artifact and return ArtifactRef", len(payload), policy.MaxEffectBytes))
 }
 
-func reconciliationStatus(action ReconciliationAction) persistence.EffectStatus {
-	switch action {
+func reconciliationStatus(result ReconciliationResult) persistence.EffectStatus {
+	if result.status != "" {
+		return result.status
+	}
+	switch result.Action {
 	case ReconcileComplete:
 		return persistence.EffectSucceeded
 	case ReconcileRetry:
