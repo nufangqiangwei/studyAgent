@@ -141,6 +141,68 @@ func TestDuplicatePendingAndConflictingRequest(t *testing.T) {
 	}
 }
 
+func TestExistingTaskIDDelegatesIdempotencyAndConflictToTask(t *testing.T) {
+	svc, state := completedCreateState(t)
+	materialized, err := decodeState(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalOwner := materialized.Tasks["task-1"]
+
+	retry := createMessage(t, "message-retry", "request-2", "task-1", "user-1", "hello")
+	pending, err := svc.Handle(context.Background(), state, retry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending.Events) != 1 || len(pending.Outgoing) != 1 ||
+		pending.Outgoing[0].Type != task.CreateMessageType ||
+		pending.Outgoing[0].To != originalOwner.Address {
+		t.Fatalf("existing task retry did not target the durable Task instance: %#v", pending)
+	}
+	state = applyDecision(t, svc, state, pending)
+
+	completed, err := svc.Handle(
+		context.Background(),
+		state,
+		createdTaskStatus(t, "request-2", originalOwner.Address, "task-1", "user-1"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state = applyDecision(t, svc, state, completed)
+	presentation := decodePresentation(t, completed.Effects[0].Payload)
+	if presentation.Created == nil || presentation.Created.Task.TaskID != "task-1" {
+		t.Fatalf("idempotent retry presentation=%#v", presentation)
+	}
+	materialized, err = decodeState(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if materialized.Tasks["task-1"] != originalOwner {
+		t.Fatalf("idempotent retry replaced task ownership: %#v", materialized.Tasks["task-1"])
+	}
+
+	conflicting := createMessage(t, "message-conflict", "request-3", "task-1", "user-1", "different")
+	conflictPending, err := svc.Handle(context.Background(), state, conflicting)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state = applyDecision(t, svc, state, conflictPending)
+	payload, err := json.Marshal(service.ReplyError{Code: "task_conflict", Message: "different content"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := svc.Handle(context.Background(), state, contract.Message{
+		Kind: contract.MessageReply, Type: task.StatusMessageType, Version: task.ProtocolVersion,
+		From: originalOwner.Address, CorrelationID: "request-3", Payload: payload,
+		Metadata: map[string]string{contract.MetadataReplyError: "true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertErrorDecision(t, failed, errRequestConflict)
+}
+
 func TestGetUsesOwnedMappingAndHidesAuthorization(t *testing.T) {
 	svc, state := completedCreateState(t)
 

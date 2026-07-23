@@ -55,7 +55,7 @@ func TestRuntimeAdapterCreateTaskRegistersWaiterBeforeSending(t *testing.T) {
 			Created: &webgateway.TaskCreatedPresentation{
 				RequestID: request.RequestID,
 				Task: webgateway.TaskDTO{
-					TaskID: request.TaskID, GoalID: request.GoalID, Title: request.Title,
+					TaskID: request.TaskID, GoalID: request.GoalID, UserID: "user-1", Title: request.Title,
 					Input: request.Input, Phase: "created", CreatedAt: now, UpdatedAt: now,
 				},
 			},
@@ -74,7 +74,7 @@ func TestRuntimeAdapterCreateTaskRegistersWaiterBeforeSending(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if task.TaskID != "task-web-request-1" || task.GoalID != "goal-1" ||
+	if task.TaskID != "task-web-request-1" || task.GoalID != "goal-1" || task.UserID != "user-1" ||
 		task.Title != "demo" || task.Input != "do work" || task.Phase != "created" {
 		t.Fatalf("task=%#v", task)
 	}
@@ -133,7 +133,7 @@ func TestRuntimeAdapterGetTaskMapsPresentationAndStableErrors(t *testing.T) {
 					presentation.Found = &webgateway.TaskFoundPresentation{
 						RequestID: request.RequestID,
 						Task: webgateway.TaskDTO{
-							TaskID: request.TaskID, Input: "input", Phase: "running",
+							TaskID: request.TaskID, UserID: "user-1", Input: "input", Phase: "running",
 							CreatedAt: now, UpdatedAt: now.Add(time.Minute),
 						},
 					}
@@ -159,7 +159,7 @@ func TestRuntimeAdapterGetTaskMapsPresentationAndStableErrors(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if task.TaskID != "task-1" || task.Input != "input" || task.Phase != "running" ||
+			if task.TaskID != "task-1" || task.UserID != "user-1" || task.Input != "input" || task.Phase != "running" ||
 				!task.CreatedAt.Equal(now) || !task.UpdatedAt.Equal(now.Add(time.Minute)) {
 				t.Fatalf("task=%#v", task)
 			}
@@ -200,7 +200,7 @@ func TestRuntimeAdapterCancellationLeavesDurableRequestAndAcceptsLatePresentatio
 		Found: &webgateway.TaskFoundPresentation{
 			RequestID: request.RequestID,
 			Task: webgateway.TaskDTO{
-				TaskID: "task-1", Input: "input", Phase: "created",
+				TaskID: "task-1", UserID: "user-1", Input: "input", Phase: "created",
 				CreatedAt: time.Now(), UpdatedAt: time.Now(),
 			},
 		},
@@ -227,6 +227,27 @@ func TestRuntimeAdapterIngressFailureMapsToUnavailable(t *testing.T) {
 	_, err = adapter.GetTask(context.Background(), Actor{UserID: "user-1"}, "task-1")
 	if !errors.Is(err, ErrRuntimeUnavailable) {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestRuntimeAdapterAvailabilityRejectsBeforeDurableSend(t *testing.T) {
+	called := false
+	adapter, err := newTestRuntimeAdapter(runtimeIngressFunc(func(context.Context, contract.Message) error {
+		called = true
+		return nil
+	}), &adapterTestIDs{}, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adapter.Close()
+	adapter.setAvailability(func() bool { return false })
+
+	_, err = adapter.GetTask(context.Background(), Actor{UserID: "user-1"}, "task-1")
+	if !errors.Is(err, ErrRuntimeUnavailable) {
+		t.Fatalf("err=%v", err)
+	}
+	if called {
+		t.Fatal("unavailable adapter sent a durable Runtime message")
 	}
 }
 

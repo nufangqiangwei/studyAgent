@@ -22,7 +22,7 @@ func TestPresentationExecutorAndReconcilerUseSamePresentationID(t *testing.T) {
 		Created: &TaskCreatedPresentation{
 			RequestID: "request-1",
 			Task: TaskDTO{
-				TaskID: "task-1", Phase: "created", Input: "hello",
+				TaskID: "task-1", UserID: "user-1", Phase: "created", Input: "hello",
 				CreatedAt: fixedTime(), UpdatedAt: fixedTime(),
 			},
 		},

@@ -8,6 +8,12 @@ Web 专用 Runtime application 组合根使用 `DataDir/runtime.db` 和 `DataDir
 Virtual Definition；当前 Capability Catalog 为空且授权规则显式 Deny，Agent 也不会声明
 Workspace 能力。
 
+`POST /v1/tasks` 与 `GET /v1/tasks/{id}` 已通过 Web Gateway、Task Service、Runtime Adapter
+和 SQLite 持久化真实接通。关闭进程后使用相同 DataDir 与 Runtime ID 重启，仍可查询之前
+创建的 Task；响应不是来自旧进程的 Adapter 缓存。当前创建只会持久化到 `created`：
+自动 `Ready`、`Assign` 和 `Start` 尚未实现，因此不会调用模型，也不会自动执行 Agent。
+Capability Catalog 仍为空，Agent 当前不能读取或修改工作区。
+
 生产 `Run` 会先构建 application、恢复并 Start Runtime，再启动 Runtime Serve。只有 Runtime
 已经处于 Live 且 Serve 没有立即失败时才会创建 HTTP Listener 并输出监听地址。启动恢复失败
 不会对外提供 HTTP；Runtime 或 HTTP 发生 fatal 时，另一侧也会停止并完成资源清理。
@@ -15,8 +21,12 @@ Workspace 能力。
 ## 启动
 
 ```powershell
+$env:AGENT_DATA_DIR = ".agent/runtime"
+$env:AGENT_RUNTIME_ID = "agent-server"
+$env:AGENT_PROVIDER = "deepseek"
 $env:AGENT_MODEL = "deepseek-chat"
-$env:AGENT_API_KEY = "<your-api-key>"
+$env:AGENT_BASE_URL = "https://api.deepseek.com"
+$env:AGENT_API_KEY = "<set-your-api-key-locally>"
 go run ./main/server
 ```
 
@@ -81,7 +91,9 @@ X-User-ID: user-1
   "task": {
     "task_id": "task-42",
     "goal_id": "goal-1",
+    "user_id": "user-1",
     "title": "示例任务",
+    "input": "完成指定工作",
     "phase": "created",
     "created_at": "2026-07-22T00:00:00Z",
     "updated_at": "2026-07-22T00:00:00Z"
@@ -108,7 +120,8 @@ X-User-ID: user-1
 Upgrade: websocket
 ```
 
-连接是只下行的。接通 Runtime 后，服务端发送：
+连接是只下行的，并且目前只向已经在线的 WebSocket 连接发送新通知；断线期间的通知不会在
+重连后补发，也没有游标或历史重放。接通 Runtime 后，服务端发送：
 
 ```json
 {
