@@ -691,6 +691,32 @@ func TestConcurrentInFlightCreateForSameTaskIDIsRejected(t *testing.T) {
 
 }
 
+func TestInFlightGetDoesNotConflictWithCreateForSameTaskID(t *testing.T) {
+	svc, state := completedCreateState(t)
+	get := getMessage(t, "get-message-1", "get-request-1", "task-1", "user-1")
+	getDecision, err := svc.Handle(context.Background(), state, get)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(getDecision.Events) != 1 || len(getDecision.Outgoing) != 1 ||
+		getDecision.Outgoing[0].Type != task.GetMessageType {
+		t.Fatalf("get request did not become in-flight: %#v", getDecision)
+	}
+	state = applyDecision(t, svc, state, getDecision)
+
+	create := createMessage(t, "create-message-2", "create-request-2", "task-1", "user-1", "hello")
+	createDecision, err := svc.Handle(context.Background(), state, create)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(createDecision.Effects) != 0 ||
+		len(createDecision.Events) != 1 ||
+		len(createDecision.Outgoing) != 1 ||
+		createDecision.Outgoing[0].Type != task.CreateMessageType {
+		t.Fatalf("in-flight get blocked a valid create: %#v", createDecision)
+	}
+}
+
 func TestReplayIsDeterministicAndDoesNotPresent(t *testing.T) {
 	svc, initial := newTestService(t)
 	recorded, _ := svc.Handle(context.Background(), initial, createMessage(t, "message-1", "request-1", "task-1", "user-1", "hello"))
@@ -782,7 +808,7 @@ func TestTerminalProjectionIsBounded(t *testing.T) {
 }
 
 func TestDefinitionDeclaresContractsAndSystemPermission(t *testing.T) {
-	definition := Definition(ServiceFactory{clock: fixedClock{fixedTime()}, defaultAgent: "agent.test"})
+	definition := Definition(ServiceFactory{clock: fixedClock{fixedTime()}})
 	if definition.Component != Component || definition.Scope != "runtime_singleton" || definition.StateSchema != StateSchema {
 		t.Fatalf("unexpected definition: %#v", definition)
 	}

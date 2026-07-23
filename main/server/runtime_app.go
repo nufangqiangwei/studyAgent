@@ -142,21 +142,8 @@ func buildApplication(ctx context.Context, config serverConfig, options applicat
 		return nil, fmt.Errorf("configure Agent Service: %w", err)
 	}
 	agentMount := agentModule.Mount(agentservice.DefaultAddress, llmClient.DefaultAddress, capability.DefaultAddress)
-	revision, err := webPlanRevision(config, agentMount.Config)
-	if err != nil {
-		cleanup(nil, nil)
-		return nil, fmt.Errorf("create Web Runtime plan revision: %w", err)
-	}
 	adapterBinding := &runtimeAdapterBinding{
 		expectedRuntimeID: contract.RuntimeID(config.RuntimeID),
-		expectedRevision:  revision,
-	}
-	interactionModule, err := interaction.NewModule(interaction.ModuleOptions{
-		Presenter: adapterBinding.interactionPresenter(), Clock: options.clock,
-	})
-	if err != nil {
-		cleanup(nil, nil)
-		return nil, fmt.Errorf("configure Interaction Service: %w", err)
 	}
 	webGatewayModule, err := webgateway.NewModule(webgateway.ModuleOptions{
 		Presenter: adapterBinding.webPresenter(), Clock: options.clock,
@@ -165,6 +152,20 @@ func buildApplication(ctx context.Context, config serverConfig, options applicat
 	if err != nil {
 		cleanup(nil, nil)
 		return nil, fmt.Errorf("configure Web Gateway Service: %w", err)
+	}
+	webGatewayMount := webGatewayModule.Mount(webgateway.DefaultAddress)
+	revision, err := webPlanRevision(config, agentMount.Config, webGatewayMount.Config)
+	if err != nil {
+		cleanup(nil, nil)
+		return nil, fmt.Errorf("create Web Runtime plan revision: %w", err)
+	}
+	adapterBinding.expectedRevision = revision
+	interactionModule, err := interaction.NewModule(interaction.ModuleOptions{
+		Presenter: adapterBinding.interactionPresenter(), Clock: options.clock,
+	})
+	if err != nil {
+		cleanup(nil, nil)
+		return nil, fmt.Errorf("configure Interaction Service: %w", err)
 	}
 	taskModule := task.NewModule(options.clock)
 
@@ -206,7 +207,7 @@ func buildApplication(ctx context.Context, config serverConfig, options applicat
 			capabilityModule.Mount(capability.DefaultAddress, approval.DefaultAddress, ""),
 			agentMount,
 			interactionModule.Mount(interaction.DefaultAddress, agentservice.DefaultAddress),
-			webGatewayModule.Mount(webgateway.DefaultAddress),
+			webGatewayMount,
 		},
 	})
 	if err != nil {
@@ -267,7 +268,11 @@ func denyWebCapability(capability.AuthorizationInput) (capability.AuthorizationD
 	}, nil
 }
 
-func webPlanRevision(config serverConfig, agentConfig json.RawMessage) (contract.PlanRevision, error) {
+func webPlanRevision(
+	config serverConfig,
+	agentConfig json.RawMessage,
+	webGatewayConfig json.RawMessage,
+) (contract.PlanRevision, error) {
 	timeout := config.ModelTimeout
 	if timeout <= 0 {
 		timeout = 2 * time.Minute
@@ -281,9 +286,10 @@ func webPlanRevision(config serverConfig, agentConfig json.RawMessage) (contract
 			BaseURL  string        `json:"base_url"`
 			Timeout  time.Duration `json:"timeout"`
 		} `json:"model"`
-		CapabilityCatalogRef string `json:"capability_catalog_ref"`
-		AuthorizationRuleRef string `json:"authorization_rule_ref"`
-		WebGatewayProtocol   int    `json:"web_gateway_protocol"`
+		CapabilityCatalogRef string          `json:"capability_catalog_ref"`
+		AuthorizationRuleRef string          `json:"authorization_rule_ref"`
+		WebGatewayProtocol   int             `json:"web_gateway_protocol"`
+		WebGatewayConfig     json.RawMessage `json:"web_gateway_config"`
 	}{
 		CompositionVersion: webCompositionVersion,
 		AgentConfig:        contract.CloneRaw(agentConfig),
@@ -301,6 +307,7 @@ func webPlanRevision(config serverConfig, agentConfig json.RawMessage) (contract
 		CapabilityCatalogRef: webCapabilityCatalogRef,
 		AuthorizationRuleRef: webAuthorizationRuleRef,
 		WebGatewayProtocol:   webgateway.ProtocolVersion,
+		WebGatewayConfig:     contract.CloneRaw(webGatewayConfig),
 	})
 	if err != nil {
 		return "", err

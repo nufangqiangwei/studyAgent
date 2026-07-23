@@ -106,6 +106,75 @@ func TestCreateSagaAdvancesToRunningAcrossRuntimeRestart(t *testing.T) {
 	}
 }
 
+func TestRecoveredOldPlanRevisionUsesItsDefaultAgent(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	clock := fixedClock{fixedTime()}
+	storage := persistencememory.New(clock)
+	defer storage.Close()
+	presented := make(chan Presentation, 8)
+
+	runtime1 := buildGatewayRuntimeRevision(t, ctx, storage, clock, presented, "v1", "agent.old")
+	if _, err := runtime1.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	publishCreate(t, ctx, runtime1, "web-create-old", "request-old", "task-old")
+	handleGatewayCommitted(t, ctx, runtime1, DefaultAddress)
+	if err := runtime1.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	runtime2 := buildGatewayRuntimeRevision(t, ctx, storage, clock, presented, "v2", "agent.new")
+	defer runtime2.Close()
+	if _, err := runtime2.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	stopServe, serveDone := serveGatewayRuntime(t, ctx, runtime2)
+	presentation := waitForPresentation(t, ctx, presented, "request-old")
+	stopGatewayRuntime(t, stopServe, serveDone)
+
+	if presentation.Created == nil {
+		t.Fatalf("old revision presentation=%#v", presentation)
+	}
+	if presentation.Created.Task.Phase != task.PhaseRunning ||
+		presentation.Created.Task.AssignedTo != "agent.old" {
+		t.Fatalf("old revision used the wrong mount config: %#v", presentation.Created.Task)
+	}
+}
+
+func TestRecoveredInFlightCreateStillRejectsDifferentCreateForSameTaskID(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	clock := fixedClock{fixedTime()}
+	storage := persistencememory.New(clock)
+	defer storage.Close()
+	presented := make(chan Presentation, 8)
+
+	runtime1 := buildGatewayRuntime(t, ctx, storage, clock, presented)
+	if _, err := runtime1.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	publishCreate(t, ctx, runtime1, "web-create-1", "request-1", "task-1")
+	handleGatewayCommitted(t, ctx, runtime1, DefaultAddress)
+	if err := runtime1.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	runtime2 := buildGatewayRuntime(t, ctx, storage, clock, presented)
+	defer runtime2.Close()
+	if _, err := runtime2.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	publishCreate(t, ctx, runtime2, "web-create-2", "request-2", "task-1")
+	handleGatewayCommitted(t, ctx, runtime2, DefaultAddress)
+	dispatchEffectsUntilIdle(t, ctx, runtime2)
+
+	presentation := waitForPresentation(t, ctx, presented, "request-2")
+	if presentation.Error == nil || presentation.Error.Code != errRequestConflict {
+		t.Fatalf("recovered reservation did not reject conflicting create: %#v", presentation)
+	}
+}
+
 // sagaStep runs one round-trip of the Gateway→Task→Gateway cycle:
 // dispatch outbox (command to task) → task handles → dispatch outbox (status to gateway) → gateway handles
 func sagaStep(t *testing.T, ctx context.Context, runtime *serviceruntime.Runtime, taskAddress, gatewayAddress contract.ServiceAddress) {
@@ -123,6 +192,18 @@ func buildGatewayRuntime(
 	clock contract.Clock,
 	presented chan Presentation,
 ) *serviceruntime.Runtime {
+	return buildGatewayRuntimeRevision(t, ctx, storage, clock, presented, "v1", "agent.test")
+}
+
+func buildGatewayRuntimeRevision(
+	t *testing.T,
+	ctx context.Context,
+	storage *persistencememory.Store,
+	clock contract.Clock,
+	presented chan Presentation,
+	revision contract.PlanRevision,
+	defaultAgent contract.ServiceAddress,
+) *serviceruntime.Runtime {
 	t.Helper()
 	builder, err := serviceruntime.NewBuilder(serviceruntime.BuilderOptions{
 		Storage: storage, Clock: clock, IDs: serviceruntime.StableIDs{}, OwnerID: "web-gateway-integration-node",
@@ -139,7 +220,7 @@ func buildGatewayRuntime(
 			presented <- presentation.clone()
 			return nil
 		}),
-		DefaultAgent: "agent.test",
+		DefaultAgent: defaultAgent,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -148,7 +229,7 @@ func buildGatewayRuntime(
 		t.Fatal(err)
 	}
 	runtime, err := builder.Build(ctx, building.RuntimeManifest{
-		Runtime:  building.RuntimeSpec{ID: "web-gateway-integration-runtime", Revision: "v1"},
+		Runtime:  building.RuntimeSpec{ID: "web-gateway-integration-runtime", Revision: revision},
 		Services: []building.ServiceMount{module.Mount(DefaultAddress)},
 		Recovery: building.RecoveryPolicy{SnapshotEveryEvents: 1},
 	})
@@ -156,6 +237,70 @@ func buildGatewayRuntime(
 		t.Fatal(err)
 	}
 	return runtime
+}
+
+func publishCreate(
+	t *testing.T,
+	ctx context.Context,
+	runtime *serviceruntime.Runtime,
+	messageID string,
+	requestID string,
+	taskID string,
+) {
+	t.Helper()
+	payload, err := json.Marshal(CreateTaskRequest{
+		RequestID: requestID, TaskID: taskID, GoalID: "goal-1", Title: "demo", Input: "hello",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Publish(ctx, contract.Message{
+		ID: messageID, Kind: contract.MessageCommand, Type: CreateTaskMessageType, Version: ProtocolVersion,
+		From: "web.adapter", To: DefaultAddress, UserID: "user-1", GoalID: "goal-1", Payload: payload,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func serveGatewayRuntime(
+	t *testing.T,
+	ctx context.Context,
+	runtime *serviceruntime.Runtime,
+) (context.CancelFunc, chan error) {
+	t.Helper()
+	serveContext, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() {
+		done <- runtime.ServeWithOptions(serveContext, serviceruntime.ServeOptions{PollInterval: time.Millisecond})
+	}()
+	return cancel, done
+}
+
+func waitForPresentation(
+	t *testing.T,
+	ctx context.Context,
+	presented <-chan Presentation,
+	requestID string,
+) Presentation {
+	t.Helper()
+	for {
+		select {
+		case presentation := <-presented:
+			if presentation.RequestID == requestID {
+				return presentation
+			}
+		case <-ctx.Done():
+			t.Fatalf("wait for presentation %q: %v", requestID, ctx.Err())
+		}
+	}
+}
+
+func stopGatewayRuntime(t *testing.T, cancel context.CancelFunc, done <-chan error) {
+	t.Helper()
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("serve Runtime: %v", err)
+	}
 }
 
 func handleGatewayCommitted(t *testing.T, ctx context.Context, runtime *serviceruntime.Runtime, address contract.ServiceAddress) {

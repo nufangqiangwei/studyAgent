@@ -197,6 +197,20 @@ func TestBuildApplicationComposesUnstartedWebRuntime(t *testing.T) {
 	if !strings.Contains(spec.SystemPrompt, webWorkspaceGuard) {
 		t.Fatalf("agent system prompt lacks workspace guard: %q", spec.SystemPrompt)
 	}
+	webPlan, found := plan.Service(webgateway.DefaultAddress)
+	if !found {
+		t.Fatal("web gateway mount is missing")
+	}
+	var webConfig struct {
+		Version      int                     `json:"version"`
+		DefaultAgent contract.ServiceAddress `json:"default_agent"`
+	}
+	if err := json.Unmarshal(webPlan.Config, &webConfig); err != nil {
+		t.Fatalf("decode web gateway config: %v", err)
+	}
+	if webConfig.Version != 1 || webConfig.DefaultAgent != agentservice.DefaultAddress {
+		t.Fatalf("web gateway config=%#v", webConfig)
+	}
 	if _, err := app.runtime.DeclareInstance(ctx, serviceruntime.InstanceDeclaration{
 		Address: "task.test", Component: task.Component,
 	}); err != nil {
@@ -253,12 +267,13 @@ func TestWebPlanRevisionIsDeterministicVersionedAndSecretFree(t *testing.T) {
 	config := validRuntimeApplicationConfig(`C:\machine-a\private-runtime`)
 	config.APIKey = "super-secret-api-key"
 	agentConfig := json.RawMessage(`{"ref":"web-agent","version":"v1","system_prompt":"guarded","capabilities":[],"max_turns":8}`)
+	webGatewayConfig := json.RawMessage(`{"version":1,"default_agent":"agent.main"}`)
 
-	first, err := webPlanRevision(config, agentConfig)
+	first, err := webPlanRevision(config, agentConfig, webGatewayConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := webPlanRevision(config, agentConfig)
+	second, err := webPlanRevision(config, agentConfig, webGatewayConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +283,7 @@ func TestWebPlanRevisionIsDeterministicVersionedAndSecretFree(t *testing.T) {
 	localChange := config
 	localChange.APIKey = "different-secret"
 	localChange.DataDir = `D:\machine-b\other-runtime`
-	localRevision, err := webPlanRevision(localChange, agentConfig)
+	localRevision, err := webPlanRevision(localChange, agentConfig, webGatewayConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +292,7 @@ func TestWebPlanRevisionIsDeterministicVersionedAndSecretFree(t *testing.T) {
 	}
 	modelChange := config
 	modelChange.Model = "different-model"
-	changedRevision, err := webPlanRevision(modelChange, agentConfig)
+	changedRevision, err := webPlanRevision(modelChange, agentConfig, webGatewayConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,12 +301,20 @@ func TestWebPlanRevisionIsDeterministicVersionedAndSecretFree(t *testing.T) {
 	}
 	agentChange := append(json.RawMessage(nil), agentConfig...)
 	agentChange = json.RawMessage(strings.Replace(string(agentChange), `"max_turns":8`, `"max_turns":9`, 1))
-	changedRevision, err = webPlanRevision(config, agentChange)
+	changedRevision, err = webPlanRevision(config, agentChange, webGatewayConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if changedRevision == first {
 		t.Fatal("AgentSpec behavior did not change plan revision")
+	}
+	webGatewayChange := json.RawMessage(`{"version":1,"default_agent":"agent.changed"}`)
+	changedRevision, err = webPlanRevision(config, agentConfig, webGatewayChange)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changedRevision == first {
+		t.Fatal("Web Gateway behavior config did not change plan revision")
 	}
 }
 

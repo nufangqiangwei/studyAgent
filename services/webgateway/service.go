@@ -130,7 +130,10 @@ func (s *webGatewayService) handleCreate(state State, message contract.Message) 
 	// without this check two concurrent requests to the same TaskID could
 	// both enter PhaseDeclaringTask and race through the entire Saga.
 	for _, existing := range state.Requests {
-		if existing.TaskID == request.TaskID && !existing.Phase.terminal() && existing.RequestID != request.RequestID {
+		if existing.Operation == OperationCreate &&
+			existing.TaskID == request.TaskID &&
+			!existing.Phase.terminal() &&
+			existing.RequestID != request.RequestID {
 			return s.recordNewFailure(request, errRequestConflict,
 				"a request for this task id is already in progress")
 		}
