@@ -4,6 +4,8 @@ go 1.18
 
 require modernc.org/sqlite v1.25.0
 
+require github.com/gorilla/websocket v1.5.3
+
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.3.0 // indirect

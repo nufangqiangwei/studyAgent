@@ -1,0 +1,10 @@
+2:I["8c0f216c4604",[],"Children",1]
+3:I["15c18cfaeeff",[],"LayoutSegmentProvider",1]
+4:I["8c0f216c4604",[],"Slot",1]
+5:I["593f344dc510",[],"RedirectBoundary",1]
+:HL["/assets/index-Owuq6OTo.css","style"]
+0:{"__route":"route:/","__interceptionContext":null,"__layoutIds":["layout:/"],"__rootLayout":"/","page:/":"$L1","layout:/":[[[["$","link","css:/assets/index-Owuq6OTo.css",{"rel":"stylesheet","precedence":"vite-rsc/importer-resources","href":"/assets/index-Owuq6OTo.css","data-rsc-css-href":"/assets/index-Owuq6OTo.css"}],"$undefined"],["$","html",null,{"lang":"zh-CN","children":["$","body",null,{"children":["$","$L2",null,{}]}]}]],null],"route:/":[[["$","meta",null,{"charSet":"utf-8"}],[["$","title","0",{"children":"Agent 工作台"}],["$","meta","1",{"name":"description","content":"面向开发任务的 Agent 对话与执行工作台。"}],["$","meta","2",{"property":"og:title","content":"Agent 工作台"}],["$","meta","3",{"property":"og:description","content":"清晰掌控每一次执行"}],["$","meta","4",{"property":"og:image","content":"https://agent-workbench-qiangwei.wobuxiangyongbaidu.chatgpt.site/og.png"}],["$","meta","5",{"name":"twitter:card","content":"summary_large_image"}],["$","meta","6",{"name":"twitter:title","content":"Agent 工作台"}],["$","meta","7",{"name":"twitter:description","content":"清晰掌控每一次执行"}],["$","meta","8",{"name":"twitter:image","content":"https://agent-workbench-qiangwei.wobuxiangyongbaidu.chatgpt.site/og.png"}]],[["$","meta","0",{"name":"viewport","content":"width=device-width, initial-scale=1"}]]],["$","$L3",null,{"segmentMap":{"children":[]},"children":["$","$L4",null,{"id":"layout:/","parallelSlots":"$undefined","children":["$","$L5",null,{"children":["$","$L3",null,{"segmentMap":{"children":[]},"children":["$","$L4",null,{"id":"page:/"}]}]}]}]}]],"__layoutFlags":{"layout:/":"s"},"__artifactCompatibility":{"schemaVersion":1,"graphVersion":"app-route-graph:4uhn5s1wvoptc","deploymentVersion":"9d32a898-70ef-4657-9d91-a255d7961ecd","appElementsSchemaVersion":1,"rscPayloadSchemaVersion":1,"rootBoundaryId":"/","renderEpoch":null}}
+6:I["6efdf509a785",[],"default",1]
+1:["$","$L6",null,{"params":"$@7","searchParams":"$@8"}]
+7:{}
+8:{}

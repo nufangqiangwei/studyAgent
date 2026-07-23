@@ -13,6 +13,10 @@ the Capability mailbox. Terminal Effect failures use the Runtime's generic
 terminal-failure notifier, so calls cannot remain permanently waiting merely
 because the Effect exhausted its retry policy.
 
+Applications may register no providers when they intentionally expose an
+empty Capability catalog, as the initial model-only CLI does. A registered
+provider must still expose at least one valid descriptor.
+
 Completed calls are retained in full for `TerminalRetention`, compacted to
 idempotency tombstones, and may be removed after `IdempotencyWindow` by a
 trusted durable `capability.prune` command.

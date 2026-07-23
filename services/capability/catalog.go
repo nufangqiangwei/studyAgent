@@ -19,7 +19,7 @@ type Catalog struct {
 
 func NewCatalog(providers []CapabilityProvider) (*Catalog, error) {
 	if len(providers) == 0 {
-		return nil, fmt.Errorf("at least one capability provider is required")
+		return &Catalog{entries: make(map[string]catalogEntry)}, nil
 	}
 	entries := make(map[string]catalogEntry)
 	providerRefs := make(map[string]struct{})
