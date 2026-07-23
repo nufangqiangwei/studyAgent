@@ -26,12 +26,25 @@ type RequestPhase string
 const (
 	PhaseDeclaringTask RequestPhase = "declaring_task"
 	PhaseWaitingTask   RequestPhase = "waiting_task"
+	PhaseMarkingReady  RequestPhase = "marking_ready"
+	PhaseAssigning     RequestPhase = "assigning"
+	PhaseStarting      RequestPhase = "starting"
 	PhaseSucceeded     RequestPhase = "succeeded"
 	PhaseFailed        RequestPhase = "failed"
 )
 
 func (p RequestPhase) terminal() bool {
 	return p == PhaseSucceeded || p == PhaseFailed
+}
+
+func (p RequestPhase) valid() bool {
+	switch p {
+	case PhaseDeclaringTask, PhaseWaitingTask, PhaseMarkingReady, PhaseAssigning, PhaseStarting,
+		PhaseSucceeded, PhaseFailed:
+		return true
+	default:
+		return false
+	}
 }
 
 type CreateTaskRequest struct {
@@ -63,19 +76,21 @@ func (e ErrorDTO) validate() error {
 }
 
 type TaskDTO struct {
-	TaskID        string                `json:"task_id"`
-	GoalID        string                `json:"goal_id,omitempty"`
-	UserID        string                `json:"user_id"`
-	Title         string                `json:"title,omitempty"`
-	Input         string                `json:"input,omitempty"`
-	InputArtifact *contract.ArtifactRef `json:"input_artifact,omitempty"`
-	Phase         task.Phase            `json:"phase"`
-	Attempt       int                   `json:"attempt,omitempty"`
-	ResultRef     *contract.ArtifactRef `json:"result_ref,omitempty"`
-	LastError     *ErrorDTO             `json:"last_error,omitempty"`
-	CreatedAt     time.Time             `json:"created_at"`
-	UpdatedAt     time.Time             `json:"updated_at"`
-	CompletedAt   *time.Time            `json:"completed_at,omitempty"`
+	TaskID        string                  `json:"task_id"`
+	GoalID        string                  `json:"goal_id,omitempty"`
+	UserID        string                  `json:"user_id"`
+	Title         string                  `json:"title,omitempty"`
+	Input         string                  `json:"input,omitempty"`
+	InputArtifact *contract.ArtifactRef   `json:"input_artifact,omitempty"`
+	Phase         task.Phase              `json:"phase"`
+	AssignedTo    contract.ServiceAddress `json:"assigned_to,omitempty"`
+	ActiveRunID   string                  `json:"active_run_id,omitempty"`
+	Attempt       int                     `json:"attempt,omitempty"`
+	ResultRef     *contract.ArtifactRef   `json:"result_ref,omitempty"`
+	LastError     *ErrorDTO               `json:"last_error,omitempty"`
+	CreatedAt     time.Time               `json:"created_at"`
+	UpdatedAt     time.Time               `json:"updated_at"`
+	CompletedAt   *time.Time              `json:"completed_at,omitempty"`
 }
 
 func (t TaskDTO) clone() TaskDTO {
@@ -203,7 +218,8 @@ func taskDTOFromState(value task.State) TaskDTO {
 	result := TaskDTO{
 		TaskID: value.TaskID, GoalID: value.GoalID, UserID: value.UserID, Title: value.Title,
 		Input: value.Input, InputArtifact: cloneArtifact(value.InputArtifact),
-		Phase: value.Phase, Attempt: value.Attempt, ResultRef: cloneArtifact(value.ResultRef),
+		Phase: value.Phase, AssignedTo: value.AssignedTo, ActiveRunID: value.ActiveRunID,
+		Attempt: value.Attempt, ResultRef: cloneArtifact(value.ResultRef),
 		CreatedAt: value.CreatedAt.UTC(), UpdatedAt: value.UpdatedAt.UTC(),
 		CompletedAt: cloneTime(value.CompletedAt),
 	}

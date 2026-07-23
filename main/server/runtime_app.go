@@ -160,6 +160,7 @@ func buildApplication(ctx context.Context, config serverConfig, options applicat
 	}
 	webGatewayModule, err := webgateway.NewModule(webgateway.ModuleOptions{
 		Presenter: adapterBinding.webPresenter(), Clock: options.clock,
+		DefaultAgent: agentservice.DefaultAddress,
 	})
 	if err != nil {
 		cleanup(nil, nil)

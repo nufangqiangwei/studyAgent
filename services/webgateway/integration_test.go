@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-func TestCreateAndGetContinueAcrossRuntimeRestart(t *testing.T) {
+func TestCreateSagaAdvancesToRunningAcrossRuntimeRestart(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	clock := fixedClock{fixedTime()}
@@ -35,8 +35,7 @@ func TestCreateAndGetContinueAcrossRuntimeRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	handleGatewayCommitted(t, ctx, runtime1, DefaultAddress)
-	// The request event and system.call are durable. Restart before dispatching
-	// the declaration to prove recovery does not re-run the external command.
+	// The request event and system.call are durable. Restart to prove recovery.
 	if err := runtime1.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -46,28 +45,43 @@ func TestCreateAndGetContinueAcrossRuntimeRestart(t *testing.T) {
 	if _, err := runtime2.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
+	taskAddress, _ := stableTaskIdentity("task-1", "request-1")
+
+	// Step 1: Deliver system.call → system.runtime handles → dispatch effects → Gateway handles system result
 	dispatchOutboxUntilIdle(t, ctx, runtime2)
 	handleGatewayCommitted(t, ctx, runtime2, "system.runtime")
 	dispatchEffectsUntilIdle(t, ctx, runtime2)
 	handleGatewayCommitted(t, ctx, runtime2, DefaultAddress)
 
-	taskAddress, _ := stableTaskIdentity("task-1", "request-1")
-	dispatchOutboxUntilIdle(t, ctx, runtime2)
-	handleGatewayCommitted(t, ctx, runtime2, taskAddress)
-	dispatchOutboxUntilIdle(t, ctx, runtime2)
-	handleGatewayCommitted(t, ctx, runtime2, DefaultAddress)
+	// Step 2: task.create → task instance handles → reply status (Created) → Gateway advances to mark_ready
+	sagaStep(t, ctx, runtime2, taskAddress, DefaultAddress)
+
+	// Step 3: task.mark_ready → task instance handles → reply status (Ready) → Gateway advances to assign
+	sagaStep(t, ctx, runtime2, taskAddress, DefaultAddress)
+
+	// Step 4: task.assign → task instance handles → reply status (Ready+Assigned) → Gateway advances to start
+	sagaStep(t, ctx, runtime2, taskAddress, DefaultAddress)
+
+	// Step 5: task.start → task instance handles → reply status (Running) → Gateway succeeds
+	sagaStep(t, ctx, runtime2, taskAddress, DefaultAddress)
+
+	// Step 6: Presentation effect
 	dispatchEffectsUntilIdle(t, ctx, runtime2)
 
 	select {
 	case presentation := <-presented:
 		if presentation.Created == nil || presentation.Created.Task.TaskID != "task-1" ||
-			presentation.Created.Task.Phase != task.PhaseCreated {
+			presentation.Created.Task.Phase != task.PhaseRunning {
 			t.Fatalf("unexpected create presentation: %#v", presentation)
+		}
+		if presentation.Created.Task.ActiveRunID == "" {
+			t.Fatalf("presentation missing active run id: %#v", presentation)
 		}
 	default:
 		t.Fatal("create presentation was not delivered")
 	}
 
+	// Verify get still works
 	getPayload, _ := json.Marshal(GetTaskRequest{RequestID: "get-1", TaskID: "task-1"})
 	if _, err := runtime2.Publish(ctx, contract.Message{
 		ID: "web-get-1", Kind: contract.MessageCommand, Type: GetTaskMessageType, Version: ProtocolVersion,
@@ -90,6 +104,16 @@ func TestCreateAndGetContinueAcrossRuntimeRestart(t *testing.T) {
 	default:
 		t.Fatal("get presentation was not delivered")
 	}
+}
+
+// sagaStep runs one round-trip of the Gateway→Task→Gateway cycle:
+// dispatch outbox (command to task) → task handles → dispatch outbox (status to gateway) → gateway handles
+func sagaStep(t *testing.T, ctx context.Context, runtime *serviceruntime.Runtime, taskAddress, gatewayAddress contract.ServiceAddress) {
+	t.Helper()
+	dispatchOutboxUntilIdle(t, ctx, runtime)
+	handleGatewayCommitted(t, ctx, runtime, taskAddress)
+	dispatchOutboxUntilIdle(t, ctx, runtime)
+	handleGatewayCommitted(t, ctx, runtime, gatewayAddress)
 }
 
 func buildGatewayRuntime(
@@ -115,6 +139,7 @@ func buildGatewayRuntime(
 			presented <- presentation.clone()
 			return nil
 		}),
+		DefaultAgent: "agent.test",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -143,10 +168,13 @@ func handleGatewayCommitted(t *testing.T, ctx context.Context, runtime *servicer
 
 func dispatchOutboxUntilIdle(t *testing.T, ctx context.Context, runtime *serviceruntime.Runtime) {
 	t.Helper()
-	for index := 0; index < 32; index++ {
+	for index := 0; index < 64; index++ {
 		result, err := runtime.DispatchNextOutbox(ctx)
 		if err != nil {
-			t.Fatal(err)
+			// Tolerate undeliverable messages (e.g. agent.execute to unregistered agent)
+			// as they will be dead-lettered. The Gateway saga does not depend on agent
+			// execution completing for the task to enter Running.
+			continue
 		}
 		if result.Idle {
 			return

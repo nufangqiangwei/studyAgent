@@ -10,10 +10,13 @@ import (
 
 func TestPresentationExecutorAndReconcilerUseSamePresentationID(t *testing.T) {
 	var delivered []string
-	module, err := NewModule(ModuleOptions{Presenter: PresenterFunc(func(_ context.Context, presentation Presentation) error {
-		delivered = append(delivered, presentation.PresentationID)
-		return nil
-	})})
+	module, err := NewModule(ModuleOptions{
+		Presenter: PresenterFunc(func(_ context.Context, presentation Presentation) error {
+			delivered = append(delivered, presentation.PresentationID)
+			return nil
+		}),
+		DefaultAgent: "agent.test",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,5 +66,11 @@ func TestPresentationExecutorAndReconcilerUseSamePresentationID(t *testing.T) {
 func TestModuleRequiresPresenter(t *testing.T) {
 	if _, err := NewModule(ModuleOptions{}); err == nil {
 		t.Fatal("expected presenter requirement")
+	}
+}
+
+func TestModuleRequiresDefaultAgent(t *testing.T) {
+	if _, err := NewModule(ModuleOptions{Presenter: PresenterFunc(func(_ context.Context, _ Presentation) error { return nil })}); err == nil {
+		t.Fatal("expected default agent requirement")
 	}
 }

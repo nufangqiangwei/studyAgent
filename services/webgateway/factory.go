@@ -12,7 +12,8 @@ import (
 )
 
 type ServiceFactory struct {
-	clock contract.Clock
+	clock        contract.Clock
+	defaultAgent contract.ServiceAddress
 }
 
 func (f ServiceFactory) Create(_ context.Context, request service.CreateRequest) (service.Service, error) {
@@ -22,7 +23,10 @@ func (f ServiceFactory) Create(_ context.Context, request service.CreateRequest)
 	if request.InstanceID == "" || request.Address == "" {
 		return nil, fmt.Errorf("web gateway service requires instance id and address")
 	}
-	return &webGatewayService{address: request.Address, instanceID: request.InstanceID, clock: f.clock}, nil
+	return &webGatewayService{
+		address: request.Address, instanceID: request.InstanceID,
+		clock: f.clock, defaultAgent: f.defaultAgent,
+	}, nil
 }
 
 func Definition(factory service.Factory) building.ServiceDefinition {
@@ -37,6 +41,9 @@ func Definition(factory service.Factory) building.ServiceDefinition {
 		Produces: []building.MessageContract{
 			{Kind: contract.MessageCommand, Type: runtimesystem.CallMessageType, Version: runtimesystem.CallVersion},
 			{Kind: contract.MessageCommand, Type: task.CreateMessageType, Version: task.ProtocolVersion},
+			{Kind: contract.MessageCommand, Type: task.MarkReadyMessageType, Version: task.ProtocolVersion},
+			{Kind: contract.MessageCommand, Type: task.AssignMessageType, Version: task.ProtocolVersion},
+			{Kind: contract.MessageCommand, Type: task.StartMessageType, Version: task.ProtocolVersion},
 			{Kind: contract.MessageQuery, Type: task.GetMessageType, Version: task.ProtocolVersion},
 		},
 		EffectExecutors:  []string{PresentationExecutorRef},

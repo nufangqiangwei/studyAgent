@@ -13,8 +13,9 @@ type Registrar interface {
 }
 
 type ModuleOptions struct {
-	Presenter Presenter
-	Clock     contract.Clock
+	Presenter    Presenter
+	Clock        contract.Clock
+	DefaultAgent contract.ServiceAddress
 }
 
 type Module struct {
@@ -26,9 +27,12 @@ func NewModule(options ModuleOptions) (*Module, error) {
 	if options.Presenter == nil {
 		return nil, fmt.Errorf("web gateway presenter is required")
 	}
+	if options.DefaultAgent == "" {
+		return nil, fmt.Errorf("web gateway default agent address is required")
+	}
 	return &Module{
 		presenter: options.Presenter,
-		factory:   ServiceFactory{clock: options.Clock},
+		factory:   ServiceFactory{clock: options.Clock, defaultAgent: options.DefaultAgent},
 	}, nil
 }
 

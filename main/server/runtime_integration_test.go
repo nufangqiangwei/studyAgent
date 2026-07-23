@@ -283,10 +283,10 @@ func assertRuntimeIntegrationTask(
 ) {
 	t.Helper()
 	if got.TaskID != want.TaskID || got.GoalID != want.GoalID || got.UserID != userID ||
-		got.Title != want.Title || got.Input != want.Input || got.Phase != "created" {
+		got.Title != want.Title || got.Input != want.Input || got.Phase != "running" {
 		t.Fatalf("task=%#v", got)
 	}
-	if !got.CreatedAt.Equal(now) || !got.UpdatedAt.Equal(now) || got.CompletedAt != nil {
+	if !got.CreatedAt.Equal(now) || got.UpdatedAt.IsZero() || got.CompletedAt != nil {
 		t.Fatalf("task timestamps=%#v", got)
 	}
 }

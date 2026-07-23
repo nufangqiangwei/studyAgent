@@ -21,6 +21,9 @@ var StateSchema = contract.SchemaRef{Name: "webgateway.service.state", Version: 
 const (
 	requestRecordedEvent          contract.EventType = "webgateway.request.recorded"
 	taskDeclarationCompletedEvent contract.EventType = "webgateway.task.declaration_completed"
+	taskMarkedReadyEvent          contract.EventType = "webgateway.task.marked_ready"
+	taskAssignedEvent             contract.EventType = "webgateway.task.assigned"
+	taskStartRequestedEvent       contract.EventType = "webgateway.task.start_requested"
 	requestSucceededEvent         contract.EventType = "webgateway.request.succeeded"
 	requestFailedEvent            contract.EventType = "webgateway.request.failed"
 	maxInlineTaskInputBytes                          = 16 << 10

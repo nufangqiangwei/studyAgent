@@ -23,12 +23,14 @@ const (
 	errDeclarationFailed = "web_task_declaration_failed"
 	errTaskRequestFailed = "web_task_request_failed"
 	errDeadlineExpired   = "web_task_deadline_expired"
+	errAgentUnavailable  = "web_task_agent_unavailable"
 )
 
 type webGatewayService struct {
-	address    contract.ServiceAddress
-	instanceID contract.ServiceInstanceID
-	clock      contract.Clock
+	address      contract.ServiceAddress
+	instanceID   contract.ServiceInstanceID
+	clock        contract.Clock
+	defaultAgent contract.ServiceAddress
 }
 
 func (*webGatewayService) Descriptor() service.Descriptor {
@@ -287,24 +289,11 @@ func (s *webGatewayService) handleTaskStatus(state State, message contract.Messa
 	if !found {
 		return service.Decision{}, nil
 	}
-	if request.Phase != PhaseWaitingTask {
-		return service.Decision{}, nil
-	}
 	if message.From != request.TaskAddress {
 		return service.Decision{}, fmt.Errorf("task status for request %q came from unexpected address %q", requestID, message.From)
 	}
 	if isReplyError(message) {
-		var replyError service.ReplyError
-		if err := json.Unmarshal(message.Payload, &replyError); err != nil {
-			return service.Decision{}, fmt.Errorf("decode task error reply: %w", err)
-		}
-		if request.Operation == OperationGet && (replyError.Code == "task_not_found" || replyError.Code == "task_access_denied") {
-			return s.failPending(request, errTaskNotFound, "task was not found", false)
-		}
-		if request.Operation == OperationCreate && replyError.Code == "task_conflict" {
-			return s.failPending(request, errRequestConflict, "task id is already bound to different content", false)
-		}
-		return s.failPending(request, errTaskRequestFailed, "task service rejected the request", replyError.Retryable)
+		return s.handleTaskStatusError(request, message)
 	}
 	var status task.StatusResponse
 	if err := json.Unmarshal(message.Payload, &status); err != nil {
@@ -314,14 +303,207 @@ func (s *webGatewayService) handleTaskStatus(state State, message contract.Messa
 		status.Task.OwnerAddress != s.address || status.Task.UserID != request.UserID {
 		return service.Decision{}, fmt.Errorf("task status does not match gateway request %q", request.RequestID)
 	}
-	if request.Operation == OperationCreate && status.Task.Phase != task.PhaseCreated {
-		return service.Decision{}, fmt.Errorf("task create request %q returned phase %q", request.RequestID, status.Task.Phase)
+
+	// For get operations, the original behavior: success when task status is received.
+	if request.Operation == OperationGet {
+		if request.Phase != PhaseWaitingTask {
+			return service.Decision{}, nil
+		}
+		result := taskDTOFromState(status.Task.Clone())
+		if err := result.validate(); err != nil {
+			return service.Decision{}, fmt.Errorf("validate task status: %w", err)
+		}
+		return s.succeedPending(state, request, result)
 	}
-	result := taskDTOFromState(status.Task.Clone())
+
+	// For create operations, drive the saga based on current task phase and gateway phase.
+	if request.Operation != OperationCreate {
+		return service.Decision{}, nil
+	}
+	return s.progressCreateSaga(state, request, status)
+}
+
+func (s *webGatewayService) handleTaskStatusError(request RequestState, message contract.Message) (service.Decision, error) {
+	var replyError service.ReplyError
+	if err := json.Unmarshal(message.Payload, &replyError); err != nil {
+		return service.Decision{}, fmt.Errorf("decode task error reply: %w", err)
+	}
+	if request.Operation == OperationGet && (replyError.Code == "task_not_found" || replyError.Code == "task_access_denied") {
+		return s.failPending(request, errTaskNotFound, "task was not found", false)
+	}
+	if request.Operation == OperationCreate && replyError.Code == "task_conflict" {
+		return s.failPending(request, errRequestConflict, "task id is already bound to different content", false)
+	}
+	return s.failPending(request, errTaskRequestFailed, "task service rejected the request", replyError.Retryable)
+}
+
+// progressCreateSaga advances the task creation saga from created through mark_ready, assign, start to running.
+// It handles late/duplicate replies by ignoring task phases that belong to previous steps,
+// and handles tasks that are already ahead of the current saga step by skipping forward.
+func (s *webGatewayService) progressCreateSaga(state State, request RequestState, status task.StatusResponse) (service.Decision, error) {
+	taskState := status.Task.Clone()
+
+	switch request.Phase {
+	case PhaseWaitingTask:
+		// After task.create, the task should be in Created or beyond.
+		switch {
+		case taskState.Phase == task.PhaseCreated:
+			return s.advanceToMarkReady(request)
+		case taskState.Phase == task.PhaseReady && taskState.AssignedTo != "":
+			// Task is already ready and assigned; skip mark_ready and assign.
+			return s.advanceToStart(request)
+		case taskState.Phase == task.PhaseReady:
+			// Task is already ready; skip mark_ready.
+			return s.advanceToAssign(request)
+		case taskState.Phase == task.PhaseRunning || taskState.Phase.Terminal():
+			// Task is already executing or done; succeed directly.
+			return s.fastForwardSuccess(state, request, taskState)
+		default:
+			return service.Decision{}, fmt.Errorf("task create request %q returned unexpected phase %q", request.RequestID, taskState.Phase)
+		}
+
+	case PhaseMarkingReady:
+		// After task.mark_ready, the task should be in Ready or beyond.
+		switch {
+		case taskState.Phase == task.PhaseReady && taskState.AssignedTo != "":
+			// Already assigned; skip assign step.
+			return s.advanceToStart(request)
+		case taskState.Phase == task.PhaseReady:
+			return s.advanceToAssign(request)
+		case taskState.Phase == task.PhaseRunning || taskState.Phase.Terminal():
+			return s.fastForwardSuccess(state, request, taskState)
+		case taskState.Phase == task.PhaseCreated:
+			// Duplicate/late reply for task.create; idempotently ignore.
+			return service.Decision{}, nil
+		default:
+			return service.Decision{}, fmt.Errorf("task mark ready request %q returned unexpected phase %q", request.RequestID, taskState.Phase)
+		}
+
+	case PhaseAssigning:
+		// After task.assign, the task should have AssignedTo set or be Running.
+		switch {
+		case taskState.AssignedTo != "" && (taskState.Phase == task.PhaseReady || taskState.Phase == task.PhaseCreated):
+			return s.advanceToStart(request)
+		case taskState.Phase == task.PhaseRunning || taskState.Phase.Terminal():
+			return s.fastForwardSuccess(state, request, taskState)
+		case taskState.Phase == task.PhaseReady && taskState.AssignedTo == "":
+			// Duplicate/late reply for mark_ready; idempotently ignore.
+			return service.Decision{}, nil
+		case taskState.Phase == task.PhaseCreated:
+			// Duplicate/late reply for task.create; idempotently ignore.
+			return service.Decision{}, nil
+		default:
+			return service.Decision{}, fmt.Errorf("task assign request %q returned unexpected state phase=%q assigned=%q", request.RequestID, taskState.Phase, taskState.AssignedTo)
+		}
+
+	case PhaseStarting:
+		// After task.start, the task should be in Running.
+		switch {
+		case taskState.Phase == task.PhaseRunning:
+			if taskState.ActiveRunID == "" {
+				return service.Decision{}, fmt.Errorf("task start request %q did not set active run id", request.RequestID)
+			}
+			return s.fastForwardSuccess(state, request, taskState)
+		case taskState.Phase.Terminal():
+			return s.fastForwardSuccess(state, request, taskState)
+		default:
+			// Duplicate/late reply for a previous step; idempotently ignore.
+			return service.Decision{}, nil
+		}
+
+	default:
+		// Request already in a non-creating phase; idempotently ignore.
+		return service.Decision{}, nil
+	}
+}
+
+func (s *webGatewayService) fastForwardSuccess(state State, request RequestState, taskState task.State) (service.Decision, error) {
+	result := taskDTOFromState(taskState)
 	if err := result.validate(); err != nil {
 		return service.Decision{}, fmt.Errorf("validate task status: %w", err)
 	}
 	return s.succeedPending(state, request, result)
+}
+
+func (s *webGatewayService) advanceToMarkReady(request RequestState) (service.Decision, error) {
+	if request.Deadline != nil && !request.Deadline.After(s.now()) {
+		return s.failPending(request, errDeadlineExpired, "task deadline has expired", false)
+	}
+	now := s.now()
+	next := request.clone()
+	next.Phase, next.UpdatedAt = PhaseMarkingReady, now
+	event, err := newRequestEvent("web-task-mark-ready-event/"+request.RequestID, taskMarkedReadyEvent, next, nil)
+	if err != nil {
+		return service.Decision{}, err
+	}
+	payload, err := json.Marshal(json.RawMessage("{}"))
+	if err != nil {
+		return service.Decision{}, err
+	}
+	return service.Decision{
+		Events: []service.NewEvent{event},
+		Outgoing: []service.OutgoingMessage{{
+			Key:  "web-task-mark-ready/" + request.RequestID,
+			Kind: contract.MessageCommand, Type: task.MarkReadyMessageType, Version: task.ProtocolVersion,
+			To: request.TaskAddress, ReplyTo: s.address, CorrelationID: request.RequestID,
+			Deadline: cloneTime(request.Deadline), Payload: payload,
+		}},
+	}, nil
+}
+
+func (s *webGatewayService) advanceToAssign(request RequestState) (service.Decision, error) {
+	if request.Deadline != nil && !request.Deadline.After(s.now()) {
+		return s.failPending(request, errDeadlineExpired, "task deadline has expired", false)
+	}
+	if s.defaultAgent == "" {
+		return s.failPending(request, errAgentUnavailable, "no default agent is configured for the web gateway", false)
+	}
+	now := s.now()
+	next := request.clone()
+	next.Phase, next.UpdatedAt = PhaseAssigning, now
+	event, err := newRequestEvent("web-task-assign-event/"+request.RequestID, taskAssignedEvent, next, nil)
+	if err != nil {
+		return service.Decision{}, err
+	}
+	assignPayload, err := json.Marshal(task.AssignRequest{AgentAddress: s.defaultAgent})
+	if err != nil {
+		return service.Decision{}, err
+	}
+	return service.Decision{
+		Events: []service.NewEvent{event},
+		Outgoing: []service.OutgoingMessage{{
+			Key:  "web-task-assign/" + request.RequestID,
+			Kind: contract.MessageCommand, Type: task.AssignMessageType, Version: task.ProtocolVersion,
+			To: request.TaskAddress, ReplyTo: s.address, CorrelationID: request.RequestID,
+			Deadline: cloneTime(request.Deadline), Payload: assignPayload,
+		}},
+	}, nil
+}
+
+func (s *webGatewayService) advanceToStart(request RequestState) (service.Decision, error) {
+	if request.Deadline != nil && !request.Deadline.After(s.now()) {
+		return s.failPending(request, errDeadlineExpired, "task deadline has expired", false)
+	}
+	now := s.now()
+	next := request.clone()
+	next.Phase, next.UpdatedAt = PhaseStarting, now
+	event, err := newRequestEvent("web-task-start-event/"+request.RequestID, taskStartRequestedEvent, next, nil)
+	if err != nil {
+		return service.Decision{}, err
+	}
+	payload, err := json.Marshal(json.RawMessage("{}"))
+	if err != nil {
+		return service.Decision{}, err
+	}
+	return service.Decision{
+		Events: []service.NewEvent{event},
+		Outgoing: []service.OutgoingMessage{{
+			Key:  "web-task-start/" + request.RequestID,
+			Kind: contract.MessageCommand, Type: task.StartMessageType, Version: task.ProtocolVersion,
+			To: request.TaskAddress, ReplyTo: s.address, CorrelationID: request.RequestID,
+			Deadline: cloneTime(request.Deadline), Payload: payload,
+		}},
+	}, nil
 }
 
 func (s *webGatewayService) duplicateDecision(existing RequestState, incomingOperation Operation, fingerprint string) (service.Decision, error) {

@@ -82,6 +82,18 @@ func (r RequestState) validate() error {
 		if r.TaskAddress == "" || r.TaskInstanceID == "" || r.Task != nil || r.Error != nil || r.CompletedAt != nil || r.PresentationID != "" {
 			return fmt.Errorf("waiting request state is invalid")
 		}
+	case PhaseMarkingReady:
+		if r.Operation != OperationCreate || r.TaskAddress == "" || r.TaskInstanceID == "" || r.Task != nil || r.Error != nil || r.CompletedAt != nil || r.PresentationID != "" {
+			return fmt.Errorf("marking ready request state is invalid")
+		}
+	case PhaseAssigning:
+		if r.Operation != OperationCreate || r.TaskAddress == "" || r.TaskInstanceID == "" || r.Task != nil || r.Error != nil || r.CompletedAt != nil || r.PresentationID != "" {
+			return fmt.Errorf("assigning request state is invalid")
+		}
+	case PhaseStarting:
+		if r.Operation != OperationCreate || r.TaskAddress == "" || r.TaskInstanceID == "" || r.Task != nil || r.Error != nil || r.CompletedAt != nil || r.PresentationID != "" {
+			return fmt.Errorf("starting request state is invalid")
+		}
 	case PhaseSucceeded:
 		if r.Task == nil || r.Error != nil || r.CompletedAt == nil || r.CompletedAt.IsZero() || r.PresentationID == "" {
 			return fmt.Errorf("succeeded request requires task result, presentation, and completion time")
@@ -219,9 +231,21 @@ func (s *webGatewayService) Apply(raw service.State, event contract.StoredEvent)
 		if !found || existing.Phase != PhaseDeclaringTask || request.Phase != PhaseWaitingTask || !sameRequestIdentity(existing, request) {
 			return service.State{}, fmt.Errorf("request %q cannot complete task declaration", request.RequestID)
 		}
+	case taskMarkedReadyEvent:
+		if !found || existing.Phase != PhaseWaitingTask || request.Phase != PhaseMarkingReady || !sameRequestIdentity(existing, request) || request.Operation != OperationCreate {
+			return service.State{}, fmt.Errorf("request %q cannot transition to marking ready", request.RequestID)
+		}
+	case taskAssignedEvent:
+		if !found || existing.Phase != PhaseMarkingReady || request.Phase != PhaseAssigning || !sameRequestIdentity(existing, request) || request.Operation != OperationCreate {
+			return service.State{}, fmt.Errorf("request %q cannot transition to assigning", request.RequestID)
+		}
+	case taskStartRequestedEvent:
+		if !found || existing.Phase != PhaseAssigning || request.Phase != PhaseStarting || !sameRequestIdentity(existing, request) || request.Operation != OperationCreate {
+			return service.State{}, fmt.Errorf("request %q cannot transition to starting", request.RequestID)
+		}
 	case requestSucceededEvent:
-		if !found || existing.Phase != PhaseWaitingTask || request.Phase != PhaseSucceeded || !sameRequestIdentity(existing, request) {
-			return service.State{}, fmt.Errorf("request %q cannot succeed", request.RequestID)
+		if !found || (existing.Phase != PhaseWaitingTask && existing.Phase != PhaseStarting) || request.Phase != PhaseSucceeded || !sameRequestIdentity(existing, request) {
+			return service.State{}, fmt.Errorf("request %q cannot succeed from phase %q", request.RequestID, existing.Phase)
 		}
 		if request.Operation == OperationCreate {
 			if payload.Task == nil {

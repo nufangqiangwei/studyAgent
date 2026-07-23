@@ -1,9 +1,10 @@
 # Web Agent 本地文件编辑与报告交付功能补齐报告
 
-> 盘点日期：2026-07-22  
+> 初始盘点日期：2026-07-22
+> 最近更新：2026-07-23（实现基线：`newFramework@467bbf6`，已合并 PR #13-#16）
 > 盘点范围：`serviceruntime/`、`services/`、`main/server/`、`main/cli/`、`frontend/` 及现行设计文档  
 > 目标：以 Web Server 为用户入口，展示真实历史任务和每个任务的历史执行记录，并让 Agent 能可靠完成本地文件编辑和报告写入  
-> 限制：本报告只盘点和拆解功能，不包含代码修改方案的实现
+> 限制：本报告持续记录当前实现与目标之间的差距，不替代各模块开发规范和具体 Issue 验收说明
 
 ## 1. 状态标记
 
@@ -17,23 +18,27 @@
 
 ## 2. 总体结论
 
-当前项目已经完成了事件溯源 Runtime、Task/Agent/Capability/Approval 等核心业务模块的主要骨架，也完成了 Web 工作台的静态页面和 HTTP/WebSocket 边界。但是，**“历史任务可查看”目前主要是前端演示效果，不是真实持久化数据；“Agent 可编辑本地文件并写报告”在现行 `serviceruntime` 业务链路中尚未实现。**
+当前项目已经完成事件溯源 Runtime、Task/Agent/Capability/Approval 等核心业务模块的主要骨架，并已将 Web Server 真实装配到 SQLite Runtime、本地 Artifact Store、持久化 Web Gateway 和 Runtime Adapter。`POST /v1/tasks` 与 `GET /v1/tasks/{id}` 已可创建、查询并跨重启恢复处于 `created` 阶段的真实 Task。
+
+但是，**Web 提交尚未自动推进到 Ready/Assigned/Started，历史任务列表与执行记录仍主要是前端演示数据；“Agent 可编辑本地文件并写报告”在现行 `serviceruntime` 业务链路中仍未实现。**
 
 当前真实状态可以概括为：
 
 ```text
 Web 页面与静态历史展示                    [已完成]
 Web Server 静态资源与 API 边界            [已完成]
-Web Server -> Runtime 真实适配             [待实现-P0]
-真实任务列表、任务详情、历史执行记录       [待实现-P0]
+Web Server -> Runtime 真实装配与适配        [已完成]
+真实 Task 创建与单项查询、SQLite 重启恢复  [已完成]
+Web 提交 -> Ready/Assign/Start             [已完成]
+真实任务列表与历史执行记录                 [待实现-P0]
 Task -> Agent -> Model 的独立模块能力       [部分完成]
 本地文件读取、搜索、补丁、写入 Capability  [待实现-P0]
 写文件审批的完整上行决议链路               [待实现-P0]
 结果 Artifact/报告文件在 Web 中展示        [待实现-P0]
-跨重启端到端恢复验证                       [待实现-P0]
+完整执行与文件写入的跨重启恢复验证          [待实现-P0]
 ```
 
-因此，现在还不能把产品状态描述为“Web Agent 已能查看真实历史并完成本地编辑”。更准确的描述是：**UI 原型、Runtime 基础设施和业务服务骨架已经具备，产品闭环仍待装配和补齐。**
+因此，现在还不能把产品状态描述为“Web Agent 已能查看真实历史并完成本地编辑”。更准确的描述是：**Web Server 与 Runtime 的真实持久化入口已经接通，当前可以可靠创建和查询 Created Task；任务自动执行、历史 Projection、Workspace 能力、审批和结果展示仍待补齐。**
 
 ## 3. 当前已完成能力
 
@@ -77,25 +82,32 @@ Task -> Agent -> Model 的独立模块能力       [部分完成]
 - **[已完成]** Go Web Server 可嵌入并提供前端静态资源。
 - **[已完成]** 已定义 `POST /v1/tasks`、`GET /v1/tasks/{task_id}` 和审批下行 WebSocket 的 HTTP 边界。
 - **[已完成]** 请求体大小、JSON 字段、TaskID、用户头、方法、错误响应和静态资源缓存等基础校验。
+- **[已完成]** Web Server 默认构建并启动真实 SQLite Runtime 和本地 Artifact Store，不再在生产路径使用 `unavailableRuntimePort`。
+- **[已完成]** Web Gateway 通过 `system.call` 声明 Virtual Task，并以 Durable Message 完成 `task.create/task.get`。
+- **[已完成]** Runtime Adapter 只持有窄 Ingress/ID 端口，可等待提交后的 Presentation，并安全处理取消、迟到结果、去重和 Runtime 不可用。
+- **[已完成]** `POST /v1/tasks` 可创建真实 `created` Task，`GET /v1/tasks/{id}` 可按用户读取当前状态；SQLite 重启后仍可查询同一 Task。
+- **[已完成]** 生产 Run 按 Build → Start → Serve → Listen 顺序启动，并监督 Runtime/HTTP fatal 与正常关闭。
 - **[已完成]** 前端已有历史任务侧栏、任务选择、对话区、执行进度卡、输入区和响应式布局。
 - **[部分完成]** 历史任务、消息和执行进度全部由 `frontend/app/page.tsx` 中的常量或本地 State 生成。
 - **[部分完成]** 输入框发送后只追加本地固定回复，没有调用 `/v1/tasks` 或 Runtime。
-- **[待实现-P0]** `main/server` 默认使用 `unavailableRuntimePort`，真实请求返回 `503 runtime_unavailable`。
+- **[部分完成]** 审批 WebSocket 已接收提交后的在线通知，但没有 pending list、Cursor、断线重放或 approve/deny 上行。
 - **[待实现-P0]** 当前 API 没有任务列表、Run 列表、时间线、结果内容、取消、重试和审批决议接口。
 
 ### 3.5 当前验证基线
 
 - **[已完成]** `go test ./serviceruntime/... ./services/... ./main/server ./main/cli` 当前通过。
-- **[部分完成]** 测试覆盖了各模块状态机和部分 Runtime 集成，但没有覆盖 Web 创建真实任务后写入本地文件或报告的端到端流程。
+- **[已完成]** Web Runtime 集成测试覆盖真实 SQLite/Artifact Store、HTTP Handler、Gateway、Task、Presentation、关闭重建和重启后查询。
+- **[已完成]** 当前测试覆盖相同 TaskID 幂等创建、内容冲突、跨用户安全 NotFound、Runtime 未 Live/fatal/Adapter Close 的有界返回，以及关键 Adapter 并发路径的 race 检测。
+- **[部分完成]** 尚未覆盖 Web 提交后 Ready/Assign/Start、真实模型执行、审批等待、Workspace 写入和报告交付的完整端到端恢复流程。
 - **[部分完成]** 前端测试验证静态页面包含历史任务和输入框，尚未验证真实 API、断线重连或持久化数据。
 
 ## 4. P0：必须补齐的端到端能力
 
 ### 4.1 Web Server 真实装配与 Runtime 适配
 
-状态：**[待实现-P0]**
+状态：**[已完成]**
 
-当前 `main/server` 只有 `RuntimePort` 接口和不可用默认实现。首先需要一个 Web 应用装配根，显式组装：
+`main/server` 已新增真实 Web application 组合根，显式装配：
 
 - SQLite Runtime Store。
 - 本地 Artifact Store。
@@ -104,33 +116,36 @@ Task -> Agent -> Model 的独立模块能力       [部分完成]
 - Capability Module。
 - Approval Module。
 - Task Module。
-- 面向 Web 的 Interaction/Gateway 或 History Projection Module。
-- 本地 Workspace Capability Provider、Executor 和 Reconciler。
+- Interaction Module。
+- 持久化 Web Gateway Module。
 
-细化逻辑：
+当前已实现：
 
-1. Server 启动时先打开 SQLite 和 Artifact Store，再 Build、Start、Serve Runtime，最后开始对外接受任务请求。
-2. 任一必要模块注册或 Runtime 恢复失败时，Server 应启动失败，不能继续提供看似正常但永远 `503` 的页面。
-3. HTTP graceful shutdown 应先停止接收新请求，再取消 Runtime Serve，等待在途请求安全结束，最后关闭 Artifact 和 SQLite。
-4. RuntimeID、PlanRevision、数据目录、模型配置、工作区根目录和权限规则都必须由显式配置固定。
-5. PlanRevision 需要覆盖 AgentSpec、Capability Descriptor、授权规则和消息契约版本；配置变化不能沿用旧 Revision。
-6. Web Handler 只能调用窄 Runtime 适配端口，不能直接读取 Task State、Journal 或 SQLite 表。
-7. 适配器发出的所有命令必须带稳定 MessageID、CorrelationID、UserID 和 ReplyTo。
-8. API 请求取消只取消 HTTP 等待，不得撤销已经成功提交到 Runtime 的 Durable Task。
+1. Server 先打开 SQLite 和 Artifact Store，Build/Start/Serve Runtime，确认 Live 后才创建 HTTP Listener。
+2. Module 注册、Build、Start、Runtime Serve 或 HTTP Serve 失败都会返回明确错误并清理已创建资源。
+3. 正常退出先停止 HTTP、Drain Runtime、取消并等待 Runtime Serve，再关闭 Runtime、Artifact Store 和 SQLite。
+4. RuntimeID、PlanRevision、数据目录、非 Secret 模型配置和当前空 Capability/Deny 规则均由显式配置固定。
+5. PlanRevision 覆盖组合版本、Agent 行为配置、Provider/Model/BaseURL、Capability/授权规则版本和 Web Gateway 协议版本；APIKey 和机器局部路径不进入 Manifest/hash。
+6. Web Handler 只调用 `RuntimePort`；Adapter 只获得 durable ingress、Runtime/Plan 标识和 IDGenerator，不读取 Task State、Journal、Snapshot 或 SQLite。
+7. Adapter 发出的 Gateway Command 带稳定 MessageID、CorrelationID、UserID、From/To 和版本化 Payload；结果通过提交后的 Presentation Effect 返回，不依赖同步 Service Reply。
+8. HTTP Context 取消只移除进程内 waiter，不撤销已经入箱的 Durable Gateway 请求；迟到 Presentation 会安全完成去重。
+9. SQLite 关闭重建后，可通过新的 Runtime/Adapter 查询旧 Task，验证结果不依赖旧进程内缓存。
 
-验收标准：启动 Web Server 后，创建任务不再返回 `runtime_unavailable`；进程重启后仍可查询已创建任务。
+该项原验收标准已经满足：生产 Web Server 不再默认返回 `runtime_unavailable`，创建的 Task 可跨进程重建查询。
+
+本地 Workspace Capability、工作区根目录和写入权限规则没有伪装进本组合根，继续由 4.5 和 4.6 单独跟踪。
 
 ### 4.2 用户提交到 Task 启动的可靠 Saga
 
-状态：**[待实现-P0]**
+状态：**[已完成]**
 
-TaskService 已有单步协议，但尚无组件把一次 Web 提交可靠推进为正在执行的 Task。MVP 推荐由 Gateway/Orchestrator 状态机负责：
+Web Gateway 已可靠完成”记录请求 → 声明 Virtual Task → `task.create` → `task.mark_ready` → `task.assign` → `task.start` → 持久化 Running 结果 → Presentation”的完整 Saga。实现关键点：
 
 ```text
 接收 Web CreateTask
-  -> 持久化用户 RequestID / TaskID
-  -> system.call 声明 Virtual Task 实例
-  -> task.create
+  -> 持久化用户 RequestID / TaskID              [已完成]
+  -> system.call 声明 Virtual Task 实例          [已完成]
+  -> task.create                                 [已完成]
   -> task.mark_ready
   -> task.assign（先使用配置的默认 Agent）
   -> task.start
@@ -364,9 +379,11 @@ Task 和 Agent 已保存最终 ArtifactRef，但 Web 没有读取和展示通道
 
 ### 4.9 端到端恢复与一致性测试
 
-状态：**[待实现-P0]**
+状态：**[部分完成]**
 
-至少增加以下黑盒/集成场景：
+当前已完成基础子集：真实 HTTP Handler → Web Gateway → Virtual Task → Presentation 的 SQLite 创建/查询闭环、关闭重建后查询、相同 TaskID 幂等、内容冲突、跨用户安全 NotFound，以及 Runtime 未 Live/fatal/Adapter Close 的有界失败。
+
+完整产品闭环仍需增加以下黑盒/集成场景：
 
 1. Web 创建任务 -> Task Ready/Assigned/Started -> Agent -> Model -> 完成 -> Web 查看结果。
 2. Agent 读取文件 -> 用户批准写入 -> 写报告 -> Task Completed。
@@ -431,6 +448,8 @@ Task 和 Agent 已保存最终 ArtifactRef，但 Web 没有读取和展示通道
 状态：**[待实现-P1]**
 
 - Interaction 当前物化状态只保留最近 5 个终态请求，但 Journal 完整保留；Web 历史不能直接依赖这个 5 条投影。
+- Web Gateway 当前只保留最近 128 个终态请求；淘汰完整 RequestState 后会失去旧 RequestID 的 fingerprint/conflict 判断，需要在清理前定义持久化 Idempotency Window 或紧凑 tombstone。
+- 重复终态 Presentation 已有稳定 PresentationID/IdempotencyKey，但不同输入 MessageID 仍可能派生不同 EffectID；长期幂等验收前应统一效果事实身份。
 - Agent State 当前保留全部 Run/Turn，长期运行会持续增长，需要终态压缩或独立历史 Projection。
 - Task Instance、Timeline Projection、Artifact、staging 文件和 tombstone 都要有明确保留策略。
 - 清理前必须保留 Idempotency Window，不能导致旧 RequestID 被重新执行。
@@ -441,6 +460,8 @@ Task 和 Agent 已保存最终 ArtifactRef，但 Web 没有读取和展示通道
 状态：**[待实现-P1]**
 
 - Web 需要区分领域失败、审批拒绝、文件冲突、模型失败、Runtime 暂停和系统故障。
+- Runtime Serve 正常取消和 fatal 已有监督；仍需为“Serve 超时且 Runtime.Close 继续等待”的异常路径提供真正有界、context-aware 的停止协议。
+- 配置解析应允许合法命令行值覆盖格式错误的环境变量，并在创建 SQLite/Artifact 目录前完成 BaseURL 等纯配置校验。
 - 暴露只读健康状态：Runtime Lifecycle、Paused/Failed、Pending/Dead Letter 数量和最后致命错误摘要。
 - Timeline 中标记 Retry、Dead Letter、ReconciliationRequired，但不泄露敏感 Payload。
 - 为卡住的 Task 提供“为什么未推进”的可读诊断，而不是只显示 Running。
@@ -461,9 +482,9 @@ Task 和 Agent 已保存最终 ArtifactRef，但 Web 没有读取和展示通道
 
 | API | 当前状态 | 目标用途 |
 | --- | --- | --- |
-| `POST /v1/tasks` | **[部分完成]** | 创建并可靠启动任务；支持 Idempotency-Key。 |
+| `POST /v1/tasks` | **[部分完成]** | 已可靠创建真实 `created` Task；自动启动和客户端 Idempotency-Key 仍待补齐。 |
 | `GET /v1/tasks` | **[待实现-P0]** | 按用户游标分页读取真实历史任务。 |
-| `GET /v1/tasks/{id}` | **[部分完成]** | 读取真实 Task 当前状态。 |
+| `GET /v1/tasks/{id}` | **[已完成]** | 按当前用户读取真实 Task 当前状态；不存在或跨用户统一返回安全 NotFound。 |
 | `GET /v1/tasks/{id}/runs` | **[待实现-P0]** | 读取每次 Attempt/Run。 |
 | `GET /v1/tasks/{id}/timeline` | **[待实现-P0]** | 按 Cursor 读取执行历史。 |
 | `GET /v1/tasks/{id}/events` | **[待实现-P0]** | SSE/WebSocket 实时增量与断线续传。 |
@@ -476,14 +497,14 @@ Task 和 Agent 已保存最终 ArtifactRef，但 Web 没有读取和展示通道
 
 ## 8. 推荐实现顺序
 
-1. **[待实现-P0]** 建立 Web Server 的完整 Runtime 组合根，先复用配置默认 Agent。
-2. **[待实现-P0]** 实现 Web Gateway 的 Task 创建/启动 Saga 和单项查询适配。
+1. **[已完成]** 建立 Web Server Runtime 组合根、持久化 Gateway、Runtime Adapter 和受监督生命周期。
+2. **[已完成]** Web Gateway 已完成 `mark_ready/assign/start` 启动 Saga。一次 Web 提交可稳定进入 Running 阶段。
 3. **[待实现-P0]** 定义公开 Task/Run/Timeline 协议并实现可恢复 Projection。
 4. **[待实现-P0]** 将前端历史任务、详情和输入改为真实 API。
 5. **[待实现-P0]** 实现只读 Workspace 能力：list/search/read。
 6. **[待实现-P0]** 实现 write_file/apply_patch、权限判断、审批和 Reconciler。
 7. **[待实现-P0]** 增加结果 Artifact/报告预览、文件变更摘要和实时进度流。
-8. **[待实现-P0]** 完成跨重启、重复提交、审批等待和写文件崩溃点测试。
+8. **[部分完成]** 已覆盖 Web 创建/查询、重复 TaskID、用户隔离和 SQLite 重启；继续补审批等待与写文件崩溃点测试。
 9. **[待实现-P1]** 再补 Cancel/Retry、受限验证命令、保留期、安全和运维视图。
 10. **[待实现-P2]** 最后扩展多轮会话、流式输出和多 Agent。
 
@@ -492,25 +513,24 @@ Task 和 Agent 已保存最终 ArtifactRef，但 Web 没有读取和展示通道
 只有以下条件全部满足，才建议把“Web Agent 可查看历史任务、完成本地文件编辑并写报告”标记为 **[已完成]**：
 
 - **[待实现-P0]** Web 页面不再使用生产硬编码任务和固定 Agent 回复。
-- **[待实现-P0]** Web Server 真实连接 SQLite Runtime 和 Artifact Store。
+- **[已完成]** Web Server 真实连接 SQLite Runtime 和 Artifact Store。
 - **[待实现-P0]** 一次任务提交可可靠创建、分配并启动 Task/Agent Run。
 - **[待实现-P0]** 页面可查询真实 Task 列表、每次 Run 和可恢复 Timeline。
 - **[待实现-P0]** Agent 至少具备 list/search/read/apply_patch/write_file。
 - **[待实现-P0]** 写操作有路径沙箱、expected checksum、稳定幂等键和 Reconciler。
 - **[待实现-P0]** 写操作需要审批时，Web 可完整 approve/deny 并继续状态机。
 - **[待实现-P0]** Task 完成后可查看最终回答、变更文件和报告 Artifact。
-- **[待实现-P0]** Server、浏览器或 Effect 在关键点重启/重投后不会重复创建任务或破坏文件。
+- **[部分完成]** Server 重启和重复 TaskID 已验证不会重复创建 Task；浏览器断线、审批和文件 Effect 重投仍待覆盖。
 - **[待实现-P0]** 对上述闭环有自动化端到端测试，且现有 Runtime/Service 测试继续通过。
 
 ## 10. 最终判断
 
-目前最值得保留和复用的是 Runtime 的可靠提交/恢复能力、Task/Agent/Capability/Approval 的状态所有权，以及现有 Web 页面布局。下一阶段不需要重写这些基础，而应集中补齐四条产品链路：
+目前 Runtime 的可靠提交/恢复能力、Task/Agent/Capability/Approval 的状态所有权、Web Runtime 真实组合根、持久化 Gateway，以及现有 Web 页面布局都值得继续保留。下一阶段不需要重写这些基础，而应集中补齐三条产品链路：
 
 ```text
-真实 Web Gateway
-  + 可恢复任务/执行历史 Projection
+Task Ready/Assign/Start 与可恢复执行历史 Projection
   + 安全可恢复的本地 Workspace Capability
-  + 审批、结果与前端实时展示闭环
+  + 审批、结果与前端真实数据/实时展示闭环
 ```
 
-完成这四条链路后，项目才从“可演示的 Web 界面 + 可测试的 Runtime 模块”进入“可以真实完成本地文件编辑和报告交付的 Web Agent MVP”。
+完成这三条链路后，项目才从“已接通真实 Runtime、但只创建 Created Task 的 Web 界面”进入“可以真实完成本地文件编辑和报告交付的 Web Agent MVP”。
