@@ -55,6 +55,14 @@ func (s *webGatewayService) Handle(_ context.Context, raw service.State, message
 		return s.handleSystemResult(state, message)
 	case message.Kind == contract.MessageReply && message.Type == task.StatusMessageType && message.Version == task.ProtocolVersion:
 		return s.handleTaskStatus(state, message)
+	case message.Kind == contract.MessageEvent && message.Type == task.StatusChangedEventType && message.Version == task.ProtocolVersion:
+		return s.handleTaskEvent(state, message)
+	case message.Kind == contract.MessageEvent && message.Type == task.CompletedEventType && message.Version == task.ProtocolVersion:
+		return s.handleTaskEvent(state, message)
+	case message.Kind == contract.MessageEvent && message.Type == task.FailedEventType && message.Version == task.ProtocolVersion:
+		return s.handleTaskEvent(state, message)
+	case message.Kind == contract.MessageEvent && message.Type == task.CancelledEventType && message.Version == task.ProtocolVersion:
+		return s.handleTaskEvent(state, message)
 	default:
 		return service.Decision{}, fmt.Errorf("unsupported web gateway message %s %q v%d", message.Kind, message.Type, message.Version)
 	}
@@ -355,6 +363,24 @@ func (s *webGatewayService) handleTaskStatusError(request RequestState, message 
 	return s.failPending(request, errTaskRequestFailed, "task service rejected the request", replyError.Retryable)
 }
 
+// handleTaskEvent acknowledges task status-change and terminal events.
+// The Gateway is Task Owner and receives these events; they are consumed
+// without updating Gateway state because issue #28 does not require a
+// task-state Projection. Future Projection consumers (issue #37) will
+// use these events to maintain list/timeline views.
+func (s *webGatewayService) handleTaskEvent(state State, message contract.Message) (service.Decision, error) {
+	// Validate the event came from the task instance that owns it.
+	correlationID := strings.TrimSpace(message.CorrelationID)
+	if correlationID == "" {
+		return service.Decision{}, nil
+	}
+	_, found := state.Tasks[correlationID]
+	if !found {
+		return service.Decision{}, nil
+	}
+	return service.Decision{}, nil
+}
+
 // reSyncTaskState sends a task.get query to re-read the task's current phase
 // after a task_invalid_transition error from an At-least-once duplicate command.
 // The reply flows through handleTaskStatus → progressCreateSaga, which will
@@ -446,7 +472,6 @@ func (s *webGatewayService) progressCreateSaga(state State, request RequestState
 			// Duplicate/late reply for a previous step; idempotently ignore.
 			return service.Decision{}, nil
 		}
-
 	default:
 		// Request already in a non-creating phase; idempotently ignore.
 		return service.Decision{}, nil

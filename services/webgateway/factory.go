@@ -37,6 +37,14 @@ func Definition(factory service.Factory) building.ServiceDefinition {
 			{Kind: contract.MessageCommand, Type: GetTaskMessageType, Version: ProtocolVersion},
 			{Kind: contract.MessageReply, Type: runtimesystem.ResultMessageType, Version: runtimesystem.CallVersion},
 			{Kind: contract.MessageReply, Type: task.StatusMessageType, Version: task.ProtocolVersion},
+			// The Gateway is Task Owner. Task Service sends status change and terminal
+			// events to the owner address. The Gateway acknowledges them (no-op) so
+			// they do not become Dead Letter; future Projection consumers will use
+			// these to maintain task list / timeline views.
+			{Kind: contract.MessageEvent, Type: task.StatusChangedEventType, Version: task.ProtocolVersion},
+			{Kind: contract.MessageEvent, Type: task.CompletedEventType, Version: task.ProtocolVersion},
+			{Kind: contract.MessageEvent, Type: task.FailedEventType, Version: task.ProtocolVersion},
+			{Kind: contract.MessageEvent, Type: task.CancelledEventType, Version: task.ProtocolVersion},
 		},
 		Produces: []building.MessageContract{
 			{Kind: contract.MessageCommand, Type: runtimesystem.CallMessageType, Version: runtimesystem.CallVersion},
