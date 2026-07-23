@@ -10,12 +10,37 @@
 ## 启动
 
 ```powershell
+$env:AGENT_MODEL = "deepseek-chat"
+$env:AGENT_API_KEY = "<your-api-key>"
 go run ./main/server
 ```
 
 默认监听 `127.0.0.1:8080`，可通过 `-address` 或 `AGENT_SERVER_ADDRESS` 修改。当前未提供
 TLS 和真实身份认证；所有接口暂时要求 `X-User-ID` 请求头，它只用于固定协议中的用户身份，
 不能视为可信认证结果。
+
+Web Server 的本地 Runtime 与模型配置同时支持环境变量和命令行参数，命令行参数优先。默认
+使用 `.agent/runtime` 作为 SQLite 与 Artifact 数据目录、`agent-server` 作为 Runtime ID、
+`deepseek` 作为 Provider，并使用 `https://api.deepseek.com` 作为 OpenAI-compatible Base URL。
+模型名必须通过 `AGENT_MODEL` 或 `-model` 提供。
+
+常用配置包括：
+
+| 环境变量 | 命令行参数 | 说明 |
+| --- | --- | --- |
+| `AGENT_DATA_DIR` | `-data-dir` | SQLite 与 Artifact 数据目录 |
+| `AGENT_RUNTIME_ID` | `-runtime-id` | 稳定的 Runtime ID |
+| `AGENT_PROVIDER` | `-provider` | 模型 Provider |
+| `AGENT_MODEL` | `-model` | 必填模型名 |
+| `AGENT_BASE_URL` | `-base-url` | 模型 API Base URL |
+| `AGENT_MODEL_TIMEOUT` | `-model-timeout` | 单次模型调用超时 |
+| `AGENT_SYSTEM_PROMPT` | `-system-prompt` | Agent 系统提示词 |
+| `AGENT_MAX_TURNS` | `-max-turns` | 单请求最大 Agent 轮数 |
+| `AGENT_MAX_TOKENS` | `-max-tokens` | 最大模型输出 Token；`0` 使用 Provider 默认值 |
+
+API Key 只能通过 `AGENT_API_KEY` 提供，不支持明文命令行参数。HTTP 的请求头读取、Keep-Alive
+空闲和优雅关闭超时分别可通过 `AGENT_SERVER_READ_HEADER_TIMEOUT`、
+`AGENT_SERVER_IDLE_TIMEOUT`、`AGENT_SERVER_SHUTDOWN_TIMEOUT` 设置，也可由对应命令行参数覆盖。
 
 启动后访问 `http://127.0.0.1:8080/` 会直接返回 Agent 工作台主页。主页及其静态资源已嵌入
 服务器二进制，不依赖进程的当前工作目录；`/v1/*` 继续保留给 REST/WebSocket 接口。
