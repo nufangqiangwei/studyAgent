@@ -244,7 +244,7 @@ func (s *webGatewayService) Apply(raw service.State, event contract.StoredEvent)
 			return service.State{}, fmt.Errorf("request %q cannot transition to starting", request.RequestID)
 		}
 	case requestSucceededEvent:
-		if !found || (existing.Phase != PhaseWaitingTask && existing.Phase != PhaseStarting) || request.Phase != PhaseSucceeded || !sameRequestIdentity(existing, request) {
+		if !found || (existing.Phase != PhaseWaitingTask && existing.Phase != PhaseMarkingReady && existing.Phase != PhaseAssigning && existing.Phase != PhaseStarting) || request.Phase != PhaseSucceeded || !sameRequestIdentity(existing, request) {
 			return service.State{}, fmt.Errorf("request %q cannot succeed from phase %q", request.RequestID, existing.Phase)
 		}
 		if request.Operation == OperationCreate {

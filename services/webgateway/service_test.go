@@ -515,7 +515,10 @@ func TestErrorRepliesBecomeStableTerminalPresentations(t *testing.T) {
 	})
 }
 
-func TestSagaErrorDuringMarkReadyReturnsFailure(t *testing.T) {
+func TestReSyncOnTaskInvalidTransition(t *testing.T) {
+	// At-least-once delivery can replay a saga-step command after the task has
+	// already advanced.  Instead of failing, the Gateway must re-read the
+	// task's current state so progressCreateSaga can fast-forward.
 	svc, state := newTestService(t)
 	create := createMessage(t, "message-1", "request-1", "task-1", "user-1", "hello")
 	recorded, _ := svc.Handle(context.Background(), state, create)
@@ -529,9 +532,10 @@ func TestSagaErrorDuringMarkReadyReturnsFailure(t *testing.T) {
 	declared, _ := svc.Handle(context.Background(), state, systemReply)
 	state = applyDecision(t, svc, state, declared)
 
-	// Simulate task error during mark_ready
-	payload, _ := json.Marshal(service.ReplyError{Code: "task_invalid_transition", Message: "cannot mark ready"})
-	failed, err := svc.Handle(context.Background(), state, contract.Message{
+	// Simulate the task rejecting a mark_ready because it's already running
+	// (At-least-once duplicate of the mark_ready command).
+	payload, _ := json.Marshal(service.ReplyError{Code: "task_invalid_transition", Message: "only a created task can become ready"})
+	decision, err := svc.Handle(context.Background(), state, contract.Message{
 		Kind: contract.MessageReply, Type: task.StatusMessageType, Version: task.ProtocolVersion,
 		From: declaration.Address, CorrelationID: "request-1", Payload: payload,
 		Metadata: map[string]string{contract.MetadataReplyError: "true"},
@@ -539,7 +543,152 @@ func TestSagaErrorDuringMarkReadyReturnsFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertErrorDecision(t, failed, errTaskRequestFailed)
+	// Must be a re-sync query, not a terminal failure.
+	if len(decision.Events) != 0 || len(decision.Outgoing) != 1 || len(decision.Effects) != 0 {
+		t.Fatalf("invalid_transition must re-sync without terminal decision: %#v", decision)
+	}
+	if decision.Outgoing[0].Kind != contract.MessageQuery || decision.Outgoing[0].Type != task.GetMessageType {
+		t.Fatalf("re-sync must send task.get: %#v", decision.Outgoing[0])
+	}
+	// The request state must remain in the current phase so the re-sync
+	// reply flows back through progressCreateSaga.
+	mat, _ := decodeState(state)
+	if mat.Requests["request-1"].Phase != PhaseWaitingTask {
+		t.Fatalf("re-sync must not change request phase; got %q", mat.Requests["request-1"].Phase)
+	}
+
+	// Now simulate the re-sync reply: the task is already running.
+	runningStatus := taskStatusReply(t, "request-1", declaration.Address, taskState{
+		taskID: "task-1", userID: "user-1", phase: task.PhaseRunning, assignedTo: "agent.test",
+		activeRunID: "task-1/attempt/1", attempt: 1, input: "hello",
+	})
+	completed, err := svc.Handle(context.Background(), state, runningStatus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(completed.Events) != 1 || len(completed.Effects) != 1 {
+		t.Fatalf("re-sync reply must produce terminal success: %#v", completed)
+	}
+	presentation := decodePresentation(t, completed.Effects[0].Payload)
+	if presentation.Created == nil || presentation.Created.Task.Phase != task.PhaseRunning {
+		t.Fatalf("re-synced task must show running: %#v", presentation)
+	}
+}
+
+func TestInvalidTransitionReSyncThenFastForwardsThroughAllPhases(t *testing.T) {
+	// When the task is already running and the Gateway re-syncs from each
+	// possible saga phase, the reply must fast-forward to success.
+	for _, startPhase := range []RequestPhase{PhaseWaitingTask, PhaseMarkingReady, PhaseAssigning} {
+		t.Run(string(startPhase), func(t *testing.T) {
+			svc, state := newTestService(t)
+			state = advanceToPhase(t, svc, state, startPhase)
+
+			runningStatus := taskStatusReply(t, "request-1", stableTaskAddr(t), taskState{
+				taskID: "task-1", userID: "user-1", phase: task.PhaseRunning, assignedTo: "agent.test",
+				activeRunID: "task-1/attempt/1", attempt: 1, input: "hello",
+			})
+			completed, err := svc.Handle(context.Background(), state, runningStatus)
+			if err != nil {
+				t.Fatal(err)
+			}
+			presentation := decodePresentation(t, completed.Effects[0].Payload)
+			if presentation.Created == nil || presentation.Created.Task.Phase != task.PhaseRunning {
+				t.Fatalf("from %s: fast-forward failed: %#v", startPhase, presentation)
+			}
+			// Apply must also succeed (verifies Fix 1)
+			state = applyDecision(t, svc, state, completed)
+			mat, _ := decodeState(state)
+			if mat.Requests["request-1"].Phase != PhaseSucceeded {
+				t.Fatalf("from %s: apply did not set succeeded", startPhase)
+			}
+		})
+	}
+}
+
+func advanceToPhase(t *testing.T, svc *webGatewayService, initial service.State, target RequestPhase) service.State {
+	t.Helper()
+	create := createMessage(t, "msg-1", "request-1", "task-1", "user-1", "hello")
+	recorded, _ := svc.Handle(context.Background(), initial, create)
+	state := applyDecision(t, svc, initial, recorded)
+
+	var call runtimesystem.Call
+	_ = json.Unmarshal(recorded.Outgoing[0].Payload, &call)
+	var declaration instance.Declaration
+	_ = json.Unmarshal(call.Payload, &declaration)
+	addr := declaration.Address
+	systemReply := successfulSystemResult(t, call, declaration)
+	declared, _ := svc.Handle(context.Background(), state, systemReply)
+
+	if target == PhaseWaitingTask {
+		return applyDecision(t, svc, state, declared)
+	}
+	state = applyDecision(t, svc, state, declared)
+
+	createdStatus := taskStatusReply(t, "request-1", addr, taskState{
+		taskID: "task-1", userID: "user-1", phase: task.PhaseCreated, input: "hello",
+	})
+	markingReady, _ := svc.Handle(context.Background(), state, createdStatus)
+	if target == PhaseMarkingReady {
+		return applyDecision(t, svc, state, markingReady)
+	}
+	state = applyDecision(t, svc, state, markingReady)
+
+	readyStatus := taskStatusReply(t, "request-1", addr, taskState{
+		taskID: "task-1", userID: "user-1", phase: task.PhaseReady, input: "hello",
+	})
+	assigning, _ := svc.Handle(context.Background(), state, readyStatus)
+	if target == PhaseAssigning {
+		return applyDecision(t, svc, state, assigning)
+	}
+	state = applyDecision(t, svc, state, assigning)
+
+	assignedStatus := taskStatusReply(t, "request-1", addr, taskState{
+		taskID: "task-1", userID: "user-1", phase: task.PhaseReady, assignedTo: "agent.test", input: "hello",
+	})
+	starting, _ := svc.Handle(context.Background(), state, assignedStatus)
+	return applyDecision(t, svc, state, starting)
+}
+
+func stableTaskAddr(t *testing.T) contract.ServiceAddress {
+	t.Helper()
+	addr, _ := stableTaskIdentity("task-1", "request-1")
+	return addr
+}
+
+func TestConcurrentInFlightCreateForSameTaskIDIsRejected(t *testing.T) {
+	svc, state := newTestService(t)
+	// Start first create — enters PhaseDeclaringTask
+	create1 := createMessage(t, "msg-1", "request-1", "task-1", "user-1", "hello")
+	decision1, err := svc.Handle(context.Background(), state, create1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state = applyDecision(t, svc, state, decision1)
+
+	// Verify first request is in-flight
+	mat, _ := decodeState(state)
+	if mat.Requests["request-1"].Phase.terminal() {
+		t.Fatal("first request must be in-flight")
+	}
+
+	// Second request with same TaskID must be rejected
+	create2 := createMessage(t, "msg-2", "request-2", "task-1", "user-1", "hello")
+	decision2, err := svc.Handle(context.Background(), state, create2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertErrorDecision(t, decision2, errRequestConflict)
+
+	// But a different TaskID is still allowed
+	create3 := createMessage(t, "msg-3", "request-3", "task-2", "user-1", "world")
+	decision3, err := svc.Handle(context.Background(), state, create3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decision3.Events) != 1 {
+		t.Fatalf("different TaskID must be allowed: %#v", decision3)
+	}
+
 }
 
 func TestReplayIsDeterministicAndDoesNotPresent(t *testing.T) {

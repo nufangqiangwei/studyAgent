@@ -117,7 +117,19 @@ func (s *webGatewayService) handleCreate(state State, message contract.Message) 
 		InputArtifact: cloneArtifact(input.InputArtifact), Deadline: cloneTime(input.Deadline),
 		CreatedAt: now, UpdatedAt: now,
 	}
+	// Reject concurrent create requests for the same TaskID that is still
+	// in-flight.  OwnedTask is only written when the Saga succeeds, so
+	// without this check two concurrent requests to the same TaskID could
+	// both enter PhaseDeclaringTask and race through the entire Saga.
+	for _, existing := range state.Requests {
+		if existing.TaskID == request.TaskID && !existing.Phase.terminal() && existing.RequestID != request.RequestID {
+			return s.recordNewFailure(request, errRequestConflict,
+				"a request for this task id is already in progress")
+		}
+	}
+
 	if owned, exists := state.Tasks[request.TaskID]; exists {
+
 		if owned.UserID != request.UserID {
 			return s.recordNewFailure(request, errRequestConflict, "task id is already bound to an existing task")
 		}
@@ -334,7 +346,31 @@ func (s *webGatewayService) handleTaskStatusError(request RequestState, message 
 	if request.Operation == OperationCreate && replyError.Code == "task_conflict" {
 		return s.failPending(request, errRequestConflict, "task id is already bound to different content", false)
 	}
+	// At-least-once delivery may replay a saga-step command after the task has
+	// already advanced.  Instead of failing, re-read the task's current state
+	// and let progressCreateSaga fast-forward.
+	if request.Operation == OperationCreate && replyError.Code == "task_invalid_transition" {
+		return s.reSyncTaskState(request)
+	}
 	return s.failPending(request, errTaskRequestFailed, "task service rejected the request", replyError.Retryable)
+}
+
+// reSyncTaskState sends a task.get query to re-read the task's current phase
+// after a task_invalid_transition error from an At-least-once duplicate command.
+// The reply flows through handleTaskStatus → progressCreateSaga, which will
+// fast-forward based on the actual task phase.
+func (s *webGatewayService) reSyncTaskState(request RequestState) (service.Decision, error) {
+	payload, err := json.Marshal(task.GetRequest{TaskID: request.TaskID})
+	if err != nil {
+		return service.Decision{}, err
+	}
+	return service.Decision{
+		Outgoing: []service.OutgoingMessage{{
+			Key:  "web-task-resync/" + request.RequestID,
+			Kind: contract.MessageQuery, Type: task.GetMessageType, Version: task.ProtocolVersion,
+			To: request.TaskAddress, ReplyTo: s.address, CorrelationID: request.RequestID, Payload: payload,
+		}},
+	}, nil
 }
 
 // progressCreateSaga advances the task creation saga from created through mark_ready, assign, start to running.
