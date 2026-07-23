@@ -19,8 +19,8 @@ var (
 )
 
 // RuntimePort is the Web entry's boundary to the Runtime-facing interaction
-// adapter. The concrete adapter belongs outside main/server and is deliberately
-// not implemented until the Runtime interaction protocol is ready.
+// adapter. HTTP handlers only depend on this projection and never receive
+// Runtime stores, hosts, or business Service objects.
 type RuntimePort interface {
 	CreateTask(context.Context, Actor, CreateTaskInput) (TaskView, error)
 	GetTask(context.Context, Actor, string) (TaskView, error)
