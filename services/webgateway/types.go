@@ -68,6 +68,7 @@ type ErrorDTO struct {
 	Code      string `json:"code"`
 	Message   string `json:"message"`
 	Retryable bool   `json:"retryable,omitempty"`
+	TaskID    string `json:"task_id,omitempty"`
 }
 
 func (e ErrorDTO) validate() error {
@@ -198,6 +199,9 @@ func (p Presentation) validate() error {
 		count++
 		if err := p.Error.validate(); err != nil {
 			return err
+		}
+		if p.Error.TaskID != "" && p.Operation != OperationCreate {
+			return fmt.Errorf("only create errors may identify a confirmed task")
 		}
 	}
 	if count != 1 {

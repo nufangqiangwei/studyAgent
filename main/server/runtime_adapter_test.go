@@ -98,6 +98,42 @@ func TestRuntimeAdapterCreateTaskRegistersWaiterBeforeSending(t *testing.T) {
 	}
 }
 
+func TestRuntimeAdapterCreateFailureReturnsConfirmedTaskID(t *testing.T) {
+	var adapter *RuntimeAdapter
+	ingress := runtimeIngressFunc(func(ctx context.Context, message contract.Message) error {
+		var request webgateway.CreateTaskRequest
+		if err := json.Unmarshal(message.Payload, &request); err != nil {
+			t.Fatal(err)
+		}
+		return adapter.Present(ctx, webgateway.Presentation{
+			PresentationID: "presentation-create-failed",
+			RequestID:      request.RequestID,
+			Operation:      webgateway.OperationCreate,
+			Error: &webgateway.ErrorDTO{
+				Code: "web_task_request_failed", Message: "later saga stage failed", TaskID: request.TaskID,
+			},
+		})
+	})
+	var err error
+	adapter, err = newTestRuntimeAdapter(ingress, &adapterTestIDs{}, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adapter.Close()
+
+	task, err := adapter.CreateTask(
+		context.Background(),
+		Actor{UserID: "user-1"},
+		CreateTaskInput{Input: "do work"},
+	)
+	if !errors.Is(err, errRuntimeAdapterInternal) {
+		t.Fatalf("err=%v", err)
+	}
+	if task.TaskID != "task-web-request-1" {
+		t.Fatalf("confirmed task id was lost on create failure: %#v", task)
+	}
+}
+
 func TestRuntimeAdapterGetTaskMapsPresentationAndStableErrors(t *testing.T) {
 	now := time.Date(2026, 7, 23, 2, 0, 0, 0, time.UTC)
 	tests := []struct {

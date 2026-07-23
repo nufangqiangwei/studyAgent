@@ -8,6 +8,8 @@ import (
 	"agent/serviceruntime/persistence"
 	persistencememory "agent/serviceruntime/persistence/memory"
 	persistencesqlite "agent/serviceruntime/persistence/sqlite"
+	"agent/serviceruntime/service"
+	runtimesystem "agent/serviceruntime/system"
 	agentservice "agent/services/agent"
 	"agent/services/task"
 	"context"
@@ -233,6 +235,95 @@ func TestRecoveredInFlightCreateStillRejectsDifferentCreateForSameTaskID(t *test
 	presentation := waitForPresentation(t, ctx, presented, "request-2")
 	if presentation.Error == nil || presentation.Error.Code != errRequestConflict {
 		t.Fatalf("recovered reservation did not reject conflicting create: %#v", presentation)
+	}
+}
+
+func TestTaskOwnershipAndFailedCreateRemainReachableAcrossRestart(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	clock := fixedClock{fixedTime()}
+	storage := persistencememory.New(clock)
+	defer storage.Close()
+	presented := make(chan Presentation, 16)
+
+	runtime1 := buildGatewayRuntime(t, ctx, storage, clock, presented)
+	if _, err := runtime1.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	publishCreate(t, ctx, runtime1, "web-create-owned", "request-owned", "task-owned")
+	handleGatewayCommitted(t, ctx, runtime1, DefaultAddress)
+	dispatchOutboxUntilIdle(t, ctx, runtime1)
+	handleGatewayCommitted(t, ctx, runtime1, runtimesystem.Address)
+	dispatchEffectsUntilIdle(t, ctx, runtime1)
+	handleGatewayCommitted(t, ctx, runtime1, DefaultAddress)
+	taskAddress, _ := stableTaskIdentity("task-owned", "request-owned")
+	sagaStep(t, ctx, runtime1, taskAddress, DefaultAddress)
+
+	errorPayload, err := json.Marshal(service.ReplyError{
+		Code: "task_stage_failed", Message: "mark ready failed",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime1.Publish(ctx, contract.Message{
+		ID:   "task-stage-failed-owned",
+		Kind: contract.MessageReply, Type: task.StatusMessageType, Version: task.ProtocolVersion,
+		From: taskAddress, To: DefaultAddress, CorrelationID: "request-owned", Payload: errorPayload,
+		Metadata: map[string]string{contract.MetadataReplyError: "true"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	handleGatewayCommitted(t, ctx, runtime1, DefaultAddress)
+	dispatchEffectsUntilIdle(t, ctx, runtime1)
+	failed := waitForPresentation(t, ctx, presented, "request-owned")
+	if failed.Error == nil || failed.Error.Code != errTaskRequestFailed ||
+		failed.Error.TaskID != "task-owned" {
+		t.Fatalf("post-create failure lost task identity: %#v", failed)
+	}
+	if err := runtime1.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	runtime2 := buildGatewayRuntime(t, ctx, storage, clock, presented)
+	defer runtime2.Close()
+	if _, err := runtime2.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	getPayload, err := json.Marshal(GetTaskRequest{
+		RequestID: "get-owned-after-restart", TaskID: "task-owned",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime2.Publish(ctx, contract.Message{
+		ID:   "get-owned-after-restart",
+		Kind: contract.MessageCommand, Type: GetTaskMessageType, Version: ProtocolVersion,
+		From: "web.adapter", To: DefaultAddress, UserID: "user-1", Payload: getPayload,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stopServe, serveDone := serveGatewayRuntime(t, ctx, runtime2)
+	found := waitForPresentation(t, ctx, presented, "get-owned-after-restart")
+	hiddenPayload, err := json.Marshal(GetTaskRequest{
+		RequestID: "get-owned-other-user", TaskID: "task-owned",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime2.Publish(ctx, contract.Message{
+		ID:   "get-owned-other-user",
+		Kind: contract.MessageCommand, Type: GetTaskMessageType, Version: ProtocolVersion,
+		From: "web.adapter", To: DefaultAddress, UserID: "user-2", Payload: hiddenPayload,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	hidden := waitForPresentation(t, ctx, presented, "get-owned-other-user")
+	stopGatewayRuntime(t, stopServe, serveDone)
+	if found.Found == nil || found.Found.Task.TaskID != "task-owned" {
+		t.Fatalf("owned task was unreachable after restart: %#v", found)
+	}
+	if hidden.Error == nil || hidden.Error.Code != errTaskNotFound || hidden.Error.TaskID != "" {
+		t.Fatalf("cross-user recovery lookup leaked task identity: %#v", hidden)
 	}
 }
 

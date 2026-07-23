@@ -39,6 +39,7 @@ type errorEnvelope struct {
 type apiError struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+	TaskID  string `json:"task_id,omitempty"`
 }
 
 type approvalEvent struct {
@@ -100,7 +101,7 @@ func (s *apiServer) handleTasks(w http.ResponseWriter, r *http.Request) {
 	}
 	task, err := s.runtime.CreateTask(r.Context(), actor, input)
 	if err != nil {
-		writeRuntimeError(w, err)
+		writeRuntimeError(w, err, task.TaskID)
 		return
 	}
 	writeJSON(w, http.StatusCreated, taskEnvelope{Task: task})
@@ -123,7 +124,7 @@ func (s *apiServer) handleTask(w http.ResponseWriter, r *http.Request) {
 	}
 	task, err := s.runtime.GetTask(r.Context(), actor, taskID)
 	if err != nil {
-		writeRuntimeError(w, err)
+		writeRuntimeError(w, err, "")
 		return
 	}
 	writeJSON(w, http.StatusOK, taskEnvelope{Task: task})
@@ -143,7 +144,7 @@ func (s *apiServer) handleApprovalWebSocket(w http.ResponseWriter, r *http.Reque
 	defer cancel()
 	events, err := s.runtime.SubscribeApprovalRequests(ctx, actor)
 	if err != nil {
-		writeRuntimeError(w, err)
+		writeRuntimeError(w, err, "")
 		return
 	}
 	connection, err := s.upgrader.Upgrade(w, r, nil)
@@ -227,21 +228,25 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
 	return nil
 }
 
-func writeRuntimeError(w http.ResponseWriter, err error) {
+func writeRuntimeError(w http.ResponseWriter, err error, taskID string) {
 	switch {
 	case errors.Is(err, ErrRuntimeUnavailable):
-		writeError(w, http.StatusServiceUnavailable, "runtime_unavailable", "Runtime interaction is not connected")
+		writeErrorWithTask(w, http.StatusServiceUnavailable, "runtime_unavailable", "Runtime interaction is not connected", taskID)
 	case errors.Is(err, ErrTaskNotFound):
-		writeError(w, http.StatusNotFound, "task_not_found", "task was not found")
+		writeErrorWithTask(w, http.StatusNotFound, "task_not_found", "task was not found", taskID)
 	case errors.Is(err, ErrTaskConflict):
-		writeError(w, http.StatusConflict, "task_conflict", "task conflicts with an existing task")
+		writeErrorWithTask(w, http.StatusConflict, "task_conflict", "task conflicts with an existing task", taskID)
 	default:
-		writeError(w, http.StatusInternalServerError, "internal_error", "request could not be completed")
+		writeErrorWithTask(w, http.StatusInternalServerError, "internal_error", "request could not be completed", taskID)
 	}
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {
-	writeJSON(w, status, errorEnvelope{Error: apiError{Code: code, Message: message}})
+	writeErrorWithTask(w, status, code, message, "")
+}
+
+func writeErrorWithTask(w http.ResponseWriter, status int, code, message, taskID string) {
+	writeJSON(w, status, errorEnvelope{Error: apiError{Code: code, Message: message, TaskID: taskID}})
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

@@ -179,6 +179,9 @@ func (r RequestState) validate() error {
 		if err := r.Error.validate(); err != nil {
 			return fmt.Errorf("failed request error is invalid: %w", err)
 		}
+		if r.Error.TaskID != "" && (r.Operation != OperationCreate || r.Error.TaskID != r.TaskID) {
+			return fmt.Errorf("failed request task association is invalid")
+		}
 	default:
 		return fmt.Errorf("request phase %q is invalid", r.Phase)
 	}
@@ -302,16 +305,36 @@ func (s *webGatewayService) Apply(raw service.State, event contract.StoredEvent)
 		if !found || existing.Phase != PhaseDeclaringTask || request.Phase != PhaseWaitingTask || !sameRequestIdentity(existing, request) {
 			return service.State{}, fmt.Errorf("request %q cannot complete task declaration", request.RequestID)
 		}
+	case taskOwnershipRecordedEvent:
+		if !found || existing.Phase != PhaseWaitingTask || request.Phase != PhaseWaitingTask ||
+			!sameRequestIdentity(existing, request) || request.Operation != OperationCreate {
+			return service.State{}, fmt.Errorf("request %q cannot record task ownership", request.RequestID)
+		}
+		if payload.Task == nil {
+			return service.State{}, fmt.Errorf("request %q ownership event requires an owned task", request.RequestID)
+		}
+		if payload.Task.CreatedByRequestID != request.RequestID {
+			return service.State{}, fmt.Errorf("request %q cannot record ownership created by %q", request.RequestID, payload.Task.CreatedByRequestID)
+		}
+		if err := validateOwnedTaskForRequest(*payload.Task, request); err != nil {
+			return service.State{}, err
+		}
+		if owned, exists := state.Tasks[payload.Task.TaskID]; exists && owned != *payload.Task {
+			return service.State{}, fmt.Errorf("task %q is already owned by another request", payload.Task.TaskID)
+		}
+		state.Tasks[payload.Task.TaskID] = *payload.Task
 	case taskMarkedReadyEvent:
 		if !found || existing.Phase != PhaseWaitingTask || request.Phase != PhaseMarkingReady || !sameRequestIdentity(existing, request) || request.Operation != OperationCreate {
 			return service.State{}, fmt.Errorf("request %q cannot transition to marking ready", request.RequestID)
 		}
 	case taskAssignedEvent:
-		if !found || existing.Phase != PhaseMarkingReady || request.Phase != PhaseAssigning || !sameRequestIdentity(existing, request) || request.Operation != OperationCreate {
+		if !found || (existing.Phase != PhaseWaitingTask && existing.Phase != PhaseMarkingReady) ||
+			request.Phase != PhaseAssigning || !sameRequestIdentity(existing, request) || request.Operation != OperationCreate {
 			return service.State{}, fmt.Errorf("request %q cannot transition to assigning", request.RequestID)
 		}
 	case taskStartRequestedEvent:
-		if !found || existing.Phase != PhaseAssigning || request.Phase != PhaseStarting || !sameRequestIdentity(existing, request) || request.Operation != OperationCreate {
+		if !found || (existing.Phase != PhaseWaitingTask && existing.Phase != PhaseMarkingReady && existing.Phase != PhaseAssigning) ||
+			request.Phase != PhaseStarting || !sameRequestIdentity(existing, request) || request.Operation != OperationCreate {
 			return service.State{}, fmt.Errorf("request %q cannot transition to starting", request.RequestID)
 		}
 	case taskTerminalObservedEvent:
@@ -331,7 +354,7 @@ func (s *webGatewayService) Apply(raw service.State, event contract.StoredEvent)
 			if payload.Task == nil {
 				return service.State{}, fmt.Errorf("create request %q success requires an owned task", request.RequestID)
 			}
-			if err := payload.Task.validate(); err != nil {
+			if err := validateOwnedTaskForRequest(*payload.Task, request); err != nil {
 				return service.State{}, err
 			}
 			if owned, exists := state.Tasks[payload.Task.TaskID]; exists && owned != *payload.Task {
@@ -359,6 +382,17 @@ func (s *webGatewayService) Apply(raw service.State, event contract.StoredEvent)
 		retainTerminalRequest(&state, request.RequestID)
 	}
 	return encodeState(state)
+}
+
+func validateOwnedTaskForRequest(owned OwnedTask, request RequestState) error {
+	if err := owned.validate(); err != nil {
+		return err
+	}
+	if owned.TaskID != request.TaskID || owned.UserID != request.UserID ||
+		owned.Address != request.TaskAddress || owned.InstanceID != request.TaskInstanceID {
+		return fmt.Errorf("owned task %q does not match request %q", owned.TaskID, request.RequestID)
+	}
+	return nil
 }
 
 func sameRequestIdentity(left, right RequestState) bool {

@@ -60,6 +60,31 @@ func TestCreateTask(t *testing.T) {
 	}
 }
 
+func TestCreateTaskFailureReturnsConfirmedTaskID(t *testing.T) {
+	port := runtimePortStub{
+		create: func(context.Context, Actor, CreateTaskInput) (TaskView, error) {
+			return TaskView{TaskID: "task-derived-1"}, errRuntimeAdapterInternal
+		},
+		get:       func(context.Context, Actor, string) (TaskView, error) { return TaskView{}, nil },
+		subscribe: func(context.Context, Actor) (<-chan ApprovalRequest, error) { return nil, nil },
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/tasks", strings.NewReader(`{"input":"do work"}`))
+	request.Header.Set("Content-Type", contentTypeJSON)
+	request.Header.Set(userIDHeader, "user-1")
+	response := httptest.NewRecorder()
+	newAPIHandler(port).ServeHTTP(response, request)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var body errorEnvelope
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Error.Code != "internal_error" || body.Error.TaskID != "task-derived-1" {
+		t.Fatalf("error response lost confirmed task id: %#v", body)
+	}
+}
+
 func TestHomepageAndStaticAssets(t *testing.T) {
 	handler := newAPIHandler(nil)
 	request := httptest.NewRequest(http.MethodGet, "/", nil)

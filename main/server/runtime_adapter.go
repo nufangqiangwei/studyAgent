@@ -272,15 +272,16 @@ func (a *RuntimeAdapter) Present(_ context.Context, presentation webgateway.Pres
 
 func taskPresentationResult(presentation webgateway.Presentation) runtimeResult {
 	if presentation.Error != nil {
+		task := TaskView{TaskID: presentation.Error.TaskID}
 		switch presentation.Error.Code {
 		case "web_task_not_found":
-			return runtimeResult{err: ErrTaskNotFound}
+			return runtimeResult{task: task, err: ErrTaskNotFound}
 		case "web_task_conflict":
-			return runtimeResult{err: ErrTaskConflict}
+			return runtimeResult{task: task, err: ErrTaskConflict}
 		case "runtime_unavailable", "web_runtime_unavailable", "web_task_runtime_unavailable":
-			return runtimeResult{err: ErrRuntimeUnavailable}
+			return runtimeResult{task: task, err: ErrRuntimeUnavailable}
 		default:
-			return runtimeResult{err: errRuntimeAdapterInternal}
+			return runtimeResult{task: task, err: errRuntimeAdapterInternal}
 		}
 	}
 	switch presentation.Operation {

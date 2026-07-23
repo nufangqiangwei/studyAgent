@@ -63,7 +63,10 @@ func TestFullCreateSagaDeclaresCreatesMarksReadyAssignsAndStarts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handle created status: %v", err)
 	}
-	if len(markingReady.Events) != 1 || len(markingReady.Outgoing) != 1 {
+	if len(markingReady.Events) != 2 ||
+		markingReady.Events[0].Type != taskOwnershipRecordedEvent ||
+		markingReady.Events[1].Type != taskMarkedReadyEvent ||
+		len(markingReady.Outgoing) != 1 {
 		t.Fatalf("unexpected mark-ready decision: %#v", markingReady)
 	}
 	if markingReady.Outgoing[0].Type != task.MarkReadyMessageType {
@@ -381,7 +384,8 @@ func TestSagaFailsWhenAgentUnavailable(t *testing.T) {
 	}
 
 	// Create request
-	create := createMessage(t, "message-1", "request-1", "task-1", "user-1", "hello")
+	create := createMessage(t, "message-1", "request-1", "", "user-1", "hello")
+	taskID := derivedTaskID("request-1")
 	recorded, err := svc.Handle(context.Background(), initial, create)
 	if err != nil {
 		t.Fatal(err)
@@ -398,26 +402,142 @@ func TestSagaFailsWhenAgentUnavailable(t *testing.T) {
 		t.Fatal(err)
 	}
 	state = applyDecision(t, svc, state, declared)
+	beforeCreateReply, err := decodeState(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := beforeCreateReply.Tasks[taskID]; exists {
+		t.Fatal("instance declaration must not establish task ownership")
+	}
 
 	// task.status Created → mark_ready succeeds
 	createdStatus := taskStatusReply(t, "request-1", declaration.Address, taskState{
-		taskID: "task-1", userID: "user-1", phase: task.PhaseCreated, input: "hello",
+		taskID: taskID, userID: "user-1", phase: task.PhaseCreated, input: "hello",
 	})
 	markingReady, err := svc.Handle(context.Background(), state, createdStatus)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(markingReady.Events) != 2 || markingReady.Events[0].Type != taskOwnershipRecordedEvent {
+		t.Fatalf("task.create success must atomically record ownership and advance: %#v", markingReady)
+	}
 	state = applyDecision(t, svc, state, markingReady)
+	ownedState, err := decodeState(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owned := ownedState.Tasks[taskID]
+	if owned.TaskID != taskID || owned.UserID != "user-1" ||
+		owned.Address != declaration.Address || owned.CreatedByRequestID != "request-1" {
+		t.Fatalf("task.create success did not persist ownership: %#v", owned)
+	}
 
 	// task.status Ready → assign fails (no default agent configured)
 	readyStatus := taskStatusReply(t, "request-1", declaration.Address, taskState{
-		taskID: "task-1", userID: "user-1", phase: task.PhaseReady, input: "hello",
+		taskID: taskID, userID: "user-1", phase: task.PhaseReady, input: "hello",
 	})
 	failed, err := svc.Handle(context.Background(), state, readyStatus)
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertErrorDecision(t, failed, errAgentUnavailable)
+	presentation := decodePresentation(t, failed.Effects[0].Payload)
+	if presentation.Error.TaskID != taskID {
+		t.Fatalf("post-create failure did not return derived task id: %#v", presentation)
+	}
+	state = applyDecision(t, svc, state, failed)
+	failedState, err := decodeState(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failedState.Tasks[taskID] != owned {
+		t.Fatalf("later failure removed task ownership: %#v", failedState.Tasks[taskID])
+	}
+
+	getDecision, err := svc.Handle(
+		context.Background(),
+		state,
+		getMessage(t, "get-owned", "get-owned", taskID, "user-1"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(getDecision.Outgoing) != 1 || getDecision.Outgoing[0].Type != task.GetMessageType ||
+		getDecision.Outgoing[0].To != owned.Address {
+		t.Fatalf("owned task is unreachable after create saga failure: %#v", getDecision)
+	}
+	unauthorized, err := svc.Handle(
+		context.Background(),
+		state,
+		getMessage(t, "get-other", "get-other", taskID, "user-2"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unauthorizedPresentation := decodePresentation(t, unauthorized.Effects[0].Payload)
+	if unauthorizedPresentation.Error == nil ||
+		unauthorizedPresentation.Error.Code != errTaskNotFound ||
+		unauthorizedPresentation.Error.TaskID != "" {
+		t.Fatalf("cross-user get leaked owned task identity: %#v", unauthorizedPresentation)
+	}
+
+	duplicate, err := svc.Handle(context.Background(), state, create)
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicatePresentation := decodePresentation(t, duplicate.Effects[0].Payload)
+	if duplicatePresentation.Error == nil ||
+		duplicatePresentation.Error.TaskID != taskID ||
+		duplicate.Effects[0].IdempotencyKey != failed.Effects[0].IdempotencyKey {
+		t.Fatalf("duplicate create changed durable failure association: %#v", duplicate)
+	}
+}
+
+func TestTaskCreateReplyAtomicallyRecordsOwnershipWhenNextStepFails(t *testing.T) {
+	svc := &webGatewayService{
+		address: DefaultAddress, instanceID: "gateway-1",
+		clock: fixedClock{fixedTime()}, defaultAgent: "",
+	}
+	initial, err := svc.InitialState(context.Background(), service.Init{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := advanceToPhase(t, svc, initial, PhaseWaitingTask)
+	before, err := decodeState(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found := before.Tasks["task-1"]; found {
+		t.Fatal("task ownership exists before task.create success reply")
+	}
+
+	ready := taskStatusReply(t, "request-1", stableTaskAddr(t), taskState{
+		taskID: "task-1", userID: "user-1", phase: task.PhaseReady, input: "hello",
+	})
+	failed, err := svc.Handle(context.Background(), state, ready)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(failed.Events) != 2 ||
+		failed.Events[0].Type != taskOwnershipRecordedEvent ||
+		failed.Events[1].Type != requestFailedEvent ||
+		len(failed.Effects) != 1 {
+		t.Fatalf("ownership and failure must share one atomic decision: %#v", failed)
+	}
+	presentation := decodePresentation(t, failed.Effects[0].Payload)
+	if presentation.Error == nil || presentation.Error.Code != errAgentUnavailable ||
+		presentation.Error.TaskID != "task-1" {
+		t.Fatalf("atomic post-create failure lost task identity: %#v", presentation)
+	}
+	state = applyDecision(t, svc, state, failed)
+	after, err := decodeState(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Requests["request-1"].Phase != PhaseFailed ||
+		after.Tasks["task-1"].CreatedByRequestID != "request-1" {
+		t.Fatalf("atomic task.create failure state is incomplete: %#v", after)
+	}
 }
 
 func TestGetUsesOwnedMappingAndHidesAuthorization(t *testing.T) {
@@ -515,6 +635,67 @@ func TestErrorRepliesBecomeStableTerminalPresentations(t *testing.T) {
 	})
 }
 
+func TestOwnedTaskSurvivesFailuresAtEveryLaterSagaStage(t *testing.T) {
+	for _, phase := range []RequestPhase{PhaseMarkingReady, PhaseAssigning, PhaseStarting} {
+		t.Run(string(phase), func(t *testing.T) {
+			svc, initial := newTestService(t)
+			state := advanceToPhase(t, svc, initial, phase)
+			before, err := decodeState(state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			owned := before.Tasks["task-1"]
+			if owned.TaskID == "" {
+				t.Fatalf("phase %q lacks ownership after task.create success", phase)
+			}
+
+			payload, err := json.Marshal(service.ReplyError{
+				Code: "task_stage_failed", Message: "later saga stage failed", Retryable: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			failed, err := svc.Handle(context.Background(), state, contract.Message{
+				Kind: contract.MessageReply, Type: task.StatusMessageType, Version: task.ProtocolVersion,
+				From: owned.Address, CorrelationID: "request-1", Payload: payload,
+				Metadata: map[string]string{contract.MetadataReplyError: "true"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertErrorDecision(t, failed, errTaskRequestFailed)
+			presentation := decodePresentation(t, failed.Effects[0].Payload)
+			if presentation.Error.TaskID != owned.TaskID {
+				t.Fatalf("phase %q failure lost task association: %#v", phase, presentation)
+			}
+			state = applyDecision(t, svc, state, failed)
+			after, err := decodeState(state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Tasks["task-1"] != owned {
+				t.Fatalf("phase %q failure changed ownership: %#v", phase, after.Tasks["task-1"])
+			}
+
+			late, err := svc.Handle(context.Background(), state, taskStatusReply(
+				t,
+				"request-1",
+				owned.Address,
+				taskState{
+					taskID: "task-1", userID: "user-1", phase: task.PhaseRunning,
+					assignedTo: "agent.test", activeRunID: "task-1/attempt/1", attempt: 1, input: "hello",
+				},
+			))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(late.Events)+len(late.Outgoing)+len(late.Effects) != 0 {
+				t.Fatalf("late status changed failed request in phase %q: %#v", phase, late)
+			}
+		})
+	}
+}
+
 func TestReSyncOnTaskInvalidTransition(t *testing.T) {
 	// At-least-once delivery can replay a saga-step command after the task has
 	// already advanced.  Instead of failing, the Gateway must re-read the
@@ -566,7 +747,10 @@ func TestReSyncOnTaskInvalidTransition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(completed.Events) != 1 || len(completed.Effects) != 1 {
+	if len(completed.Events) != 2 ||
+		completed.Events[0].Type != taskOwnershipRecordedEvent ||
+		completed.Events[1].Type != requestSucceededEvent ||
+		len(completed.Effects) != 1 {
 		t.Fatalf("re-sync reply must produce terminal success: %#v", completed)
 	}
 	presentation := decodePresentation(t, completed.Effects[0].Payload)
@@ -600,6 +784,9 @@ func TestInvalidTransitionReSyncThenFastForwardsThroughAllPhases(t *testing.T) {
 			mat, _ := decodeState(state)
 			if mat.Requests["request-1"].Phase != PhaseSucceeded {
 				t.Fatalf("from %s: apply did not set succeeded", startPhase)
+			}
+			if owned := mat.Tasks["task-1"]; owned.TaskID != "task-1" || owned.UserID != "user-1" {
+				t.Fatalf("from %s: fast-forward did not retain ownership: %#v", startPhase, owned)
 			}
 		})
 	}
@@ -789,6 +976,37 @@ func TestConcurrentInFlightCreateForSameTaskIDIsRejected(t *testing.T) {
 		t.Fatalf("different TaskID must be allowed: %#v", decision3)
 	}
 
+}
+
+func TestConcurrentCreateRemainsRejectedAfterTaskCreateSucceeds(t *testing.T) {
+	svc, initial := newTestService(t)
+	state := advanceToPhase(t, svc, initial, PhaseMarkingReady)
+	before, err := decodeState(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owned := before.Tasks["task-1"]
+	if owned.TaskID == "" {
+		t.Fatal("task.create success did not establish ownership")
+	}
+
+	conflicting, err := svc.Handle(
+		context.Background(),
+		state,
+		createMessage(t, "msg-2", "request-2", "task-1", "user-1", "hello"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertErrorDecision(t, conflicting, errRequestConflict)
+	state = applyDecision(t, svc, state, conflicting)
+	after, err := decodeState(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Tasks["task-1"] != owned {
+		t.Fatalf("conflicting create replaced ownership: %#v", after.Tasks["task-1"])
+	}
 }
 
 func TestInFlightGetDoesNotConflictWithCreateForSameTaskID(t *testing.T) {

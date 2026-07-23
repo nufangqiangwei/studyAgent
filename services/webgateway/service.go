@@ -261,7 +261,7 @@ func (s *webGatewayService) handleSystemResult(state State, message contract.Mes
 		return service.Decision{}, nil
 	}
 	if isReplyError(message) {
-		return s.failPending(request, errDeclarationFailed, "task instance declaration failed", false)
+		return s.failPending(state, request, errDeclarationFailed, "task instance declaration failed", false)
 	}
 	var result runtimesystem.Result
 	if err := json.Unmarshal(message.Payload, &result); err != nil {
@@ -280,7 +280,7 @@ func (s *webGatewayService) handleSystemResult(state State, message contract.Mes
 		return service.Decision{}, fmt.Errorf("declared task instance does not match request %q", request.RequestID)
 	}
 	if request.Deadline != nil && !request.Deadline.After(s.now()) {
-		return s.failPending(request, errDeadlineExpired, "task deadline has expired", false)
+		return s.failPending(state, request, errDeadlineExpired, "task deadline has expired", false)
 	}
 	next := request.clone()
 	next.Phase, next.UpdatedAt = PhaseWaitingTask, s.now()
@@ -316,7 +316,7 @@ func (s *webGatewayService) handleTaskStatus(state State, message contract.Messa
 		return service.Decision{}, fmt.Errorf("task status for request %q came from unexpected address %q", requestID, message.From)
 	}
 	if isReplyError(message) {
-		return s.handleTaskStatusError(request, message)
+		return s.handleTaskStatusError(state, request, message)
 	}
 	var status task.StatusResponse
 	if err := json.Unmarshal(message.Payload, &status); err != nil {
@@ -346,7 +346,7 @@ func (s *webGatewayService) handleTaskStatus(state State, message contract.Messa
 	return s.progressCreateSaga(state, request, status)
 }
 
-func (s *webGatewayService) handleTaskStatusError(request RequestState, message contract.Message) (service.Decision, error) {
+func (s *webGatewayService) handleTaskStatusError(state State, request RequestState, message contract.Message) (service.Decision, error) {
 	var replyError service.ReplyError
 	if err := json.Unmarshal(message.Payload, &replyError); err != nil {
 		return service.Decision{}, fmt.Errorf("decode task error reply: %w", err)
@@ -357,10 +357,10 @@ func (s *webGatewayService) handleTaskStatusError(request RequestState, message 
 		return s.reSyncTaskState(request)
 	}
 	if request.Operation == OperationGet && (replyError.Code == "task_not_found" || replyError.Code == "task_access_denied") {
-		return s.failPending(request, errTaskNotFound, "task was not found", false)
+		return s.failPending(state, request, errTaskNotFound, "task was not found", false)
 	}
 	if request.Operation == OperationCreate && replyError.Code == "task_conflict" {
-		return s.failPending(request, errRequestConflict, "task id is already bound to different content", false)
+		return s.failPending(state, request, errRequestConflict, "task id is already bound to different content", false)
 	}
 	// At-least-once delivery may replay a saga-step command after the task has
 	// already advanced.  Instead of failing, re-read the task's current state
@@ -368,7 +368,7 @@ func (s *webGatewayService) handleTaskStatusError(request RequestState, message 
 	if request.Operation == OperationCreate && replyError.Code == "task_invalid_transition" {
 		return s.reSyncTaskState(request)
 	}
-	return s.failPending(request, errTaskRequestFailed, "task service rejected the request", replyError.Retryable)
+	return s.failPending(state, request, errTaskRequestFailed, "task service rejected the request", replyError.Retryable)
 }
 
 // handleTaskEvent acknowledges Task owner events. Status-change events remain
@@ -451,6 +451,25 @@ func (s *webGatewayService) taskStateQuery(request RequestState, key string) (se
 // It handles late/duplicate replies by ignoring task phases that belong to previous steps,
 // and handles tasks that are already ahead of the current saga step by skipping forward.
 func (s *webGatewayService) progressCreateSaga(state State, request RequestState, status task.StatusResponse) (service.Decision, error) {
+	var ownershipEvent *service.NewEvent
+	if request.Phase == PhaseWaitingTask {
+		var err error
+		state, ownershipEvent, err = s.confirmTaskOwnership(state, request)
+		if err != nil {
+			return service.Decision{}, err
+		}
+	}
+	decision, err := s.progressCreateSagaStep(state, request, status)
+	if err != nil {
+		return service.Decision{}, err
+	}
+	if ownershipEvent != nil {
+		decision.Events = append([]service.NewEvent{*ownershipEvent}, decision.Events...)
+	}
+	return decision, nil
+}
+
+func (s *webGatewayService) progressCreateSagaStep(state State, request RequestState, status task.StatusResponse) (service.Decision, error) {
 	taskState := status.Task.Clone()
 
 	switch request.Phase {
@@ -458,13 +477,13 @@ func (s *webGatewayService) progressCreateSaga(state State, request RequestState
 		// After task.create, the task should be in Created or beyond.
 		switch {
 		case taskState.Phase == task.PhaseCreated:
-			return s.advanceToMarkReady(request)
+			return s.advanceToMarkReady(state, request)
 		case taskState.Phase == task.PhaseReady && taskState.AssignedTo != "":
 			// Task is already ready and assigned; skip mark_ready and assign.
-			return s.advanceToStart(request)
+			return s.advanceToStart(state, request)
 		case taskState.Phase == task.PhaseReady:
 			// Task is already ready; skip mark_ready.
-			return s.advanceToAssign(request)
+			return s.advanceToAssign(state, request)
 		case taskState.Phase == task.PhaseRunning || taskState.Phase.Terminal():
 			// Task is already executing or done; succeed directly.
 			return s.fastForwardSuccess(state, request, taskState)
@@ -477,9 +496,9 @@ func (s *webGatewayService) progressCreateSaga(state State, request RequestState
 		switch {
 		case taskState.Phase == task.PhaseReady && taskState.AssignedTo != "":
 			// Already assigned; skip assign step.
-			return s.advanceToStart(request)
+			return s.advanceToStart(state, request)
 		case taskState.Phase == task.PhaseReady:
-			return s.advanceToAssign(request)
+			return s.advanceToAssign(state, request)
 		case taskState.Phase == task.PhaseRunning || taskState.Phase.Terminal():
 			return s.fastForwardSuccess(state, request, taskState)
 		case taskState.Phase == task.PhaseCreated:
@@ -493,7 +512,7 @@ func (s *webGatewayService) progressCreateSaga(state State, request RequestState
 		// After task.assign, the task should have AssignedTo set or be Running.
 		switch {
 		case taskState.AssignedTo != "" && (taskState.Phase == task.PhaseReady || taskState.Phase == task.PhaseCreated):
-			return s.advanceToStart(request)
+			return s.advanceToStart(state, request)
 		case taskState.Phase == task.PhaseRunning || taskState.Phase.Terminal():
 			return s.fastForwardSuccess(state, request, taskState)
 		case taskState.Phase == task.PhaseReady && taskState.AssignedTo == "":
@@ -543,6 +562,35 @@ func (s *webGatewayService) progressCreateSaga(state State, request RequestState
 	}
 }
 
+func (s *webGatewayService) confirmTaskOwnership(state State, request RequestState) (State, *service.NewEvent, error) {
+	owned := OwnedTask{
+		TaskID: request.TaskID, UserID: request.UserID, Address: request.TaskAddress,
+		InstanceID: request.TaskInstanceID, CreatedByRequestID: request.RequestID,
+	}
+	if existing, found := state.Tasks[request.TaskID]; found {
+		if err := validateOwnedTaskForRequest(existing, request); err != nil {
+			return State{}, nil, err
+		}
+		return state, nil, nil
+	}
+	event, err := newRequestEvent(
+		"web-task-ownership-recorded/"+request.RequestID,
+		taskOwnershipRecordedEvent,
+		request,
+		&owned,
+	)
+	if err != nil {
+		return State{}, nil, err
+	}
+	tasks := make(map[string]OwnedTask, len(state.Tasks)+1)
+	for taskID, existing := range state.Tasks {
+		tasks[taskID] = existing
+	}
+	tasks[owned.TaskID] = owned
+	state.Tasks = tasks
+	return state, &event, nil
+}
+
 func (s *webGatewayService) fastForwardSuccess(state State, request RequestState, taskState task.State) (service.Decision, error) {
 	result := taskDTOFromState(taskState)
 	if err := result.validate(); err != nil {
@@ -551,9 +599,9 @@ func (s *webGatewayService) fastForwardSuccess(state State, request RequestState
 	return s.succeedPending(state, request, result)
 }
 
-func (s *webGatewayService) advanceToMarkReady(request RequestState) (service.Decision, error) {
+func (s *webGatewayService) advanceToMarkReady(state State, request RequestState) (service.Decision, error) {
 	if request.Deadline != nil && !request.Deadline.After(s.now()) {
-		return s.failPending(request, errDeadlineExpired, "task deadline has expired", false)
+		return s.failPending(state, request, errDeadlineExpired, "task deadline has expired", false)
 	}
 	now := s.now()
 	next := request.clone()
@@ -577,12 +625,12 @@ func (s *webGatewayService) advanceToMarkReady(request RequestState) (service.De
 	}, nil
 }
 
-func (s *webGatewayService) advanceToAssign(request RequestState) (service.Decision, error) {
+func (s *webGatewayService) advanceToAssign(state State, request RequestState) (service.Decision, error) {
 	if request.Deadline != nil && !request.Deadline.After(s.now()) {
-		return s.failPending(request, errDeadlineExpired, "task deadline has expired", false)
+		return s.failPending(state, request, errDeadlineExpired, "task deadline has expired", false)
 	}
 	if s.defaultAgent == "" {
-		return s.failPending(request, errAgentUnavailable, "no default agent is configured for the web gateway", false)
+		return s.failPending(state, request, errAgentUnavailable, "no default agent is configured for the web gateway", false)
 	}
 	now := s.now()
 	next := request.clone()
@@ -606,9 +654,9 @@ func (s *webGatewayService) advanceToAssign(request RequestState) (service.Decis
 	}, nil
 }
 
-func (s *webGatewayService) advanceToStart(request RequestState) (service.Decision, error) {
+func (s *webGatewayService) advanceToStart(state State, request RequestState) (service.Decision, error) {
 	if request.Deadline != nil && !request.Deadline.After(s.now()) {
-		return s.failPending(request, errDeadlineExpired, "task deadline has expired", false)
+		return s.failPending(state, request, errDeadlineExpired, "task deadline has expired", false)
 	}
 	now := s.now()
 	next := request.clone()
@@ -671,20 +719,27 @@ func (s *webGatewayService) succeedPending(state State, request RequestState, re
 	return service.Decision{Events: []service.NewEvent{event}, Effects: []service.PlannedEffect{presentation}}, nil
 }
 
-func (s *webGatewayService) failPending(request RequestState, code, message string, retryable bool) (service.Decision, error) {
-	return s.failureDecision(request, requestFailedEvent, code, message, retryable)
+func (s *webGatewayService) failPending(state State, request RequestState, code, message string, retryable bool) (service.Decision, error) {
+	taskID := ""
+	if owned, found := state.Tasks[request.TaskID]; request.Operation == OperationCreate && found &&
+		owned.UserID == request.UserID &&
+		owned.Address == request.TaskAddress &&
+		owned.InstanceID == request.TaskInstanceID {
+		taskID = owned.TaskID
+	}
+	return s.failureDecision(request, requestFailedEvent, code, message, retryable, taskID)
 }
 
 func (s *webGatewayService) recordNewFailure(request RequestState, code, message string) (service.Decision, error) {
-	return s.failureDecision(request, requestRecordedEvent, code, message, false)
+	return s.failureDecision(request, requestRecordedEvent, code, message, false, "")
 }
 
-func (s *webGatewayService) failureDecision(request RequestState, eventType contract.EventType, code, message string, retryable bool) (service.Decision, error) {
+func (s *webGatewayService) failureDecision(request RequestState, eventType contract.EventType, code, message string, retryable bool, taskID string) (service.Decision, error) {
 	now := s.now()
 	next := request.clone()
 	next.Phase, next.Task = PhaseFailed, nil
 	next.Terminal = nil
-	next.Error = &ErrorDTO{Code: code, Message: message, Retryable: retryable}
+	next.Error = &ErrorDTO{Code: code, Message: message, Retryable: retryable, TaskID: taskID}
 	next.UpdatedAt, next.CompletedAt = now, cloneTime(&now)
 	next.PresentationID = presentationID(next.RequestID, next.Operation, "error/"+code)
 	event, err := newRequestEvent("web-task-request-failed/"+next.RequestID+"/"+code, eventType, next, nil)
