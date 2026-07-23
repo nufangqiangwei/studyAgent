@@ -115,8 +115,34 @@ func (s *webGatewayService) handleCreate(state State, message contract.Message) 
 		InputArtifact: cloneArtifact(input.InputArtifact), Deadline: cloneTime(input.Deadline),
 		CreatedAt: now, UpdatedAt: now,
 	}
-	if _, exists := state.Tasks[request.TaskID]; exists {
-		return s.recordNewFailure(request, errRequestConflict, "task id is already bound to an existing task")
+	if owned, exists := state.Tasks[request.TaskID]; exists {
+		if owned.UserID != request.UserID {
+			return s.recordNewFailure(request, errRequestConflict, "task id is already bound to an existing task")
+		}
+		request.TaskAddress = owned.Address
+		request.TaskInstanceID = owned.InstanceID
+		request.DeclarationCallID = ""
+		request.Phase = PhaseWaitingTask
+		event, err := newRequestEvent("web-task-request-recorded/"+request.RequestID, requestRecordedEvent, request, nil)
+		if err != nil {
+			return service.Decision{}, err
+		}
+		taskPayload, err := json.Marshal(task.CreateRequest{
+			TaskID: request.TaskID, GoalID: request.GoalID, Title: request.Title,
+			Input: request.Input, InputArtifact: cloneArtifact(request.InputArtifact), Deadline: cloneTime(request.Deadline),
+		})
+		if err != nil {
+			return service.Decision{}, err
+		}
+		return service.Decision{
+			Events: []service.NewEvent{event},
+			Outgoing: []service.OutgoingMessage{{
+				Key:  "web-task-create/" + request.RequestID,
+				Kind: contract.MessageCommand, Type: task.CreateMessageType, Version: task.ProtocolVersion,
+				To: request.TaskAddress, ReplyTo: s.address, CorrelationID: request.RequestID,
+				Deadline: cloneTime(request.Deadline), Payload: taskPayload,
+			}},
+		}, nil
 	}
 	declarationPayload, err := json.Marshal(instance.Declaration{
 		InstanceID: request.TaskInstanceID,
@@ -275,6 +301,9 @@ func (s *webGatewayService) handleTaskStatus(state State, message contract.Messa
 		if request.Operation == OperationGet && (replyError.Code == "task_not_found" || replyError.Code == "task_access_denied") {
 			return s.failPending(request, errTaskNotFound, "task was not found", false)
 		}
+		if request.Operation == OperationCreate && replyError.Code == "task_conflict" {
+			return s.failPending(request, errRequestConflict, "task id is already bound to different content", false)
+		}
 		return s.failPending(request, errTaskRequestFailed, "task service rejected the request", replyError.Retryable)
 	}
 	var status task.StatusResponse
@@ -292,7 +321,7 @@ func (s *webGatewayService) handleTaskStatus(state State, message contract.Messa
 	if err := result.validate(); err != nil {
 		return service.Decision{}, fmt.Errorf("validate task status: %w", err)
 	}
-	return s.succeedPending(request, result)
+	return s.succeedPending(state, request, result)
 }
 
 func (s *webGatewayService) duplicateDecision(existing RequestState, incomingOperation Operation, fingerprint string) (service.Decision, error) {
@@ -305,7 +334,7 @@ func (s *webGatewayService) duplicateDecision(existing RequestState, incomingOpe
 	return service.Decision{}, nil
 }
 
-func (s *webGatewayService) succeedPending(request RequestState, result TaskDTO) (service.Decision, error) {
+func (s *webGatewayService) succeedPending(state State, request RequestState, result TaskDTO) (service.Decision, error) {
 	now := s.now()
 	next := request.clone()
 	next.Phase, next.Task, next.Error = PhaseSucceeded, &result, nil
@@ -313,9 +342,12 @@ func (s *webGatewayService) succeedPending(request RequestState, result TaskDTO)
 	next.PresentationID = presentationID(next.RequestID, next.Operation, "success")
 	var owned *OwnedTask
 	if next.Operation == OperationCreate {
-		value := OwnedTask{
-			TaskID: next.TaskID, UserID: next.UserID, Address: next.TaskAddress,
-			InstanceID: next.TaskInstanceID, CreatedByRequestID: next.RequestID,
+		value, found := state.Tasks[next.TaskID]
+		if !found {
+			value = OwnedTask{
+				TaskID: next.TaskID, UserID: next.UserID, Address: next.TaskAddress,
+				InstanceID: next.TaskInstanceID, CreatedByRequestID: next.RequestID,
+			}
 		}
 		owned = &value
 	}

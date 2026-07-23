@@ -41,6 +41,7 @@ type CreateTaskInput struct {
 type TaskView struct {
 	TaskID      string     `json:"task_id"`
 	GoalID      string     `json:"goal_id,omitempty"`
+	UserID      string     `json:"user_id"`
 	Title       string     `json:"title,omitempty"`
 	Input       string     `json:"input,omitempty"`
 	Phase       string     `json:"phase"`

@@ -65,6 +65,7 @@ func (e ErrorDTO) validate() error {
 type TaskDTO struct {
 	TaskID        string                `json:"task_id"`
 	GoalID        string                `json:"goal_id,omitempty"`
+	UserID        string                `json:"user_id"`
 	Title         string                `json:"title,omitempty"`
 	Input         string                `json:"input,omitempty"`
 	InputArtifact *contract.ArtifactRef `json:"input_artifact,omitempty"`
@@ -89,8 +90,9 @@ func (t TaskDTO) clone() TaskDTO {
 }
 
 func (t TaskDTO) validate() error {
-	if strings.TrimSpace(t.TaskID) == "" || !t.Phase.Valid() || t.CreatedAt.IsZero() || t.UpdatedAt.IsZero() {
-		return fmt.Errorf("task presentation identity, phase, and timestamps are required")
+	if strings.TrimSpace(t.TaskID) == "" || strings.TrimSpace(t.UserID) == "" ||
+		!t.Phase.Valid() || t.CreatedAt.IsZero() || t.UpdatedAt.IsZero() {
+		return fmt.Errorf("task presentation identity, user, phase, and timestamps are required")
 	}
 	if (strings.TrimSpace(t.Input) == "") == (t.InputArtifact == nil) {
 		return fmt.Errorf("task presentation requires exactly one input")
@@ -199,7 +201,7 @@ func (f PresenterFunc) Present(ctx context.Context, presentation Presentation) e
 
 func taskDTOFromState(value task.State) TaskDTO {
 	result := TaskDTO{
-		TaskID: value.TaskID, GoalID: value.GoalID, Title: value.Title,
+		TaskID: value.TaskID, GoalID: value.GoalID, UserID: value.UserID, Title: value.Title,
 		Input: value.Input, InputArtifact: cloneArtifact(value.InputArtifact),
 		Phase: value.Phase, Attempt: value.Attempt, ResultRef: cloneArtifact(value.ResultRef),
 		CreatedAt: value.CreatedAt.UTC(), UpdatedAt: value.UpdatedAt.UTC(),

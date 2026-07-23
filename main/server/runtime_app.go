@@ -217,6 +217,9 @@ func buildApplication(ctx context.Context, config serverConfig, options applicat
 		cleanup(nil, runtime)
 		return nil, fmt.Errorf("build Runtime: Web Runtime adapter was not bound")
 	}
+	adapter.setAvailability(func() bool {
+		return runtime.Status() == serviceruntime.RuntimeLive
+	})
 	return &application{
 		runtime: runtime, runtimePort: adapter,
 		runtimeResource: runtime, adapter: adapter, artifacts: artifacts, storage: storage,

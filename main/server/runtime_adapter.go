@@ -53,6 +53,7 @@ type RuntimeAdapter struct {
 	approvalSize  int
 
 	mu            sync.Mutex
+	availability  func() bool
 	closed        bool
 	waiters       map[string]*runtimeWaiter
 	subscriptions map[string]map[uint64]*approvalSubscription
@@ -220,7 +221,7 @@ func receiveCompletedWaiter(waiter *runtimeWaiter) (TaskView, error) {
 func (a *RuntimeAdapter) registerWaiter(requestID string, waiter *runtimeWaiter) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.closed {
+	if a.closed || a.availability != nil && !a.availability() {
 		return ErrRuntimeUnavailable
 	}
 	if _, exists := a.waiters[requestID]; exists {
@@ -300,7 +301,7 @@ func taskPresentationResult(presentation webgateway.Presentation) runtimeResult 
 
 func taskViewFromDTO(value webgateway.TaskDTO) TaskView {
 	result := TaskView{
-		TaskID: value.TaskID, GoalID: value.GoalID, Title: value.Title, Input: value.Input,
+		TaskID: value.TaskID, GoalID: value.GoalID, UserID: value.UserID, Title: value.Title, Input: value.Input,
 		Phase: string(value.Phase), CreatedAt: value.CreatedAt.UTC(), UpdatedAt: value.UpdatedAt.UTC(),
 	}
 	if value.CompletedAt != nil {
@@ -308,6 +309,15 @@ func taskViewFromDTO(value webgateway.TaskDTO) TaskView {
 		result.CompletedAt = &completed
 	}
 	return result
+}
+
+func (a *RuntimeAdapter) setAvailability(check func() bool) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	a.availability = check
+	a.mu.Unlock()
 }
 
 // InteractionPresenter returns the interaction.Presenter view of this Hub.
