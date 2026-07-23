@@ -3,15 +3,14 @@
 `main/server` 是面向 Web 客户端的进程入口，负责提供嵌入式前端主页，以及用户与 Runtime
 之间的协议适配。入口不拥有 Task、Approval 等业务状态。
 
-当前已经提供 Web 专用 Runtime application 组合根：它使用 `DataDir/runtime.db` 和
-`DataDir/artifacts/`，显式注册 LLM、Approval、Capability、Agent、Interaction、Task 与
-Web Gateway，并返回尚未 Start 的 Runtime 和真实 RuntimePort。Task 只注册 Virtual
-Definition；当前 Capability Catalog 为空且授权规则显式 Deny，Agent 也不会声明 Workspace
-能力。
+Web 专用 Runtime application 组合根使用 `DataDir/runtime.db` 和 `DataDir/artifacts/`，
+显式注册 LLM、Approval、Capability、Agent、Interaction、Task 与 Web Gateway。Task 只注册
+Virtual Definition；当前 Capability Catalog 为空且授权规则显式 Deny，Agent 也不会声明
+Workspace 能力。
 
-本阶段仍不改变 HTTP 生命周期：`Run` 尚未构建、Start 或 Serve 该 application，入口默认使用
-不可用端口。因此 REST 仍返回 `503 runtime_unavailable`，审批 WebSocket 在升级前返回同样
-的 `503`。后续生命周期接线不会改变 Handler 的窄 `RuntimePort` 边界。
+生产 `Run` 会先构建 application、恢复并 Start Runtime，再启动 Runtime Serve。只有 Runtime
+已经处于 Live 且 Serve 没有立即失败时才会创建 HTTP Listener 并输出监听地址。启动恢复失败
+不会对外提供 HTTP；Runtime 或 HTTP 发生 fatal 时，另一侧也会停止并完成资源清理。
 
 ## 启动
 
@@ -24,6 +23,11 @@ go run ./main/server
 默认监听 `127.0.0.1:8080`，可通过 `-address` 或 `AGENT_SERVER_ADDRESS` 修改。当前未提供
 TLS 和真实身份认证；所有接口暂时要求 `X-User-ID` 请求头，它只用于固定协议中的用户身份，
 不能视为可信认证结果。
+
+收到进程取消信号后，Server 会先停止接受新 HTTP 请求并等待在途请求，再 Drain Runtime、
+停止 Runtime Serve，最后关闭 application。HTTP 优雅关闭超过 `shutdown-timeout` 时会强制
+关闭连接，但仍继续清理 Runtime、Artifact 与 SQLite 资源。启动或关闭错误只报告操作阶段，
+不会输出 API Key 或 Runtime 内部 Payload。
 
 Web Server 的本地 Runtime 与模型配置同时支持环境变量和命令行参数，命令行参数优先。默认
 使用 `.agent/runtime` 作为 SQLite 与 Artifact 数据目录、`agent-server` 作为 Runtime ID、
