@@ -5,10 +5,14 @@ import (
 	"agent/serviceruntime/building"
 	"agent/serviceruntime/contract"
 	"agent/serviceruntime/host"
+	"agent/serviceruntime/persistence"
 	persistencememory "agent/serviceruntime/persistence/memory"
+	persistencesqlite "agent/serviceruntime/persistence/sqlite"
+	agentservice "agent/services/agent"
 	"agent/services/task"
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -142,6 +146,63 @@ func TestRecoveredOldPlanRevisionUsesItsDefaultAgent(t *testing.T) {
 	}
 }
 
+func TestSQLiteRecoveryMigratesLegacyEmptyMountWithoutLeakingIntoNewRevision(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	clock := fixedClock{fixedTime()}
+	databasePath := filepath.Join(t.TempDir(), "runtime.db")
+	presented := make(chan Presentation, 16)
+
+	storage1, err := persistencesqlite.Open(ctx, databasePath, persistencesqlite.Options{Clock: clock})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime1 := buildGatewayRuntimeConfig(
+		t, ctx, storage1, clock, presented,
+		"v1", "agent.legacy", "agent.legacy", true,
+	)
+	if _, err := runtime1.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	publishCreate(t, ctx, runtime1, "web-create-legacy", "request-legacy", "task-legacy")
+	handleGatewayCommitted(t, ctx, runtime1, DefaultAddress)
+	if err := runtime1.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage1.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	storage2, err := persistencesqlite.Open(ctx, databasePath, persistencesqlite.Options{Clock: clock})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage2.Close()
+	runtime2 := buildGatewayRuntimeConfig(
+		t, ctx, storage2, clock, presented,
+		"v2", "agent.new", "agent.legacy", false,
+	)
+	defer runtime2.Close()
+	if _, err := runtime2.Start(ctx); err != nil {
+		t.Fatalf("start with persisted empty-config Plan: %v", err)
+	}
+	stopServe, serveDone := serveGatewayRuntime(t, ctx, runtime2)
+
+	legacyPresentation := waitForPresentation(t, ctx, presented, "request-legacy")
+	if legacyPresentation.Created == nil ||
+		legacyPresentation.Created.Task.AssignedTo != "agent.legacy" {
+		t.Fatalf("legacy empty mount did not use its explicit migration fallback: %#v", legacyPresentation)
+	}
+
+	publishCreate(t, ctx, runtime2, "web-create-new", "request-new", "task-new")
+	newPresentation := waitForPresentation(t, ctx, presented, "request-new")
+	stopGatewayRuntime(t, stopServe, serveDone)
+	if newPresentation.Created == nil ||
+		newPresentation.Created.Task.AssignedTo != "agent.new" {
+		t.Fatalf("versioned current mount leaked to legacy fallback: %#v", newPresentation)
+	}
+}
+
 func TestRecoveredInFlightCreateStillRejectsDifferentCreateForSameTaskID(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -175,6 +236,92 @@ func TestRecoveredInFlightCreateStillRejectsDifferentCreateForSameTaskID(t *test
 	}
 }
 
+func TestTerminalEventBeforeRunningReplySurvivesRestartAndPresentsTerminalTask(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	clock := fixedClock{fixedTime()}
+	storage := persistencememory.New(clock)
+	defer storage.Close()
+	presented := make(chan Presentation, 16)
+
+	runtime1 := buildGatewayRuntime(t, ctx, storage, clock, presented)
+	if _, err := runtime1.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	publishCreate(t, ctx, runtime1, "web-create-race", "request-race", "task-race")
+	handleGatewayCommitted(t, ctx, runtime1, DefaultAddress)
+	taskAddress, _ := stableTaskIdentity("task-race", "request-race")
+
+	dispatchOutboxUntilIdle(t, ctx, runtime1)
+	handleGatewayCommitted(t, ctx, runtime1, "system.runtime")
+	dispatchEffectsUntilIdle(t, ctx, runtime1)
+	handleGatewayCommitted(t, ctx, runtime1, DefaultAddress)
+	sagaStep(t, ctx, runtime1, taskAddress, DefaultAddress)
+	sagaStep(t, ctx, runtime1, taskAddress, DefaultAddress)
+	sagaStep(t, ctx, runtime1, taskAddress, DefaultAddress)
+
+	// Commit task.start, but deliberately leave its Running status reply in
+	// Outbox. A fast Agent then completes the authoritative Task first.
+	dispatchOutboxUntilIdle(t, ctx, runtime1)
+	handleGatewayCommitted(t, ctx, runtime1, taskAddress)
+	resultRef := contract.ArtifactRef{
+		Store: "test", Key: "tasks/task-race/result.txt", ContentType: "text/plain", Size: 4,
+	}
+	runID := "task-race/attempt/1"
+	completedPayload, err := json.Marshal(agentservice.ExecuteResult{
+		RunID: runID, Phase: agentservice.PhaseCompleted, Output: &resultRef,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime1.Publish(ctx, contract.Message{
+		ID:   "agent-completed-race",
+		Kind: contract.MessageReply, Type: agentservice.CompletedMessageType, Version: agentservice.ProtocolVersion,
+		From: "agent.test", To: taskAddress, CorrelationID: runID, Payload: completedPayload,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	handleGatewayCommitted(t, ctx, runtime1, taskAddress)
+
+	// Publish the same terminal owner fact directly before the older Running
+	// reply is dispatched. Task Service's own durable terminal event remains
+	// pending and later proves duplicate handling.
+	terminalPayload, err := json.Marshal(task.Result{
+		TaskID: "task-race", GoalID: "goal-1", Phase: task.PhaseCompleted,
+		Attempt: 1, ResultRef: &resultRef, CompletedAt: fixedTime(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime1.Publish(ctx, contract.Message{
+		ID:   "task-terminal-race-first",
+		Kind: contract.MessageEvent, Type: task.CompletedEventType, Version: task.ProtocolVersion,
+		From: taskAddress, To: DefaultAddress, CorrelationID: "task-race", Payload: terminalPayload,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	handleGatewayCommitted(t, ctx, runtime1, DefaultAddress)
+	if err := runtime1.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	runtime2 := buildGatewayRuntime(t, ctx, storage, clock, presented)
+	defer runtime2.Close()
+	if _, err := runtime2.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	stopServe, serveDone := serveGatewayRuntime(t, ctx, runtime2)
+	presentation := waitForPresentation(t, ctx, presented, "request-race")
+	stopGatewayRuntime(t, stopServe, serveDone)
+
+	if presentation.Created == nil ||
+		presentation.Created.Task.Phase != task.PhaseCompleted ||
+		presentation.Created.Task.ResultRef == nil ||
+		presentation.Created.Task.ResultRef.Key != resultRef.Key {
+		t.Fatalf("restart presented stale Running state: %#v", presentation)
+	}
+}
+
 // sagaStep runs one round-trip of the Gateway→Task→Gateway cycle:
 // dispatch outbox (command to task) → task handles → dispatch outbox (status to gateway) → gateway handles
 func sagaStep(t *testing.T, ctx context.Context, runtime *serviceruntime.Runtime, taskAddress, gatewayAddress contract.ServiceAddress) {
@@ -188,7 +335,7 @@ func sagaStep(t *testing.T, ctx context.Context, runtime *serviceruntime.Runtime
 func buildGatewayRuntime(
 	t *testing.T,
 	ctx context.Context,
-	storage *persistencememory.Store,
+	storage persistence.RuntimeStorage,
 	clock contract.Clock,
 	presented chan Presentation,
 ) *serviceruntime.Runtime {
@@ -198,11 +345,28 @@ func buildGatewayRuntime(
 func buildGatewayRuntimeRevision(
 	t *testing.T,
 	ctx context.Context,
-	storage *persistencememory.Store,
+	storage persistence.RuntimeStorage,
 	clock contract.Clock,
 	presented chan Presentation,
 	revision contract.PlanRevision,
 	defaultAgent contract.ServiceAddress,
+) *serviceruntime.Runtime {
+	return buildGatewayRuntimeConfig(
+		t, ctx, storage, clock, presented,
+		revision, defaultAgent, defaultAgent, false,
+	)
+}
+
+func buildGatewayRuntimeConfig(
+	t *testing.T,
+	ctx context.Context,
+	storage persistence.RuntimeStorage,
+	clock contract.Clock,
+	presented chan Presentation,
+	revision contract.PlanRevision,
+	defaultAgent contract.ServiceAddress,
+	legacyDefaultAgent contract.ServiceAddress,
+	legacyEmptyMount bool,
 ) *serviceruntime.Runtime {
 	t.Helper()
 	builder, err := serviceruntime.NewBuilder(serviceruntime.BuilderOptions{
@@ -220,7 +384,7 @@ func buildGatewayRuntimeRevision(
 			presented <- presentation.clone()
 			return nil
 		}),
-		DefaultAgent: defaultAgent,
+		DefaultAgent: defaultAgent, LegacyDefaultAgent: legacyDefaultAgent,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -228,9 +392,13 @@ func buildGatewayRuntimeRevision(
 	if err := module.Register(builder); err != nil {
 		t.Fatal(err)
 	}
+	mount := module.Mount(DefaultAddress)
+	if legacyEmptyMount {
+		mount.Config = nil
+	}
 	runtime, err := builder.Build(ctx, building.RuntimeManifest{
 		Runtime:  building.RuntimeSpec{ID: "web-gateway-integration-runtime", Revision: revision},
-		Services: []building.ServiceMount{module.Mount(DefaultAddress)},
+		Services: []building.ServiceMount{mount},
 		Recovery: building.RecoveryPolicy{SnapshotEveryEvents: 1},
 	})
 	if err != nil {

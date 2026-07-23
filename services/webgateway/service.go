@@ -351,6 +351,11 @@ func (s *webGatewayService) handleTaskStatusError(request RequestState, message 
 	if err := json.Unmarshal(message.Payload, &replyError); err != nil {
 		return service.Decision{}, fmt.Errorf("decode task error reply: %w", err)
 	}
+	if request.Operation == OperationCreate && request.Phase == PhaseResolvingTerminal {
+		// No late command/query error can supersede a terminal owner fact that
+		// already committed. Re-read the authoritative Task state instead.
+		return s.reSyncTaskState(request)
+	}
 	if request.Operation == OperationGet && (replyError.Code == "task_not_found" || replyError.Code == "task_access_denied") {
 		return s.failPending(request, errTaskNotFound, "task was not found", false)
 	}
@@ -366,22 +371,56 @@ func (s *webGatewayService) handleTaskStatusError(request RequestState, message 
 	return s.failPending(request, errTaskRequestFailed, "task service rejected the request", replyError.Retryable)
 }
 
-// handleTaskEvent acknowledges task status-change and terminal events.
-// The Gateway is Task Owner and receives these events; they are consumed
-// without updating Gateway state because issue #28 does not require a
-// task-state Projection. Future Projection consumers (issue #37) will
-// use these events to maintain list/timeline views.
+// handleTaskEvent acknowledges Task owner events. Status-change events remain
+// outside Gateway state (the full Projection belongs to issue #37). A terminal
+// event that races ahead of task.start's Running reply is different: the Saga
+// records only that minimum terminal fact and atomically requests task.get so
+// it can finish from Task Service's authoritative full State.
 func (s *webGatewayService) handleTaskEvent(state State, message contract.Message) (service.Decision, error) {
-	// Validate the event came from the task instance that owns it.
-	correlationID := strings.TrimSpace(message.CorrelationID)
-	if correlationID == "" {
+	taskID := strings.TrimSpace(message.CorrelationID)
+	if taskID == "" {
 		return service.Decision{}, nil
 	}
-	_, found := state.Tasks[correlationID]
-	if !found {
+	request, pending, err := taskEventRequest(state, taskID, message.From)
+	if err != nil {
+		return service.Decision{}, err
+	}
+	if message.Type == task.StatusChangedEventType || !pending {
 		return service.Decision{}, nil
 	}
-	return service.Decision{}, nil
+
+	var result task.Result
+	if err := json.Unmarshal(message.Payload, &result); err != nil {
+		return service.Decision{}, fmt.Errorf("decode task terminal event: %w", err)
+	}
+	observation := terminalObservation{MessageType: message.Type, Result: result}
+	if err := observation.validate(request); err != nil {
+		return service.Decision{}, fmt.Errorf("validate task terminal event: %w", err)
+	}
+	if request.Phase == PhaseResolvingTerminal {
+		if !sameTerminalObservation(request.Terminal, &observation) {
+			return service.Decision{}, fmt.Errorf("task terminal event conflicts with the fact already recorded for request %q", request.RequestID)
+		}
+		return service.Decision{}, nil
+	}
+
+	now := s.now()
+	next := request.clone()
+	next.Phase, next.Terminal, next.UpdatedAt = PhaseResolvingTerminal, cloneTerminalObservation(&observation), now
+	event, err := newRequestEvent(
+		"web-task-terminal-observed/"+request.RequestID+"/"+string(result.Phase),
+		taskTerminalObservedEvent,
+		next,
+		nil,
+	)
+	if err != nil {
+		return service.Decision{}, err
+	}
+	query, err := s.taskStateQuery(next, "web-task-terminal-refresh/"+request.RequestID)
+	if err != nil {
+		return service.Decision{}, err
+	}
+	return service.Decision{Events: []service.NewEvent{event}, Outgoing: []service.OutgoingMessage{query}}, nil
 }
 
 // reSyncTaskState sends a task.get query to re-read the task's current phase
@@ -389,16 +428,22 @@ func (s *webGatewayService) handleTaskEvent(state State, message contract.Messag
 // The reply flows through handleTaskStatus → progressCreateSaga, which will
 // fast-forward based on the actual task phase.
 func (s *webGatewayService) reSyncTaskState(request RequestState) (service.Decision, error) {
-	payload, err := json.Marshal(task.GetRequest{TaskID: request.TaskID})
+	query, err := s.taskStateQuery(request, "web-task-resync/"+request.RequestID)
 	if err != nil {
 		return service.Decision{}, err
 	}
-	return service.Decision{
-		Outgoing: []service.OutgoingMessage{{
-			Key:  "web-task-resync/" + request.RequestID,
-			Kind: contract.MessageQuery, Type: task.GetMessageType, Version: task.ProtocolVersion,
-			To: request.TaskAddress, ReplyTo: s.address, CorrelationID: request.RequestID, Payload: payload,
-		}},
+	return service.Decision{Outgoing: []service.OutgoingMessage{query}}, nil
+}
+
+func (s *webGatewayService) taskStateQuery(request RequestState, key string) (service.OutgoingMessage, error) {
+	payload, err := json.Marshal(task.GetRequest{TaskID: request.TaskID})
+	if err != nil {
+		return service.OutgoingMessage{}, err
+	}
+	return service.OutgoingMessage{
+		Key:  key,
+		Kind: contract.MessageQuery, Type: task.GetMessageType, Version: task.ProtocolVersion,
+		To: request.TaskAddress, ReplyTo: s.address, CorrelationID: request.RequestID, Payload: payload,
 	}, nil
 }
 
@@ -475,6 +520,23 @@ func (s *webGatewayService) progressCreateSaga(state State, request RequestState
 			// Duplicate/late reply for a previous step; idempotently ignore.
 			return service.Decision{}, nil
 		}
+	case PhaseResolvingTerminal:
+		// task.start's Running reply may have been queued before the terminal
+		// event. It cannot supersede the durable terminal observation.
+		if !taskState.Phase.Terminal() {
+			return service.Decision{}, nil
+		}
+		actual, err := terminalObservationFromState(taskState)
+		if err != nil {
+			return service.Decision{}, err
+		}
+		if !sameTerminalObservation(request.Terminal, &actual) {
+			return service.Decision{}, fmt.Errorf(
+				"authoritative task state conflicts with terminal fact for request %q",
+				request.RequestID,
+			)
+		}
+		return s.fastForwardSuccess(state, request, taskState)
 	default:
 		// Request already in a non-creating phase; idempotently ignore.
 		return service.Decision{}, nil
@@ -584,6 +646,7 @@ func (s *webGatewayService) succeedPending(state State, request RequestState, re
 	now := s.now()
 	next := request.clone()
 	next.Phase, next.Task, next.Error = PhaseSucceeded, &result, nil
+	next.Terminal = nil
 	next.UpdatedAt, next.CompletedAt = now, cloneTime(&now)
 	next.PresentationID = presentationID(next.RequestID, next.Operation, "success")
 	var owned *OwnedTask
@@ -620,6 +683,7 @@ func (s *webGatewayService) failureDecision(request RequestState, eventType cont
 	now := s.now()
 	next := request.clone()
 	next.Phase, next.Task = PhaseFailed, nil
+	next.Terminal = nil
 	next.Error = &ErrorDTO{Code: code, Message: message, Retryable: retryable}
 	next.UpdatedAt, next.CompletedAt = now, cloneTime(&now)
 	next.PresentationID = presentationID(next.RequestID, next.Operation, "error/"+code)
@@ -709,6 +773,93 @@ func findDeclarationRequest(state State, callID string) (RequestState, bool) {
 		}
 	}
 	return RequestState{}, false
+}
+
+func taskEventRequest(
+	state State,
+	taskID string,
+	from contract.ServiceAddress,
+) (RequestState, bool, error) {
+	if owned, found := state.Tasks[taskID]; found && owned.Address != from {
+		return RequestState{}, false, fmt.Errorf(
+			"task event for %q came from unexpected address %q", taskID, from,
+		)
+	}
+	var pending RequestState
+	foundPending := false
+	for _, request := range state.Requests {
+		if request.TaskID != taskID || request.Operation != OperationCreate || request.Phase.terminal() {
+			continue
+		}
+		if request.TaskAddress != from {
+			return RequestState{}, false, fmt.Errorf(
+				"task event for request %q came from unexpected address %q",
+				request.RequestID,
+				from,
+			)
+		}
+		if foundPending {
+			return RequestState{}, false, fmt.Errorf("multiple create requests are in flight for task %q", taskID)
+		}
+		pending, foundPending = request.clone(), true
+	}
+	return pending, foundPending, nil
+}
+
+func terminalObservationFromState(value task.State) (terminalObservation, error) {
+	if !value.Phase.Terminal() || value.CompletedAt == nil {
+		return terminalObservation{}, fmt.Errorf("task %q is not terminal", value.TaskID)
+	}
+	messageType, ok := terminalMessageType(value.Phase)
+	if !ok {
+		return terminalObservation{}, fmt.Errorf("task %q has unsupported terminal phase %q", value.TaskID, value.Phase)
+	}
+	result := task.Result{
+		TaskID: value.TaskID, GoalID: value.GoalID, Phase: value.Phase, Attempt: value.Attempt,
+		ResultRef: cloneArtifact(value.ResultRef), CompletedAt: value.CompletedAt.UTC(),
+	}
+	if value.LastError != nil {
+		errValue := *value.LastError
+		result.Error = &errValue
+	}
+	return terminalObservation{MessageType: messageType, Result: result}, nil
+}
+
+func sameTerminalObservation(left, right *terminalObservation) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	if left.MessageType != right.MessageType ||
+		left.Result.TaskID != right.Result.TaskID ||
+		left.Result.GoalID != right.Result.GoalID ||
+		left.Result.Phase != right.Result.Phase ||
+		left.Result.Attempt != right.Result.Attempt ||
+		!left.Result.CompletedAt.Equal(right.Result.CompletedAt) {
+		return false
+	}
+	if !sameArtifact(left.Result.ResultRef, right.Result.ResultRef) {
+		return false
+	}
+	return sameTaskError(left.Result.Error, right.Result.Error)
+}
+
+func sameArtifact(left, right *contract.ArtifactRef) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func sameTaskError(left, right *task.Error) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.Code == right.Code &&
+		left.Message == right.Message &&
+		left.Source == right.Source &&
+		left.RunID == right.RunID &&
+		left.Retryable == right.Retryable &&
+		left.OccurredAt.Equal(right.OccurredAt)
 }
 
 func createFingerprint(userID string, input CreateTaskRequest) (string, error) {

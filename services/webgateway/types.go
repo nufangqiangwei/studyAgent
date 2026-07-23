@@ -24,13 +24,14 @@ func (o Operation) valid() bool {
 type RequestPhase string
 
 const (
-	PhaseDeclaringTask RequestPhase = "declaring_task"
-	PhaseWaitingTask   RequestPhase = "waiting_task"
-	PhaseMarkingReady  RequestPhase = "marking_ready"
-	PhaseAssigning     RequestPhase = "assigning"
-	PhaseStarting      RequestPhase = "starting"
-	PhaseSucceeded     RequestPhase = "succeeded"
-	PhaseFailed        RequestPhase = "failed"
+	PhaseDeclaringTask     RequestPhase = "declaring_task"
+	PhaseWaitingTask       RequestPhase = "waiting_task"
+	PhaseMarkingReady      RequestPhase = "marking_ready"
+	PhaseAssigning         RequestPhase = "assigning"
+	PhaseStarting          RequestPhase = "starting"
+	PhaseResolvingTerminal RequestPhase = "resolving_terminal"
+	PhaseSucceeded         RequestPhase = "succeeded"
+	PhaseFailed            RequestPhase = "failed"
 )
 
 func (p RequestPhase) terminal() bool {
@@ -40,6 +41,7 @@ func (p RequestPhase) terminal() bool {
 func (p RequestPhase) valid() bool {
 	switch p {
 	case PhaseDeclaringTask, PhaseWaitingTask, PhaseMarkingReady, PhaseAssigning, PhaseStarting,
+		PhaseResolvingTerminal,
 		PhaseSucceeded, PhaseFailed:
 		return true
 	default:

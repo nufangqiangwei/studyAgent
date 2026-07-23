@@ -15,7 +15,7 @@ func TestPresentationExecutorAndReconcilerUseSamePresentationID(t *testing.T) {
 			delivered = append(delivered, presentation.PresentationID)
 			return nil
 		}),
-		DefaultAgent: "agent.test",
+		DefaultAgent: "agent.test", LegacyDefaultAgent: "agent.legacy",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -72,5 +72,14 @@ func TestModuleRequiresPresenter(t *testing.T) {
 func TestModuleRequiresDefaultAgent(t *testing.T) {
 	if _, err := NewModule(ModuleOptions{Presenter: PresenterFunc(func(_ context.Context, _ Presentation) error { return nil })}); err == nil {
 		t.Fatal("expected default agent requirement")
+	}
+}
+
+func TestModuleRequiresLegacyDefaultAgent(t *testing.T) {
+	if _, err := NewModule(ModuleOptions{
+		Presenter:    PresenterFunc(func(_ context.Context, _ Presentation) error { return nil }),
+		DefaultAgent: "agent.test",
+	}); err == nil {
+		t.Fatal("expected legacy default agent fallback requirement")
 	}
 }

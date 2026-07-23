@@ -16,7 +16,8 @@ import (
 )
 
 type ServiceFactory struct {
-	clock contract.Clock
+	clock              contract.Clock
+	legacyDefaultAgent contract.ServiceAddress
 }
 
 func (f ServiceFactory) Create(_ context.Context, request service.CreateRequest) (service.Service, error) {
@@ -26,13 +27,19 @@ func (f ServiceFactory) Create(_ context.Context, request service.CreateRequest)
 	if request.InstanceID == "" || request.Address == "" {
 		return nil, fmt.Errorf("web gateway service requires instance id and address")
 	}
-	config, err := decodeServiceConfig(request.Config)
-	if err != nil {
-		return nil, err
+	defaultAgent := f.legacyDefaultAgent
+	if len(request.Config) > 0 {
+		config, err := decodeServiceConfig(request.Config)
+		if err != nil {
+			return nil, err
+		}
+		defaultAgent = config.DefaultAgent
+	} else if defaultAgent == "" {
+		return nil, fmt.Errorf("legacy web gateway service config requires a default agent fallback")
 	}
 	return &webGatewayService{
 		address: request.Address, instanceID: request.InstanceID,
-		clock: f.clock, defaultAgent: config.DefaultAgent,
+		clock: f.clock, defaultAgent: defaultAgent,
 	}, nil
 }
 
@@ -71,10 +78,9 @@ func Definition(factory service.Factory) building.ServiceDefinition {
 			{Kind: contract.MessageCommand, Type: GetTaskMessageType, Version: ProtocolVersion},
 			{Kind: contract.MessageReply, Type: runtimesystem.ResultMessageType, Version: runtimesystem.CallVersion},
 			{Kind: contract.MessageReply, Type: task.StatusMessageType, Version: task.ProtocolVersion},
-			// The Gateway is Task Owner. Task Service sends status change and terminal
-			// events to the owner address. The Gateway acknowledges them (no-op) so
-			// they do not become Dead Letter; future Projection consumers will use
-			// these to maintain task list / timeline views.
+			// The Gateway is Task Owner. Status-change events are acknowledged
+			// without building the future Projection; terminal events can also
+			// advance an in-flight create through an authoritative task.get.
 			{Kind: contract.MessageEvent, Type: task.StatusChangedEventType, Version: task.ProtocolVersion},
 			{Kind: contract.MessageEvent, Type: task.CompletedEventType, Version: task.ProtocolVersion},
 			{Kind: contract.MessageEvent, Type: task.FailedEventType, Version: task.ProtocolVersion},

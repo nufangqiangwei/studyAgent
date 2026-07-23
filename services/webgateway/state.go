@@ -4,6 +4,7 @@ import (
 	"agent/serviceruntime/artifact"
 	"agent/serviceruntime/contract"
 	"agent/serviceruntime/service"
+	"agent/services/task"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -26,6 +27,7 @@ type RequestState struct {
 	InputArtifact       *contract.ArtifactRef      `json:"input_artifact,omitempty"`
 	Deadline            *time.Time                 `json:"deadline,omitempty"`
 	Task                *TaskDTO                   `json:"task,omitempty"`
+	Terminal            *terminalObservation       `json:"terminal,omitempty"`
 	Error               *ErrorDTO                  `json:"error,omitempty"`
 	PresentationID      string                     `json:"presentation_id,omitempty"`
 	CreatedAt           time.Time                  `json:"created_at"`
@@ -40,12 +42,73 @@ func (r RequestState) clone() RequestState {
 		value := r.Task.clone()
 		r.Task = &value
 	}
+	r.Terminal = cloneTerminalObservation(r.Terminal)
 	if r.Error != nil {
 		value := *r.Error
 		r.Error = &value
 	}
 	r.CompletedAt = cloneTime(r.CompletedAt)
 	return r
+}
+
+// terminalObservation is the minimum durable fact needed to bridge the race
+// between a Task terminal event and the Task status reply for task.start. It is
+// not a Task projection: the Gateway still queries Task Service for the
+// authoritative full State before completing the create presentation.
+type terminalObservation struct {
+	MessageType contract.MessageType `json:"message_type"`
+	Result      task.Result          `json:"result"`
+}
+
+func cloneTerminalObservation(value *terminalObservation) *terminalObservation {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	cloned.Result.ResultRef = cloneArtifact(value.Result.ResultRef)
+	if value.Result.Error != nil {
+		errValue := *value.Result.Error
+		cloned.Result.Error = &errValue
+	}
+	return &cloned
+}
+
+func (o terminalObservation) validate(request RequestState) error {
+	expectedType, ok := terminalMessageType(o.Result.Phase)
+	if !ok || o.MessageType != expectedType {
+		return fmt.Errorf("terminal message type %q does not match phase %q", o.MessageType, o.Result.Phase)
+	}
+	if strings.TrimSpace(o.Result.TaskID) == "" || o.Result.TaskID != request.TaskID ||
+		o.Result.GoalID != request.GoalID || o.Result.Attempt < 0 || o.Result.CompletedAt.IsZero() {
+		return fmt.Errorf("terminal result identity, attempt, or completion time is invalid")
+	}
+	if o.Result.Phase == task.PhaseCompleted {
+		if o.Result.ResultRef == nil {
+			return fmt.Errorf("completed terminal result requires an artifact")
+		}
+		if err := artifact.ValidateRef(*o.Result.ResultRef); err != nil {
+			return fmt.Errorf("terminal result artifact is invalid: %w", err)
+		}
+	}
+	if o.Result.Phase == task.PhaseFailed || o.Result.Phase == task.PhaseCancelled {
+		if o.Result.Error == nil || strings.TrimSpace(o.Result.Error.Code) == "" || o.Result.Error.OccurredAt.IsZero() {
+			return fmt.Errorf("failed or cancelled terminal result requires an error fact")
+		}
+	}
+	return nil
+}
+
+func terminalMessageType(phase task.Phase) (contract.MessageType, bool) {
+	switch phase {
+	case task.PhaseCompleted:
+		return task.CompletedEventType, true
+	case task.PhaseFailed:
+		return task.FailedEventType, true
+	case task.PhaseCancelled:
+		return task.CancelledEventType, true
+	default:
+		return "", false
+	}
 }
 
 func (r RequestState) validate() error {
@@ -75,34 +138,42 @@ func (r RequestState) validate() error {
 	}
 	switch r.Phase {
 	case PhaseDeclaringTask:
-		if r.Operation != OperationCreate || r.DeclarationCallID == "" || r.Task != nil || r.Error != nil || r.CompletedAt != nil || r.PresentationID != "" {
+		if r.Operation != OperationCreate || r.DeclarationCallID == "" || r.Task != nil || r.Terminal != nil || r.Error != nil || r.CompletedAt != nil || r.PresentationID != "" {
 			return fmt.Errorf("declaring request state is invalid")
 		}
 	case PhaseWaitingTask:
-		if r.TaskAddress == "" || r.TaskInstanceID == "" || r.Task != nil || r.Error != nil || r.CompletedAt != nil || r.PresentationID != "" {
+		if r.TaskAddress == "" || r.TaskInstanceID == "" || r.Task != nil || r.Terminal != nil || r.Error != nil || r.CompletedAt != nil || r.PresentationID != "" {
 			return fmt.Errorf("waiting request state is invalid")
 		}
 	case PhaseMarkingReady:
-		if r.Operation != OperationCreate || r.TaskAddress == "" || r.TaskInstanceID == "" || r.Task != nil || r.Error != nil || r.CompletedAt != nil || r.PresentationID != "" {
+		if r.Operation != OperationCreate || r.TaskAddress == "" || r.TaskInstanceID == "" || r.Task != nil || r.Terminal != nil || r.Error != nil || r.CompletedAt != nil || r.PresentationID != "" {
 			return fmt.Errorf("marking ready request state is invalid")
 		}
 	case PhaseAssigning:
-		if r.Operation != OperationCreate || r.TaskAddress == "" || r.TaskInstanceID == "" || r.Task != nil || r.Error != nil || r.CompletedAt != nil || r.PresentationID != "" {
+		if r.Operation != OperationCreate || r.TaskAddress == "" || r.TaskInstanceID == "" || r.Task != nil || r.Terminal != nil || r.Error != nil || r.CompletedAt != nil || r.PresentationID != "" {
 			return fmt.Errorf("assigning request state is invalid")
 		}
 	case PhaseStarting:
-		if r.Operation != OperationCreate || r.TaskAddress == "" || r.TaskInstanceID == "" || r.Task != nil || r.Error != nil || r.CompletedAt != nil || r.PresentationID != "" {
+		if r.Operation != OperationCreate || r.TaskAddress == "" || r.TaskInstanceID == "" || r.Task != nil || r.Terminal != nil || r.Error != nil || r.CompletedAt != nil || r.PresentationID != "" {
 			return fmt.Errorf("starting request state is invalid")
 		}
+	case PhaseResolvingTerminal:
+		if r.Operation != OperationCreate || r.TaskAddress == "" || r.TaskInstanceID == "" ||
+			r.Task != nil || r.Terminal == nil || r.Error != nil || r.CompletedAt != nil || r.PresentationID != "" {
+			return fmt.Errorf("resolving terminal request state is invalid")
+		}
+		if err := r.Terminal.validate(r); err != nil {
+			return fmt.Errorf("resolving terminal fact is invalid: %w", err)
+		}
 	case PhaseSucceeded:
-		if r.Task == nil || r.Error != nil || r.CompletedAt == nil || r.CompletedAt.IsZero() || r.PresentationID == "" {
+		if r.Task == nil || r.Terminal != nil || r.Error != nil || r.CompletedAt == nil || r.CompletedAt.IsZero() || r.PresentationID == "" {
 			return fmt.Errorf("succeeded request requires task result, presentation, and completion time")
 		}
 		if err := r.Task.validate(); err != nil {
 			return fmt.Errorf("succeeded request task is invalid: %w", err)
 		}
 	case PhaseFailed:
-		if r.Task != nil || r.Error == nil || r.CompletedAt == nil || r.CompletedAt.IsZero() || r.PresentationID == "" {
+		if r.Task != nil || r.Terminal != nil || r.Error == nil || r.CompletedAt == nil || r.CompletedAt.IsZero() || r.PresentationID == "" {
 			return fmt.Errorf("failed request requires error, presentation, and completion time")
 		}
 		if err := r.Error.validate(); err != nil {
@@ -243,8 +314,17 @@ func (s *webGatewayService) Apply(raw service.State, event contract.StoredEvent)
 		if !found || existing.Phase != PhaseAssigning || request.Phase != PhaseStarting || !sameRequestIdentity(existing, request) || request.Operation != OperationCreate {
 			return service.State{}, fmt.Errorf("request %q cannot transition to starting", request.RequestID)
 		}
+	case taskTerminalObservedEvent:
+		if !found || request.Phase != PhaseResolvingTerminal || request.Operation != OperationCreate ||
+			!sameRequestIdentity(existing, request) || existing.Phase.terminal() ||
+			existing.Phase == PhaseDeclaringTask || existing.Phase == PhaseResolvingTerminal {
+			return service.State{}, fmt.Errorf("request %q cannot observe terminal task state from phase %q", request.RequestID, existing.Phase)
+		}
 	case requestSucceededEvent:
-		if !found || (existing.Phase != PhaseWaitingTask && existing.Phase != PhaseMarkingReady && existing.Phase != PhaseAssigning && existing.Phase != PhaseStarting) || request.Phase != PhaseSucceeded || !sameRequestIdentity(existing, request) {
+		if !found || (existing.Phase != PhaseWaitingTask && existing.Phase != PhaseMarkingReady &&
+			existing.Phase != PhaseAssigning && existing.Phase != PhaseStarting &&
+			existing.Phase != PhaseResolvingTerminal) ||
+			request.Phase != PhaseSucceeded || !sameRequestIdentity(existing, request) {
 			return service.State{}, fmt.Errorf("request %q cannot succeed from phase %q", request.RequestID, existing.Phase)
 		}
 		if request.Operation == OperationCreate {

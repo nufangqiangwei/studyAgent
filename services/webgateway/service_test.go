@@ -605,6 +605,106 @@ func TestInvalidTransitionReSyncThenFastForwardsThroughAllPhases(t *testing.T) {
 	}
 }
 
+func TestTerminalEventWinsRaceWithRunningStatus(t *testing.T) {
+	for _, phase := range []task.Phase{
+		task.PhaseCompleted,
+		task.PhaseFailed,
+		task.PhaseCancelled,
+	} {
+		t.Run(string(phase), func(t *testing.T) {
+			svc, initial := newTestService(t)
+			state := advanceToPhase(t, svc, initial, PhaseStarting)
+			taskAddress := stableTaskAddr(t)
+			terminalState, terminalEvent := terminalTaskFixture(t, phase, taskAddress)
+
+			observed, err := svc.Handle(context.Background(), state, terminalEvent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(observed.Events) != 1 || observed.Events[0].Type != taskTerminalObservedEvent ||
+				len(observed.Outgoing) != 1 || observed.Outgoing[0].Type != task.GetMessageType ||
+				len(observed.Effects) != 0 {
+				t.Fatalf("terminal observation decision=%#v", observed)
+			}
+			replayed := applyDecision(t, svc, state, observed)
+			state = applyDecision(t, svc, state, observed)
+			if string(replayed.Data) != string(state.Data) {
+				t.Fatal("terminal observation replay is not deterministic")
+			}
+			materialized, err := decodeState(state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := materialized.Requests["request-1"]
+			if request.Phase != PhaseResolvingTerminal || request.Terminal == nil ||
+				request.Terminal.Result.Phase != phase {
+				t.Fatalf("terminal observation was not durable: %#v", request)
+			}
+
+			duplicate, err := svc.Handle(context.Background(), state, terminalEvent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(duplicate.Events)+len(duplicate.Outgoing)+len(duplicate.Effects) != 0 {
+				t.Fatalf("duplicate terminal event produced work: %#v", duplicate)
+			}
+
+			lateRunning := taskStatusReply(t, "request-1", taskAddress, taskState{
+				taskID: "task-1", userID: "user-1", phase: task.PhaseRunning,
+				assignedTo: "agent.test", activeRunID: "task-1/attempt/1", attempt: 1, input: "hello",
+			})
+			ignored, err := svc.Handle(context.Background(), state, lateRunning)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(ignored.Events)+len(ignored.Outgoing)+len(ignored.Effects) != 0 {
+				t.Fatalf("late Running status superseded terminal fact: %#v", ignored)
+			}
+
+			errorPayload, err := json.Marshal(service.ReplyError{
+				Code: "task_invalid_transition", Message: "task is already terminal",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			lateError, err := svc.Handle(context.Background(), state, contract.Message{
+				Kind: contract.MessageReply, Type: task.StatusMessageType, Version: task.ProtocolVersion,
+				From: taskAddress, CorrelationID: "request-1", Payload: errorPayload,
+				Metadata: map[string]string{contract.MetadataReplyError: "true"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(lateError.Events) != 0 || len(lateError.Outgoing) != 1 ||
+				lateError.Outgoing[0].Type != task.GetMessageType || len(lateError.Effects) != 0 {
+				t.Fatalf("late task error superseded terminal fact: %#v", lateError)
+			}
+
+			terminalStatus := taskStatusReplyFromState(t, "request-1", taskAddress, terminalState)
+			completed, err := svc.Handle(context.Background(), state, terminalStatus)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(completed.Events) != 1 || len(completed.Effects) != 1 {
+				t.Fatalf("terminal refresh did not complete create: %#v", completed)
+			}
+			presentation := decodePresentation(t, completed.Effects[0].Payload)
+			if presentation.Created == nil || presentation.Created.Task.Phase != phase {
+				t.Fatalf("terminal presentation=%#v", presentation)
+			}
+			state = applyDecision(t, svc, state, completed)
+
+			lateAfterCompletion, err := svc.Handle(context.Background(), state, lateRunning)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(lateAfterCompletion.Events)+len(lateAfterCompletion.Outgoing)+len(lateAfterCompletion.Effects) != 0 {
+				t.Fatalf("late Running status overwrote terminal presentation: %#v", lateAfterCompletion)
+			}
+		})
+	}
+}
+
 func advanceToPhase(t *testing.T, svc *webGatewayService, initial service.State, target RequestPhase) service.State {
 	t.Helper()
 	create := createMessage(t, "msg-1", "request-1", "task-1", "user-1", "hello")
@@ -862,6 +962,72 @@ func taskStatusReply(t *testing.T, requestID string, from contract.ServiceAddres
 	return contract.Message{
 		Kind: contract.MessageReply, Type: task.StatusMessageType, Version: task.ProtocolVersion,
 		From: from, To: DefaultAddress, CorrelationID: requestID, UserID: ts.userID, Payload: payload,
+	}
+}
+
+func terminalTaskFixture(
+	t *testing.T,
+	phase task.Phase,
+	from contract.ServiceAddress,
+) (task.State, contract.Message) {
+	t.Helper()
+	now := fixedTime()
+	completedAt := now.Add(time.Minute)
+	value := task.State{
+		TaskID: "task-1", UserID: "user-1", OwnerAddress: DefaultAddress,
+		Phase: phase, AssignedTo: "agent.test", ActiveRunID: "task-1/attempt/1",
+		Attempt: 1, Input: "hello", IdentityFingerprint: "task-fingerprint",
+		CreatedAt: now, UpdatedAt: completedAt, CompletedAt: &completedAt,
+	}
+	switch phase {
+	case task.PhaseCompleted:
+		value.ResultRef = &contract.ArtifactRef{
+			Store: "test", Key: "tasks/task-1/result.txt", ContentType: "text/plain", Size: 4,
+		}
+	case task.PhaseFailed:
+		value.LastError = &task.Error{
+			Code: "agent_failed", Message: "agent failed", Source: "agent",
+			RunID: value.ActiveRunID, OccurredAt: completedAt,
+		}
+	case task.PhaseCancelled:
+		value.LastError = &task.Error{
+			Code: "cancelled", Message: "task was cancelled", Source: "task",
+			RunID: value.ActiveRunID, OccurredAt: completedAt,
+		}
+	default:
+		t.Fatalf("unsupported terminal phase %q", phase)
+	}
+	observation, err := terminalObservationFromState(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(observation.Result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return value, contract.Message{
+		ID:   "terminal-" + string(phase),
+		Kind: contract.MessageEvent, Type: observation.MessageType, Version: task.ProtocolVersion,
+		From: from, To: DefaultAddress, CorrelationID: value.TaskID, Payload: payload,
+	}
+}
+
+func taskStatusReplyFromState(
+	t *testing.T,
+	requestID string,
+	from contract.ServiceAddress,
+	value task.State,
+) contract.Message {
+	t.Helper()
+	cloned := value.Clone()
+	payload, err := json.Marshal(task.StatusResponse{Task: &cloned})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return contract.Message{
+		ID:   "task-status-" + requestID + "-" + string(value.Phase),
+		Kind: contract.MessageReply, Type: task.StatusMessageType, Version: task.ProtocolVersion,
+		From: from, To: DefaultAddress, CorrelationID: requestID, UserID: value.UserID, Payload: payload,
 	}
 }
 

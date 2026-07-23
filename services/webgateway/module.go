@@ -22,9 +22,10 @@ type Registrar interface {
 }
 
 type ModuleOptions struct {
-	Presenter    Presenter
-	Clock        contract.Clock
-	DefaultAgent contract.ServiceAddress
+	Presenter          Presenter
+	Clock              contract.Clock
+	DefaultAgent       contract.ServiceAddress
+	LegacyDefaultAgent contract.ServiceAddress
 }
 
 type Module struct {
@@ -41,6 +42,10 @@ func NewModule(options ModuleOptions) (*Module, error) {
 	if options.DefaultAgent == "" {
 		return nil, fmt.Errorf("web gateway default agent address is required")
 	}
+	options.LegacyDefaultAgent = contract.ServiceAddress(strings.TrimSpace(string(options.LegacyDefaultAgent)))
+	if options.LegacyDefaultAgent == "" {
+		return nil, fmt.Errorf("web gateway legacy default agent fallback is required")
+	}
 	config, err := json.Marshal(serviceConfig{
 		Version: serviceConfigVersion, DefaultAgent: options.DefaultAgent,
 	})
@@ -49,8 +54,13 @@ func NewModule(options ModuleOptions) (*Module, error) {
 	}
 	return &Module{
 		presenter: options.Presenter,
-		factory:   ServiceFactory{clock: options.Clock},
-		config:    config,
+		// legacyDefaultAgent is used only when activating a Plan persisted by
+		// versions whose WebGateway mount had no Config. Versioned mounts always
+		// use their own immutable Config and never consult this fallback.
+		factory: ServiceFactory{
+			clock: options.Clock, legacyDefaultAgent: options.LegacyDefaultAgent,
+		},
+		config: config,
 	}, nil
 }
 

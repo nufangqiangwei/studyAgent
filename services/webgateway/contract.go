@@ -24,6 +24,7 @@ const (
 	taskMarkedReadyEvent          contract.EventType = "webgateway.task.marked_ready"
 	taskAssignedEvent             contract.EventType = "webgateway.task.assigned"
 	taskStartRequestedEvent       contract.EventType = "webgateway.task.start_requested"
+	taskTerminalObservedEvent     contract.EventType = "webgateway.task.terminal_observed"
 	requestSucceededEvent         contract.EventType = "webgateway.request.succeeded"
 	requestFailedEvent            contract.EventType = "webgateway.request.failed"
 	maxInlineTaskInputBytes                          = 16 << 10
