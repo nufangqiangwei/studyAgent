@@ -3,9 +3,15 @@
 `main/server` 是面向 Web 客户端的进程入口，负责提供嵌入式前端主页，以及用户与 Runtime
 之间的协议适配。入口不拥有 Task、Approval 等业务状态。
 
-当前阶段先固定 HTTP/WebSocket 边界。Runtime 侧的 Interaction/Gateway Service 尚未接入，
-入口默认使用不可用端口：REST 返回 `503 runtime_unavailable`，审批 WebSocket 在升级前返回
-同样的 `503`。这样不会用入口内存伪造可恢复的 Runtime 业务状态。
+当前已经提供 Web 专用 Runtime application 组合根：它使用 `DataDir/runtime.db` 和
+`DataDir/artifacts/`，显式注册 LLM、Approval、Capability、Agent、Interaction、Task 与
+Web Gateway，并返回尚未 Start 的 Runtime 和真实 RuntimePort。Task 只注册 Virtual
+Definition；当前 Capability Catalog 为空且授权规则显式 Deny，Agent 也不会声明 Workspace
+能力。
+
+本阶段仍不改变 HTTP 生命周期：`Run` 尚未构建、Start 或 Serve 该 application，入口默认使用
+不可用端口。因此 REST 仍返回 `503 runtime_unavailable`，审批 WebSocket 在升级前返回同样
+的 `503`。后续生命周期接线不会改变 Handler 的窄 `RuntimePort` 边界。
 
 ## 启动
 
@@ -120,10 +126,11 @@ Upgrade: websocket
 本入口不会接收 `approve`/`deny`。审批决议回传将在 Runtime Interaction/Gateway 协议实现后
 另行对接。
 
-## 后续 Runtime 对接
+## Runtime 对接边界
 
-后续实现应在 `services/` 下提供 Interaction/Gateway Service，并为本入口的 `RuntimePort`
-提供适配器：
+当前组合根把 Interaction 和 Web Gateway 的 Presenter 绑定到同一个 Runtime Adapter。
+Adapter 只获得 Runtime 的 durable ingress、Runtime/Plan 标识和 IDGenerator，不获得 Store、
+Host 或业务 Service 对象：
 
 - `CreateTask`：声明 Virtual Task 实例，发送 `task.create`，按持久化相关 ID 接收
   `task.status`。
